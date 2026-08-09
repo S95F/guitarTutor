@@ -23,16 +23,17 @@ const (
 // alternating between count-in and segment rendering. Caller holds mu.
 func (e *Engine) render(left, right []float32) {
 	idx := 0
-	for idx < len(left) && e.playing {
+	for idx < len(left) && e.playing && !e.waiting {
 		if e.ciBeatsLeft > 0 {
 			idx += e.renderCountIn(left[idx:], right[idx:])
 			continue
 		}
 		idx += e.renderSegment(left[idx:], right[idx:])
 	}
-	// Transport stopped (score end) or never started: keep mixing so
-	// voice release tails ring out naturally instead of being cut.
-	// Paused voices contribute silence (Pause sends AllNotesOff).
+	// Transport stopped (score end), halted at a wait point, or never
+	// started: keep mixing so voice release tails ring out naturally
+	// instead of being cut. Paused voices contribute silence (Pause sends
+	// AllNotesOff).
 	if idx < len(left) {
 		e.mix(left[idx:], right[idx:])
 	}
@@ -40,8 +41,9 @@ func (e *Engine) render(left, right []float32) {
 
 // renderSegment renders up to len(left) frames of the current segment and
 // handles the segment boundary when it is reached. It may return 0 when the
-// position sits exactly on a boundary; the boundary handler then advances
-// state so the render loop makes progress.
+// position sits exactly on a boundary (the boundary handler then advances
+// state so the render loop makes progress) or exactly on a wait point (the
+// waiting flag then breaks the render loop).
 func (e *Engine) renderSegment(left, right []float32) int {
 	if !e.segValid {
 		e.buildSegment()
@@ -54,7 +56,9 @@ func (e *Engine) renderSegment(left, right []float32) int {
 		n = 0
 	}
 	if n > 0 {
-		e.processFrames(left[:n], right[:n])
+		// A wait point inside the span stops consumption early: n shrinks
+		// to the frames actually produced before the position froze.
+		n = e.processFrames(left[:n], right[:n])
 	}
 	if e.segFrame >= e.segEnd {
 		e.handleBoundary()
@@ -130,10 +134,13 @@ func (e *Engine) frameOf(tick int64) int {
 	return f
 }
 
-// processFrames renders len(left) frames of the current segment: audio is
-// mixed in runs between action frames, and NoteOn/NoteOff/click actions
-// fire on the exact frame their tick lands in.
-func (e *Engine) processFrames(left, right []float32) {
+// processFrames renders up to len(left) frames of the current segment:
+// audio is mixed in runs between action frames, and NoteOn/NoteOff/click
+// actions fire on the exact frame their tick lands in. It returns the
+// frames consumed — len(left), except when a wait point engages, where
+// consumption stops exactly at the wait point's frame with its actions
+// unfired (see wait.go).
+func (e *Engine) processFrames(left, right []float32) int {
 	n := len(left)
 	base := e.segFrame
 	cur := 0
@@ -167,10 +174,20 @@ func (e *Engine) processFrames(left, right []float32) {
 		if af >= base+n {
 			break
 		}
+		// Wait mode: halt exactly at the frame a user-track NoteOn would
+		// fire, leaving every action on it (the NoteOns included) unfired
+		// until ConfirmWait releases them.
+		if e.waitMode && !e.waitReleased && e.waitPointAt(af) {
+			e.beginWait(af)
+			e.segFrame = af
+			e.pos = e.anchor + float64(e.segFrame)/e.fpt
+			return cur
+		}
 		e.applyActionsAt(af)
 	}
 	e.segFrame = base + n
 	e.pos = e.anchor + float64(e.segFrame)/e.fpt
+	return n
 }
 
 // applyActionsAt fires every pending action that lands on segment frame af:
@@ -198,6 +215,11 @@ func (e *Engine) applyActionsAt(af int) {
 		if !e.muted[ev.Track] {
 			e.voices[ev.Track].NoteOn(ev.Key, ev.Velocity)
 			e.active = append(e.active, activeNote{track: ev.Track, key: ev.Key, end: ev.End})
+		}
+		if e.waitReleased && e.userTrack[ev.Track] {
+			// The released wait's held events are firing now: consume the
+			// release so the next user NoteOn waits anew.
+			e.waitReleased = false
 		}
 		e.nextEvent++
 	}
@@ -379,4 +401,5 @@ func (e *Engine) publish() {
 	e.aCiOn.Store(e.playing && e.ciBeatsLeft > 0)
 	e.aCiLeft.Store(int64(e.ciBeatsLeft))
 	e.aFrames.Store(e.absFrame)
+	e.aWaiting.Store(e.waiting)
 }

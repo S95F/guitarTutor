@@ -25,6 +25,10 @@ type Config struct {
 	// ClarityThreshold is the minimum MPM clarity (0–1) for a frame's
 	// f0 to be trusted.
 	ClarityThreshold float64
+	// NoiseFloorDB is the energy gate in dBFS (negative): a window whose
+	// RMS is below it is unvoiced without any pitch analysis, and onsets
+	// never fire below it. 0 takes the default (-55 dBFS).
+	NoiseFloorDB float64
 }
 
 // DefaultConfig returns the guitar-tuned defaults for a sample rate.
@@ -36,7 +40,42 @@ func DefaultConfig(sampleRate int) Config {
 		MinHz:            60,
 		MaxHz:            1500,
 		ClarityThreshold: 0.80,
+		NoiseFloorDB:     -55,
 	}
+}
+
+// withDefaults fills zero fields with DefaultConfig values and clamps the
+// rest into a usable range.
+func (cfg Config) withDefaults() Config {
+	if cfg.SampleRate <= 0 {
+		cfg.SampleRate = 48000
+	}
+	def := DefaultConfig(cfg.SampleRate)
+	if cfg.Window <= 0 {
+		cfg.Window = def.Window
+	}
+	if cfg.Hop <= 0 {
+		cfg.Hop = def.Hop
+	}
+	if cfg.Hop > cfg.Window {
+		cfg.Hop = cfg.Window
+	}
+	if cfg.MinHz <= 0 {
+		cfg.MinHz = def.MinHz
+	}
+	if cfg.MaxHz <= 0 {
+		cfg.MaxHz = def.MaxHz
+	}
+	if cfg.MaxHz < cfg.MinHz {
+		cfg.MaxHz = cfg.MinHz
+	}
+	if cfg.ClarityThreshold <= 0 {
+		cfg.ClarityThreshold = def.ClarityThreshold
+	}
+	if cfg.NoiseFloorDB == 0 {
+		cfg.NoiseFloorDB = def.NoiseFloorDB
+	}
+	return cfg
 }
 
 // A Frame is one analysis hop's estimate. F0 is 0 when no pitch cleared
@@ -54,20 +93,6 @@ type Frame struct {
 	Onset bool
 }
 
-// A Detector turns a live sample stream into per-hop Frames. Feed it
-// arbitrary-length chunks; it buffers internally and emits one Frame per
-// hop. Not safe for concurrent use; feed it from one goroutine.
-type Detector struct {
-	// contains filtered or unexported fields
-}
-
-// NewDetector builds a detector. Config values of 0 take defaults.
-func NewDetector(cfg Config) *Detector { panic("pitch: not implemented") }
-
-// Process consumes samples and returns the Frames completed by them. The
-// returned slice is reused across calls — copy anything you keep.
-func (d *Detector) Process(samples []float32) []Frame { panic("pitch: not implemented") }
-
 // A Note is a discrete note event assembled from consecutive voiced
 // frames: quantized to the nearest MIDI key with a cents deviation.
 type Note struct {
@@ -81,25 +106,3 @@ type Note struct {
 	// Clarity is the median frame clarity over the note.
 	Clarity float64
 }
-
-// A Tracker assembles Frames into Notes with hysteresis: a note opens
-// after enough consecutive voiced frames agree on a key, follows bends via
-// the cents trajectory, and closes on silence, an onset, or a sustained
-// key change. Not safe for concurrent use.
-type Tracker struct {
-	// contains filtered or unexported fields
-}
-
-// NewTracker builds a tracker sharing the detector's config.
-func NewTracker(cfg Config) *Tracker { panic("pitch: not implemented") }
-
-// Feed consumes detector frames and returns the notes that CLOSED during
-// them. The returned slice is reused across calls — copy anything you keep.
-func (t *Tracker) Feed(frames []Frame) []Note { panic("pitch: not implemented") }
-
-// Current reports the still-sounding note, if any — the tuner view and
-// wait mode read this.
-func (t *Tracker) Current() (Note, bool) { panic("pitch: not implemented") }
-
-// Flush closes and returns any in-progress note (end of stream).
-func (t *Tracker) Flush() []Note { panic("pitch: not implemented") }

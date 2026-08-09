@@ -21,6 +21,10 @@
 //     concurrently: controls take a short mutex; Render never blocks on
 //     anything else and never allocates in steady state.
 //   - UI state queries (PosTick, etc.) are cheap snapshots.
+//   - Wait mode (SetWaitMode; see wait.go) halts the position exactly at
+//     the frame a user-track NoteOn would fire and holds those events
+//     unfired until ConfirmWait releases them on the release frame; frames
+//     keep flowing while waiting (voice tails ring, metronome silent).
 package engine
 
 import (
@@ -82,8 +86,9 @@ type Engine struct {
 	events   []score.NoteEvent // flattened score, sorted by Start
 	scoreEnd int64             // tick just past the last bar
 
-	voices []synth.Voice // one per track
-	muted  []bool        // one per track
+	voices    []synth.Voice // one per track
+	muted     []bool        // one per track
+	userTrack []bool        // one per track: Role == score.RoleUser
 
 	// Transport and control state.
 	playing bool
@@ -96,6 +101,14 @@ type Engine struct {
 	passes       int // completed loop passes since SetLoop
 
 	metronome bool
+
+	// Wait-mode state (see wait.go). While waiting the position is frozen
+	// at the wait point's frame with its events unfired; waitReleased marks
+	// a confirmed wait whose held events fire at the next action frame.
+	waitMode     bool
+	waiting      bool
+	waitReleased bool
+	waitTick     int64 // tick of the wait point; valid while waiting
 
 	// Scheduling state.
 	nextEvent int          // index into events of the next unfired event
@@ -141,6 +154,7 @@ type Engine struct {
 	aCiOn    atomic.Bool
 	aCiLeft  atomic.Int64
 	aFrames  atomic.Int64
+	aWaiting atomic.Bool
 }
 
 // An activeNote is a sounding note awaiting its NoteOff at end.
@@ -171,8 +185,10 @@ func New(sc *score.Score, opts Options) *Engine {
 	}
 	e.voices = make([]synth.Voice, len(sc.Tracks))
 	e.muted = make([]bool, len(sc.Tracks))
+	e.userTrack = make([]bool, len(sc.Tracks))
 	for i, tr := range sc.Tracks {
 		e.voices[i] = opts.Voices(sr, tr.Program)
+		e.userTrack[i] = tr.Role == score.RoleUser
 	}
 	e.active = make([]activeNote, 0, len(e.events)+1)
 	e.accentBuf = renderClickBurst(sr, clickAccentHz)
@@ -200,6 +216,9 @@ func (e *Engine) Play() {
 }
 
 // Pause stops advancing; position is kept. Ringing notes are silenced.
+// An active wait is cleared without firing its held notes; Play re-arms
+// wait mode at the next user note (the same one, if the position has not
+// moved).
 func (e *Engine) Pause() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -210,13 +229,16 @@ func (e *Engine) Pause() {
 	e.allNotesOff()
 	e.stopClicks()
 	e.ciBeatsLeft, e.ciFrameIn = 0, 0
+	e.clearWait()
 	e.publish()
 }
 
 // Playing reports whether the transport is running (count-in included).
 func (e *Engine) Playing() bool { return e.aPlaying.Load() }
 
-// SeekTick moves the position. Ringing notes are silenced.
+// SeekTick moves the position. Ringing notes are silenced. An active wait
+// is cleared without firing its held notes; wait mode re-arms at the next
+// user note at or after the seek target.
 func (e *Engine) SeekTick(tick int64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -230,13 +252,16 @@ func (e *Engine) SeekTick(tick int64) {
 	e.pos = float64(tick)
 	e.segValid = false
 	e.reindexFrom(tick)
+	e.clearWait()
 	e.publish()
 }
 
 // SetLoop sets loop points [a, b) in ticks and enables looping.
 // Callers pass bar boundaries; the engine loops whatever it is given,
 // clamped to the score (a at least 0, b at most the score end). If the
-// clamped span is empty, looping is disabled.
+// clamped span is empty, looping is disabled. An active wait is cleared
+// without firing its held notes (the loop change moves the goalposts);
+// wait mode re-arms at the next user note.
 func (e *Engine) SetLoop(a, b int64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -246,6 +271,7 @@ func (e *Engine) SetLoop(a, b int64) {
 	if b > e.scoreEnd {
 		b = e.scoreEnd
 	}
+	e.clearWait()
 	if b <= a {
 		e.loopOn = false
 		e.segValid = false
@@ -259,12 +285,13 @@ func (e *Engine) SetLoop(a, b int64) {
 	e.publish()
 }
 
-// ClearLoop disables looping.
+// ClearLoop disables looping. Like SetLoop, an active wait is cleared.
 func (e *Engine) ClearLoop() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.loopOn = false
 	e.segValid = false
+	e.clearWait()
 	e.publish()
 }
 
