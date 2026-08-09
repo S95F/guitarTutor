@@ -1,10 +1,11 @@
 # guitarTutor
+[![CI](https://github.com/S95F/guitarTutor/actions/workflows/ci.yml/badge.svg)](https://github.com/S95F/guitarTutor/actions/workflows/ci.yml)
 
 Plug in your electric guitar. Load a piece. Practice it properly.
 
 guitarTutor is an open-source guitar practice companion written in Go. You import a piece of music (or write one in a simple text format), and the app plays it back — synthesized from the score, with a metronome and scrolling tablature — while you play along on a real guitar plugged into your audio interface. Loop the hard bars, slow them down, and let the app ramp the tempo back up as you nail each pass. Later phases listen to your playing and tell you which notes you hit.
 
-> **Status: planning / pre-alpha.** The repository currently contains the project vision, a researched [roadmap](ROADMAP.md), and technology [decisions](docs/DECISIONS.md). There is no usable application yet.
+> **Status: Phase 1 works, pre-alpha.** The pure-Go practice player is functional: import a MIDI file or write a `.gtab` text tab, then loop sections, slow down, and play along with synthesized playback, a metronome, and a scrolling tab view. Live listening (Phase 2) is not started. See the [roadmap](ROADMAP.md) and technology [decisions](docs/DECISIONS.md).
 
 ## Why
 
@@ -23,7 +24,7 @@ guitarTutor aims to fill it with the practice loop every guitarist converges on:
 **Phase 1 — practice player (no microphone needed)**
 
 - Import Standard MIDI Files, or write pieces in a small text tab format. (Until Guitar Pro import lands in Phase 3, get your songs in by exporting MIDI from Guitar Pro, TuxGuitar, or MuseScore — MIDI loses fingering data, so the app infers fingerings and marks them as inferred.)
-- SoundFont-synthesized playback with scrolling tablature and a playback cursor
+- Synthesized playback with scrolling tablature and a playback cursor — a built-in plucked-string voice out of the box, or any SoundFont you supply (`-sf2`)
 - Sample-accurate A/B section looping, gapless or with optional count-in
 - Tempo scaling (percentage or fixed BPM) with an automatic per-pass speed ramp
 - Metronome (visual + audio), track mute/solo
@@ -56,7 +57,7 @@ flowchart LR
     end
     GP --> Score["Score model<br/>(ticks + tempo map)"]
     Score --> Seq["Frame-counted sequencer"]
-    Seq --> Synth["SoundFont synth<br/>(go-meltysynth)"]
+    Seq --> Synth["Synth<br/>(built-in pluck / SoundFont)"]
     Seq --> Tab["Scrolling tab view"]
     Seq --> Click["Metronome"]
     Synth --> Out["Audio out"]
@@ -82,15 +83,31 @@ A few load-bearing design rules, distilled from research into why comparable app
 - **Want your distorted tone while you practice?** Hardware modelers or pedals in front of the interface work transparently. Software amp sims can run alongside if your interface's driver is multi-client (common on Focusrite-class gear: your sim takes the ASIO path while the app captures via WASAPI shared mode). Either way, scoring works best on the clean DI signal — heavy distortion degrades pitch detection.
 - Windows first; macOS and Linux are planned once the practice loop is solid.
 
-## Building
+## Building & running
 
-Requires Go 1.26+.
+Requires Go 1.26+. Phase 1 is pure Go — no C toolchain, no assets to download.
 
 ```bash
 go build ./cmd/guitartutor
 ```
 
-This currently produces a stub binary — the project is in its planning phase.
+Open the practice view on the bundled fixture riff:
+
+```bash
+./guitartutor play testdata/fixture_riff.gtab
+```
+
+Or your own piece: `guitartutor play song.mid` (also `.gtab`). Useful flags: `-scale 0.7` start slowed down, `-countin 4`, `-met` metronome, `-sf2 your.sf2` SoundFont synthesis instead of the built-in pluck.
+
+In the practice view: **space** play/pause, **←/→** seek by bar, **↑/↓** tempo ±5%, **A/B** set loop points at the current bar, **L** clear loop, **M** metronome, **R** progressive speed ramp, **+/−** zoom, **1–9** mute tracks, **Q** quit.
+
+There is also an offline renderer — useful for checking a piece without opening the UI:
+
+```bash
+./guitartutor render -o out.wav testdata/fixture_riff.gtab
+```
+
+To write your own pieces, see the [text tab format](docs/TEXTFORMAT.md).
 
 ## Non-goals
 

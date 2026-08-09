@@ -13,43 +13,45 @@ Guiding principles (violating these is a bug, not a style choice):
 
 ---
 
-## Phase 0 — Foundations (in progress)
+## Phase 0 — Foundations (done)
 
 Decisions and scaffolding that are painful to retrofit.
 
 - [x] Repository, module, license, README, roadmap
-- [ ] **Score model** (`internal/score`): `Score{ppq, tempoMap, timeSigs, tracks}`, `Track{name, tuning, capo}`, bars → beats → `Note{string, fret, tied, technique}`. Pitch is always *derived* from tuning + fret + capo, so altered tunings and transposition are free.
-- [ ] **Text tab format** (`internal/score/textfmt`): a small, alphaTex-*inspired* authoring format — header block (`\title`, `\tempo`, `\tuning`), bars separated by `|`, beats as `fret.string.duration`, chords in parens, technique suffixes (`h p s b v x`). Documented as its own spec; doubles as the test-fixture language. (Deliberately *not* claiming alphaTex compatibility — that would mean inheriting a large evolving grammar.)
-- [ ] **Fixture corpus** (`testdata/`): the same 4-bar riff authored as `.mid`, text tab, `.gp`, and `.musicxml`, collected now; round-trip tests land with each importer (MIDI/text in Phase 1, `.gp`/MusicXML in Phase 3). Every importer bug in this space is a timing-semantics bug; only a shared corpus catches them.
-- [ ] **UI spike** (timeboxed): native Go rendering (Ebitengine is the leading candidate — same ecosystem as our audio output library) vs. embedding [alphaTab](https://github.com/CoderLine/alphaTab) in a webview. alphaTab would gift us Guitar Pro import + tab rendering + synth, at the cost of a webview, JS↔Go IPC, and a second clock domain to reconcile against scoring. This decision reorders half the roadmap — make it here, on evidence, not later.
-- [ ] CI: build + test on Windows; lint; `go vet`.
+- [x] **Score model** (`internal/score`): `Score{ppq, tempoMap, timeSigs, tracks}`, `Track{name, tuning, capo}`, bars → beats → `Note{string, fret, tied, technique}`. Pitch is always *derived* from tuning + fret + capo, so altered tunings and transposition are free.
+- [x] **Text tab format** (`internal/score/textfmt`): a small, alphaTex-*inspired* authoring format — header block (`\title`, `\tempo`, `\tuning`), bars separated by `|`, beats as `fret.string.duration`, chords in parens, technique suffixes (`h p s b v x`). Spec in [docs/TEXTFORMAT.md](docs/TEXTFORMAT.md); doubles as the test-fixture language. (Deliberately *not* claiming alphaTex compatibility — that would mean inheriting a large evolving grammar.)
+- [x] **Fixture corpus** (`testdata/`): the same 4-bar riff authored as `.mid` and text tab, with a cross-format equality test (`internal/integration`); `.gp` and `.musicxml` renditions land with their importers in Phase 3. Every importer bug in this space is a timing-semantics bug; only a shared corpus catches them.
+- [x] **UI spike** — resolved: **native Go with Ebitengine**. The Phase 1 scrolling-tab renderer was built natively at modest cost, which answers the question the spike existed to ask; embedding alphaTab (webview, JS↔Go IPC, second clock domain) is not needed. See DECISIONS D6.
+- [x] CI: build + `go vet` + test on Windows and Ubuntu (`.github/workflows/ci.yml`; first run happens when the repo is pushed).
 
-## Phase 1 — Practice player (pure Go, no guitar input yet)
+## Phase 1 — Practice player (pure Go, no guitar input yet) — mostly done
 
 Roughly "Guitar Pro 8's speed trainer minus the editor" — a product people pay $50–70 for today, and 100% pure Go (single `.exe`, no toolchain drama for contributors).
 
 **Import & playback**
 
-- [ ] Standard MIDI File import via `gitlab.com/gomidi/midi/v2/smf` (the one production-grade Go music library). MIDI has no string/fret data, so tab display uses a *swappable* fret-assignment heuristic, and inferred fingerings are visually marked.
-- [ ] Text tab format parser (from Phase 0 spec)
-- [ ] SoundFont synthesis via a vendored/forked `go-meltysynth` (pure-Go SF2 synth; upstream is complete but dormant — we own our copy). Ship with a freely-licensed GM SoundFont.
-- [ ] **Frame-counted sequencer** (`internal/engine`): our own scheduler over the parsed score — *not* meltysynth's built-in MIDI sequencer — driving NoteOn/NoteOff, metronome accents, loop boundaries, and the tab cursor from one frame counter. Output through `gopxl/beep` v2 streamers into `ebitengine/oto` v3.
-- [ ] Audio pipeline standardized on 48 kHz float32 stereo; convert at boundaries (beep is float64, meltysynth renders float32).
+- [x] Standard MIDI File import via `gitlab.com/gomidi/midi/v2/smf` (the one production-grade Go music library). MIDI has no string/fret data, so tab display uses a *swappable* fret-assignment heuristic (`internal/fretting`, a small Viterbi-style DP), and inferred fingerings are visually marked.
+- [x] Text tab format parser (from Phase 0 spec)
+- [x] Synthesis: a built-in Karplus-Strong plucked-string voice ships as the default (zero assets — nothing to download), with SoundFont SF2 synthesis via `go-meltysynth` when the user supplies a file (`-sf2`). See DECISIONS D2 amendment.
+- [x] **Frame-counted sequencer** (`internal/engine`): our own scheduler over the parsed score — *not* meltysynth's built-in MIDI sequencer — driving NoteOn/NoteOff, metronome accents, loop boundaries, and the tab cursor from one frame counter, rendering directly into `ebitengine/oto` v3 (beep turned out to be unneeded until Phase 3's file decoding).
+- [x] Audio pipeline standardized on 48 kHz float32 stereo
+- [x] Offline WAV renderer (`guitartutor render`) — same engine code path, used by the end-to-end tests
 
 **The practice loop**
 
-- [ ] A/B section looping, sample-accurate at loop boundaries — gapless by default, with optional count-in before each pass
-- [ ] Tempo scaling: relative % and fixed BPM (exact and pitch-true, since playback is synthesized)
-- [ ] Progressive speed trainer: auto-increase tempo N% per completed pass
-- [ ] Metronome: synthesized click (frame-scheduled, never `time.Ticker`), visual beat indicator, accent from the time-signature map
-- [ ] Track mute/solo (practice against the band, drop the guitar track)
+- [x] A/B section looping, sample-accurate at loop boundaries — gapless by default, with optional count-in before each pass (engine-tested to repeat with an exact frame period)
+- [x] Tempo scaling, relative (0.25×–2×), exact and pitch-true since playback is synthesized — *fixed-BPM entry in the UI still pending*
+- [x] Progressive speed trainer: auto-increase tempo per completed pass up to target
+- [x] Metronome: synthesized click (frame-scheduled, never `time.Ticker`), accent from the time-signature map
+- [x] Track mute (keys 1–9) — *solo pending*
+- [x] Count-in before playback and optionally between passes
 
 **UI**
 
-- [ ] Scrolling 2D tablature with playback cursor (renderer per the Phase 0 spike decision)
-- [ ] Piece browser, section selection, transport controls
+- [x] Scrolling 2D tablature with playback cursor, loop region, bar numbers, inferred-fingering marking (native Ebitengine per the Phase 0 spike)
+- [ ] Piece browser (today: pass a file on the command line), fixed-BPM entry, track solo, in-app count-in toggle
 
-**Exit criteria:** a guitarist can import a MIDI file or write a text tab, loop the hard four bars at 60% with a count-in, and ramp back to full speed — with looping that never stutters, drops the first note, or drifts.
+**Exit criteria:** a guitarist can import a MIDI file or write a text tab, loop the hard four bars at 60% with a count-in, and ramp back to full speed — with looping that never stutters, drops the first note, or drifts. *Met, modulo the UI conveniences above; loop sample-accuracy is enforced by engine tests.*
 
 ## Phase 2 — The guitar plugs in
 

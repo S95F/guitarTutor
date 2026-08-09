@@ -1,0 +1,9 @@
+\title Fixture Riff
+\tempo 120
+\time 4/4
+// tuning defaults to E standard, string 6 = low E
+
+0.6.8 3.6.8 5.5.8 0.6.8 3.6.8 5.5.8 3.6.8 0.6.8 |
+2.5.4 0.5.4 2.5.2 |
+(0.6 2.5 2.4).2 r.4 3.6.4 |
+0.6.2 ~0.6.2
