@@ -278,6 +278,12 @@ func TestParseErrors(t *testing.T) {
 		{"unknown technique", "0.6.4q", 1, 6, "unknown technique"},
 		{"tempo not a number", "\\tempo fast", 1, 8, "invalid tempo"},
 		{"tempo zero", "\\tempo 0", 1, 8, "invalid tempo"},
+		{"tempo NaN", "\\tempo NaN", 1, 8, "invalid tempo"},
+		{"tempo denormal", "\\tempo 1e-300", 1, 8, "invalid tempo"},
+		{"tempo infinity", "\\tempo Inf", 1, 8, "invalid tempo"},
+		{"tempo below one", "\\tempo 0.5", 1, 8, "invalid tempo"},
+		{"note above MIDI range", "\\tuning 40 45 50 55 59 100\n\\capo 5\n30.1.1", 3, 1, "MIDI key 135"},
+		{"chord note above MIDI range", "\\tuning 100 101\n(0.2 30.1).1", 2, 6, "MIDI key 131"},
 		{"bad time signature", "\\time 5/3", 1, 7, "invalid time signature"},
 		{"mid-bar tempo", "0.6.2 0.6.4\n\\tempo 140\n0.6.4 |", 2, 1, "between bars"},
 		{"mid-bar time", "0.6.2 0.6.4\n\\time 3/4\n0.6.4 |", 2, 1, "between bars"},
@@ -463,13 +469,96 @@ func TestMisalignedTimeChange(t *testing.T) {
 	}
 }
 
-func TestEmptySource(t *testing.T) {
-	s, err := Parse(nil, "empty")
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
+func TestTempoThenTrackAnchorsAtPieceTick(t *testing.T) {
+	// A \tempo written between one track's last bar and a \track directive
+	// takes effect at the piece tick where it was written (the current
+	// track's end), not at the new track's first bar. Applying it at the
+	// new track's first bar — tick 0 — used to silently replace the header
+	// tempo and retroactively re-tempo the whole piece.
+	s := mustParse(t, "0.6.1 |\n\\tempo 140\n\\track B\n0.6.1 | 0.6.1 |")
+	want := score.TempoMap{
+		{Tick: 0, USPerQuarter: score.USPerQuarter(120)},
+		{Tick: 3840, USPerQuarter: score.USPerQuarter(140)},
 	}
-	if s.Title != "empty" || len(s.Tracks) != 0 || len(s.Events()) != 0 {
-		t.Errorf("empty parse = title %q, %d tracks, %d events; want empty/0/0",
-			s.Title, len(s.Tracks), len(s.Events()))
+	if len(s.Tempos) != len(want) {
+		t.Fatalf("tempo map = %v, want %v", s.Tempos, want)
+	}
+	for i, w := range want {
+		if s.Tempos[i] != w {
+			t.Errorf("tempo[%d] = %v, want %v", i, s.Tempos[i], w)
+		}
+	}
+}
+
+func TestTimeThenTrackAnchorsAtPieceTick(t *testing.T) {
+	// \time anchors the same way: written between the first track's last
+	// bar and \track, it takes effect at the first track's end (tick
+	// 3840), so the new track's first bar is still 4/4 and its second bar
+	// picks up the 3/4.
+	s := mustParse(t, "0.6.1 |\n\\time 3/4\n\\track B\n0.6.1 | 0.6.2. |")
+	wantMeters := score.MeterMap{{Tick: 0, Num: 4, Den: 4}, {Tick: 3840, Num: 3, Den: 4}}
+	if len(s.Meters) != len(wantMeters) {
+		t.Fatalf("meter map = %v, want %v", s.Meters, wantMeters)
+	}
+	for i, w := range wantMeters {
+		if s.Meters[i] != w {
+			t.Errorf("meter[%d] = %v, want %v", i, s.Meters[i], w)
+		}
+	}
+	bars := s.Tracks[1].Bars
+	if len(bars) != 2 {
+		t.Fatalf("track B has %d bars, want 2", len(bars))
+	}
+	if b := bars[0]; b.Start != 0 || b.Num != 4 || b.Den != 4 {
+		t.Errorf("track B bar 1 = start %d meter %d/%d, want 0 4/4", b.Start, b.Num, b.Den)
+	}
+	if b := bars[1]; b.Start != 3840 || b.Num != 3 || b.Den != 4 {
+		t.Errorf("track B bar 2 = start %d meter %d/%d, want 3840 3/4", b.Start, b.Num, b.Den)
+	}
+
+	// A \time-then-track whose new track cannot fill the still-4/4 first
+	// bar stays a loud, positioned error rather than silently re-metering
+	// the piece.
+	_, err := Parse([]byte("0.6.1 |\n\\time 3/4\n\\track B\n0.6.2. |"), "test")
+	if err == nil {
+		t.Fatal("misaligned \\time-then-track parsed, want an error")
+	}
+	var pe *ParseError
+	if !errors.As(err, &pe) {
+		t.Fatalf("error type %T, want *ParseError (%v)", err, err)
+	}
+}
+
+func TestNoteAtMIDICeiling(t *testing.T) {
+	// tuning 97 + capo 0 + fret 30 = exactly 127 is still accepted.
+	s := mustParse(t, "\\tuning 97\n30.1.1")
+	if evs := s.Events(); len(evs) != 1 || evs[0].Key != 127 {
+		t.Errorf("events = %+v, want one event with key 127", evs)
+	}
+}
+
+func TestNoBars(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+	}{
+		{"empty source", ""},
+		{"header only", "\\title Header Only\n\\tempo 90\n\\time 3/4\n"},
+		{"track directives only", "\\track Lead\n\\tuning D2 A2 D3 G3 B3 E4\n\\capo 2\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse([]byte(tt.src), "test")
+			if err == nil {
+				t.Fatalf("Parse(%q) succeeded, want %q error", tt.src, "piece has no bars")
+			}
+			var pe *ParseError
+			if !errors.As(err, &pe) {
+				t.Fatalf("error type %T, want *ParseError (%v)", err, err)
+			}
+			if !strings.Contains(pe.Msg, "piece has no bars") {
+				t.Errorf("message %q does not contain %q", pe.Msg, "piece has no bars")
+			}
+		})
 	}
 }

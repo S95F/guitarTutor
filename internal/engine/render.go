@@ -258,6 +258,14 @@ func (e *Engine) renderCountIn(left, right []float32) int {
 // startCountIn arms a count-in at the effective tempo and the meter in
 // effect at the current position. Caller holds mu.
 func (e *Engine) startCountIn() {
+	e.ciFPB = e.countInFPB()
+	e.ciBeatsLeft = e.countInBeats
+	e.ciFrameIn = 0
+}
+
+// countInFPB returns the frames per count-in beat at the effective tempo
+// and the meter in effect at the current position. Caller holds mu.
+func (e *Engine) countInFPB() int {
 	tick := int64(math.Floor(e.pos))
 	usq := e.sc.Tempos.At(tick)
 	fpt := float64(e.sampleRate) * float64(usq) / (1e6 * score.PPQ * e.scale)
@@ -265,9 +273,7 @@ func (e *Engine) startCountIn() {
 	if fpb < 1 {
 		fpb = 1
 	}
-	e.ciFPB = fpb
-	e.ciBeatsLeft = e.countInBeats
-	e.ciFrameIn = 0
+	return fpb
 }
 
 // mix adds every track voice and the sounding clicks into left/right.
@@ -343,6 +349,17 @@ func (e *Engine) setScale(s float64) {
 	}
 	e.scale = s
 	e.segValid = false
+	if e.ciBeatsLeft > 0 {
+		// Retime an active count-in so the remaining beats sound at the
+		// new tempo: keep the elapsed fraction of the current beat.
+		oldFPB := e.ciFPB
+		newFPB := e.countInFPB()
+		e.ciFrameIn = e.ciFrameIn * newFPB / oldFPB
+		if e.ciFrameIn >= newFPB {
+			e.ciFrameIn = newFPB - 1
+		}
+		e.ciFPB = newFPB
+	}
 }
 
 // publish refreshes the lock-free state snapshots. Caller holds mu.

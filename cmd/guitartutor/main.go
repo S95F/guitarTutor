@@ -29,6 +29,18 @@ import (
 // sampleRate is the project-wide audio rate (ROADMAP "Guiding principles").
 const sampleRate = 48000
 
+// Tempo scale bounds accepted on the command line. The engine clamps out-of-
+// range scales silently; the CLI refuses them loudly instead, so a typo does
+// not render at an unexpected speed.
+const (
+	minScale = 0.25
+	maxScale = 2.0
+)
+
+// maxRenderFrames caps the playing portion of a render (~30 minutes of
+// audio) as a runaway guard.
+const maxRenderFrames = 30 * 60 * sampleRate
+
 var version = "0.1.0-dev"
 
 func main() {
@@ -69,7 +81,7 @@ usage:
 
 play flags:
   -sf2 <path>     SoundFont for synthesis (default: built-in pluck)
-  -scale <f>      initial tempo scale, e.g. 0.7 (default 1.0)
+  -scale <f>      initial tempo scale, 0.25 to 2.0 (default 1.0)
   -met            start with the metronome on
   -countin <n>    count-in beats before playback starts
   -track <n>      tab track to display, 1-based (default: first user track)
@@ -107,6 +119,25 @@ func makeFactory(sf2 string) (synth.Factory, error) {
 	return synth.NewSoundFontFactory(sf), nil
 }
 
+// validateScale rejects tempo scales outside [minScale, maxScale] (NaN
+// included) with an error naming the accepted range.
+func validateScale(s float64) error {
+	if !(s >= minScale && s <= maxScale) {
+		return fmt.Errorf("-scale %v: accepted range is %g to %g", s, minScale, maxScale)
+	}
+	return nil
+}
+
+// ensureTracks returns a clean error for a track-less score. textfmt rejects
+// bar-less pieces at parse time, but MIDI import is a second path that can
+// legitimately produce one; downstream code indexes Tracks unconditionally.
+func ensureTracks(sc *score.Score, action string) error {
+	if len(sc.Tracks) == 0 {
+		return fmt.Errorf("the piece has no tracks; nothing to %s", action)
+	}
+	return nil
+}
+
 // setup loads the piece and builds an engine from shared flags.
 func setup(file, sf2 string, scale float64, met bool, countIn int) (*score.Score, *engine.Engine, error) {
 	sc, warns, err := load(file)
@@ -141,9 +172,15 @@ func runPlay(args []string) error {
 	if fs.NArg() != 1 {
 		return fmt.Errorf("usage: guitartutor play [flags] <file.gtab|file.mid>")
 	}
+	if err := validateScale(*scale); err != nil {
+		return err
+	}
 
 	sc, eng, err := setup(fs.Arg(0), *sf2, *scale, *met, *countIn)
 	if err != nil {
+		return err
+	}
+	if err := ensureTracks(sc, "play"); err != nil {
 		return err
 	}
 
@@ -192,22 +229,21 @@ func runRender(args []string) error {
 	if fs.NArg() != 1 {
 		return fmt.Errorf("usage: guitartutor render [flags] <file.gtab|file.mid>")
 	}
+	if err := validateScale(*scale); err != nil {
+		return err
+	}
 
 	sc, eng, err := setup(fs.Arg(0), *sf2, *scale, *met, *countIn)
 	if err != nil {
 		return err
 	}
-	eng.Play()
+	if err := ensureTracks(sc, "render"); err != nil {
+		return err
+	}
 
-	ciSec := float64(*countIn) * sc.Tempos.TimeAt(sc.Meters.At(0).BeatLen())
-	endSec := (sc.Tempos.TimeAt(sc.End())+ciSec)/(*scale) + *tail
-	total := int(endSec*sampleRate + 0.5)
-	left := make([]float32, total)
-	right := make([]float32, total)
-	const chunk = 4800
-	for off := 0; off < total; off += chunk {
-		n := min(chunk, total-off)
-		eng.RenderFrames(left[off:off+n], right[off:off+n])
+	left, right, err := renderAll(eng, *tail, maxRenderFrames)
+	if err != nil {
+		return err
 	}
 
 	f, err := os.Create(*out)
@@ -218,6 +254,36 @@ func runRender(args []string) error {
 	if err := wavio.Write(f, sampleRate, left, right); err != nil {
 		return err
 	}
-	fmt.Printf("rendered %.1fs to %s\n", endSec, *out)
+	fmt.Printf("rendered %.1fs to %s\n", float64(len(left))/sampleRate, *out)
 	return nil
+}
+
+// renderAll starts eng and renders until the transport stops on its own,
+// then renders tailSec seconds more so release tails ring out. Letting the
+// engine decide the end makes the length exact for any count-in, tempo map,
+// and tempo scale — no precomputed-duration formula to drift out of sync
+// with engine semantics. maxFrames caps the playing portion (a looping or
+// otherwise never-ending engine would grow the buffers forever).
+func renderAll(eng *engine.Engine, tailSec float64, maxFrames int) (left, right []float32, err error) {
+	const chunk = 4800
+	bufL := make([]float32, chunk)
+	bufR := make([]float32, chunk)
+	eng.Play()
+	for eng.Playing() {
+		if len(left) >= maxFrames {
+			return nil, nil, fmt.Errorf("render exceeded %.0f minutes of audio; is a loop enabled?",
+				float64(maxFrames)/sampleRate/60)
+		}
+		eng.RenderFrames(bufL, bufR)
+		left = append(left, bufL...)
+		right = append(right, bufR...)
+	}
+	tailFrames := int(tailSec*sampleRate + 0.5)
+	for off := 0; off < tailFrames; off += chunk {
+		n := min(chunk, tailFrames-off)
+		eng.RenderFrames(bufL[:n], bufR[:n])
+		left = append(left, bufL[:n]...)
+		right = append(right, bufR[:n]...)
+	}
+	return left, right, nil
 }

@@ -42,8 +42,9 @@ const (
 // of the waveform; each output sample is read from the line and replaced by
 // the decayed average of itself and its neighbor (a one-zero lowpass), so
 // high harmonics die faster than the fundamental — the signature of a
-// plucked string. The averaging adds half a sample of loop delay, which the
-// tuning in NoteOn accounts for.
+// plucked string. Because the average reaches half a sample ahead, the
+// effective loop delay is n - 0.5 samples, which the tuning in NoteOn
+// accounts for.
 type ksVoice struct {
 	delay []float32 // preallocated to the pluckMinKey period
 	n     int       // active delay length in samples
@@ -157,11 +158,12 @@ func (p *pluck) NoteOn(key int, velocity float64) {
 		key = pluckMinKey
 	}
 
-	// The loop's averaging filter adds half a sample of delay, so a line
-	// of n samples resonates at sampleRate/(n+0.5): subtract the half
-	// sample before rounding.
+	// The loop averages each sample with its successor (delays n and
+	// n-1), so the effective loop delay is n - 0.5 samples and the line
+	// resonates at sampleRate/(n-0.5). Solving sampleRate/(n-0.5) = f
+	// means adding the half sample back before rounding.
 	f := keyFreq(key)
-	n := int(math.Round(float64(p.sampleRate)/f - 0.5))
+	n := int(math.Round(float64(p.sampleRate)/f + 0.5))
 	v := p.alloc()
 	if n < 2 {
 		n = 2

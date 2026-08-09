@@ -128,18 +128,26 @@ func (im *importer) run(sm *smf.SMF) (*score.Score, []string, error) {
 	// Normalize every track's notes, then size the shared bar structure
 	// to the latest note end across all tracks.
 	var end int64
+	kept := 0
 	for _, rt := range raws {
 		im.normalize(rt)
+		kept += len(rt.notes)
 		for _, n := range rt.notes {
 			if n.end > end {
 				end = n.end
 			}
 		}
 	}
+	if kept == 0 {
+		// Every note was dropped during normalization; the warnings
+		// explain why.
+		return nil, im.warns, fmt.Errorf("no playable notes in file")
+	}
 	specs, err := im.barSpecs(s.Meters, end)
 	if err != nil {
 		return nil, im.warns, err
 	}
+	s.Meters = rebaseMeters(s.Meters, specs)
 
 	for i, rt := range raws {
 		role := score.RoleBacking
@@ -187,6 +195,9 @@ func (im *importer) readTrack(ti int, tr smf.Track) *rawTrack {
 				open[k] = q[1:]
 			}
 		case msg.GetProgramChange(&ch, &prog):
+			if ch == 9 {
+				continue
+			}
 			if rt.program < 0 {
 				rt.program = int(prog)
 			}
@@ -230,7 +241,15 @@ func (im *importer) readMaps(sm *smf.SMF) (score.TempoMap, score.MeterMap) {
 			var num, den uint8
 			switch {
 			case ev.Message.GetMetaTempo(&bpm):
-				tempos = append(tempos, score.Tempo{Tick: im.scale(abs), USPerQuarter: score.USPerQuarter(bpm)})
+				// A zero tempo payload (0 microseconds per quarter)
+				// decodes as an infinite BPM and would produce a
+				// degenerate tempo the score model rejects: skip it
+				// and let the tick-0 default supply 120 BPM.
+				if usq := score.USPerQuarter(bpm); usq > 0 {
+					tempos = append(tempos, score.Tempo{Tick: im.scale(abs), USPerQuarter: usq})
+				} else {
+					im.warnf("skipped tempo event at tick %d: non-positive microseconds per quarter", im.scale(abs))
+				}
 			case ev.Message.GetMetaMeter(&num, &den):
 				meters = append(meters, score.Meter{Tick: im.scale(abs), Num: int(num), Den: int(den)})
 			}
@@ -375,6 +394,40 @@ func (im *importer) barSpecs(meters score.MeterMap, end int64) ([]barSpec, error
 		}
 	}
 	return specs, nil
+}
+
+// rebaseMeters rewrites the meter map onto the ticks the bar structure
+// actually used: a change that fell inside a bar (which barSpecs applied
+// at the next barline) moves to that barline, and when two changes land
+// on the same tick the later one wins — so the stored map and the bars
+// always agree.
+func rebaseMeters(meters score.MeterMap, specs []barSpec) score.MeterMap {
+	if len(specs) == 0 {
+		return meters
+	}
+	starts := make(map[int64]bool, len(specs))
+	for _, bs := range specs {
+		starts[bs.start] = true
+	}
+	last := specs[len(specs)-1]
+	scoreEnd := last.start + int64(last.num)*(4*score.PPQ/int64(last.den))
+	out := make(score.MeterMap, len(meters))
+	copy(out, meters)
+	for i := range out {
+		if out[i].Tick >= scoreEnd || starts[out[i].Tick] {
+			continue
+		}
+		next := scoreEnd
+		for _, bs := range specs {
+			if bs.start > out[i].Tick {
+				next = bs.start
+				break
+			}
+		}
+		out[i].Tick = next
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Tick < out[j].Tick })
+	return dedupe(out, func(m score.Meter) int64 { return m.Tick })
 }
 
 // buildTrack converts one normalized raw track into a score.Track. Within

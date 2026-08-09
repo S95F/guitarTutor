@@ -516,6 +516,120 @@ func TestRenderFramesDoesNotAllocate(t *testing.T) {
 	}
 }
 
+// TestSetMetronomeMidPlayNoStaleClicks enables the metronome after playing
+// past several beats with it off. Regression: nextBeat only advances while
+// the click is on, so a stale beat schedule fired every missed beat since
+// the segment anchor as one stacked click blast. The track is muted so the
+// output is click-only: the block up to the next real beat boundary must be
+// silent, and that boundary must sound exactly one click.
+func TestSetMetronomeMidPlayNoStaleClicks(t *testing.T) {
+	e, _ := newFixtureEngine(t, Options{})
+	e.SetTrackMuted(0, true) // click-only output
+	e.Play()
+	renderN(e, 60000, 480) // 2.5 beats at 24000 frames/beat, metronome off
+	e.SetMetronome(true)
+
+	// Frames 60000..71999 precede the next beat boundary (frame 72000):
+	// no click may sound in them.
+	l := make([]float32, 12000)
+	r := make([]float32, 12000)
+	e.RenderFrames(l, r)
+	for i, s := range l {
+		if s != 0 {
+			t.Fatalf("stale click: nonzero sample %v at frame %d, before the next beat boundary (72000)",
+				s, 60000+i)
+		}
+	}
+
+	// The beat boundary itself must click — a single click, not a stack.
+	l2 := make([]float32, 300)
+	r2 := make([]float32, 300)
+	e.RenderFrames(l2, r2)
+	peak := 0.0
+	for _, s := range l2 {
+		if a := math.Abs(float64(s)); a > peak {
+			peak = a
+		}
+	}
+	if peak < 0.05 {
+		t.Fatalf("no click at the beat boundary after SetMetronome(true): peak %v", peak)
+	}
+	if peak > 0.45 {
+		t.Errorf("stacked clicks at the beat boundary: peak %v, want one click (max ~0.4)", peak)
+	}
+}
+
+// TestSetLoopClampsBeyondScoreEnd sets a loop whose end point lies past the
+// score end. Regression: buildSegment never classified the boundary as the
+// loop end, so the transport silently stopped at the score end with zero
+// passes. The points must clamp to the score and the loop must wrap.
+func TestSetLoopClampsBeyondScoreEnd(t *testing.T) {
+	var reg []*stubVoice
+	sc := fixtureScore(t)
+	e := New(sc, Options{Voices: newStubFactory(&reg)})
+	e.SetLoop(-960, sc.End()+3840)
+	if a, b, on := e.Loop(); !on || a != 0 || b != sc.End() {
+		t.Fatalf("Loop after clamping = (%d, %d, %v), want (0, %d, true)", a, b, on, sc.End())
+	}
+	e.Play()
+	renderN(e, 390000, 480) // past the score end at frame 384000
+	if !e.Playing() {
+		t.Fatal("Playing = false after the clamped loop end: transport stopped instead of looping")
+	}
+	if got := e.PassCount(); got < 1 {
+		t.Errorf("PassCount = %d, want >= 1", got)
+	}
+	// Pass 2 restarts the riff exactly at the wrap frame.
+	v := reg[0]
+	if len(v.ons) < 17 {
+		t.Fatalf("got %d NoteOns, want at least 17 (16 in pass 1 plus the pass-2 restart)", len(v.ons))
+	}
+	if g := v.ons[16]; g.frame != 384000 || g.key != 40 {
+		t.Errorf("pass-2 first NoteOn = (frame %d, key %d), want (frame 384000, key 40)", g.frame, g.key)
+	}
+}
+
+// TestTempoScaleDuringCountIn halves the tempo one-and-a-quarter beats into
+// a four-beat count-in. Regression: ciFPB kept the old tempo, so the user
+// was counted in at one tempo and the piece started at another. The elapsed
+// fraction of the current beat carries over (6000/24000 becomes 12000/48000),
+// the remaining beats consume 48000 frames each, and the first NoteOn lands
+// where the new tempo predicts.
+func TestTempoScaleDuringCountIn(t *testing.T) {
+	e, v := newFixtureEngine(t, Options{CountInBeats: 4})
+	e.Play()
+	renderN(e, 30000, 480) // beat 1 (24000 frames) + 6000 into beat 2
+	if on, left := e.CountingIn(); !on || left != 3 {
+		t.Fatalf("CountingIn before rescale = (%v, %d), want (true, 3)", on, left)
+	}
+	e.SetTempoScale(0.5) // beats are now 48000 frames; 12000 of beat 2 elapsed
+	renderN(e, 35999, 480)
+	if on, left := e.CountingIn(); !on || left != 3 {
+		t.Errorf("CountingIn one frame before rescaled beat 2 ends = (%v, %d), want (true, 3)", on, left)
+	}
+	renderN(e, 1, 1) // beat 2 ends exactly 36000 frames after the rescale
+	if on, left := e.CountingIn(); !on || left != 2 {
+		t.Errorf("CountingIn at rescaled beat 2 end = (%v, %d), want (true, 2)", on, left)
+	}
+	if got := e.PosTick(); got != 0 {
+		t.Errorf("PosTick during count-in = %d, want 0", got)
+	}
+	renderN(e, 96000, 480) // beats 3 and 4 at 48000 frames each
+	if on, left := e.CountingIn(); on || left != 0 {
+		t.Errorf("CountingIn after count-in = (%v, %d), want (false, 0)", on, left)
+	}
+	renderN(e, 24001, 480)
+	if len(v.ons) < 2 {
+		t.Fatalf("got %d NoteOns after count-in, want at least 2", len(v.ons))
+	}
+	if g := v.ons[0]; g.frame != 162000 || g.key != 40 {
+		t.Errorf("first NoteOn = (frame %d, key %d), want (frame 162000, key 40)", g.frame, g.key)
+	}
+	if g := v.ons[1]; g.frame != 186000 || g.key != 43 {
+		t.Errorf("second NoteOn = (frame %d, key %d), want (frame 186000, key 43): tick spacing must use the new tempo", g.frame, g.key)
+	}
+}
+
 // TestReadMatchesRenderFrames renders the same score twice — once through
 // RenderFrames, once through Read with a non-multiple-of-8 byte length —
 // and requires bit-identical sample streams.

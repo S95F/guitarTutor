@@ -50,14 +50,14 @@ func peak(x []float32) float64 {
 }
 
 // estimateFundamental estimates the fundamental of x in Hz by normalized
-// autocorrelation over lags spanning 30-1000 Hz. Every multiple of the true
+// autocorrelation over lags spanning 30-1500 Hz. Every multiple of the true
 // period correlates equally well, so the global maximum alone is
 // octave-ambiguous: it takes the smallest local-maximum lag within 5% of
 // the global maximum, then refines it by parabolic interpolation.
 func estimateFundamental(t *testing.T, x []float32, sampleRate int) float64 {
 	t.Helper()
 	const window = 8192
-	minLag := sampleRate / 1000
+	minLag := sampleRate / 1500
 	maxLag := sampleRate / 30
 	if len(x) < window+maxLag {
 		t.Fatalf("estimateFundamental: need %d samples, have %d", window+maxLag, len(x))
@@ -100,17 +100,54 @@ func estimateFundamental(t *testing.T, x []float32, sampleRate int) float64 {
 	return 0
 }
 
+// centsBetween returns the musical interval from a to b in cents.
+func centsBetween(a, b float64) float64 {
+	return 1200 * math.Log2(b/a)
+}
+
+// bestDelayFreq returns the pitch nearest f (in cents) that an integer
+// delay line can produce. The Karplus-Strong loop resonates at
+// sampleRate/(n - 0.5) for integer n, so this is the best tuning any
+// correctly tuned voice can achieve for f; at high keys it can sit well
+// over 10 cents from f, which is why the high-key tests compare against it
+// rather than against f directly.
+func bestDelayFreq(sampleRate int, f float64) float64 {
+	center := int(math.Round(float64(sampleRate)/f + 0.5))
+	bestF, bestErr := 0.0, math.Inf(1)
+	for n := center - 2; n <= center+2; n++ {
+		if n < 2 {
+			continue
+		}
+		fn := float64(sampleRate) / (float64(n) - 0.5)
+		if e := math.Abs(centsBetween(f, fn)); e < bestErr {
+			bestF, bestErr = fn, e
+		}
+	}
+	return bestF
+}
+
 func TestPluckFundamental(t *testing.T) {
 	const sr = 48000
 	tests := []struct {
 		name string
 		key  int
 		want float64 // Hz
+		// cents > 0 asserts in cents against the best achievable
+		// delay-line pitch for want (integer-length quantization makes an
+		// absolute-Hz bound meaningless at high keys); cents == 0 asserts
+		// want ±1 Hz.
+		cents float64
 	}{
-		{"low E open", 40, 82.4069},
-		{"A open", 45, 110.0},
-		{"D open", 50, 146.832},
-		{"below range clamps to C1", 0, 32.7032},
+		{"low E open", 40, 82.4069, 0},
+		{"A open", 45, 110.0, 0},
+		{"D open", 50, 146.832, 0},
+		{"below range clamps to C1", 0, 32.7032, 0},
+		// High keys are the regression guard for the loop-delay sign: the
+		// averaging filter shortens the loop to n - 0.5 samples, and
+		// tuning for n + 0.5 instead played ~24 cents sharp at key 76 and
+		// ~59 cents sharp at key 86 (48 kHz).
+		{"high E 12th fret", 76, 659.2551, 5},
+		{"high E 22nd fret", 86, 1174.659, 5},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -123,7 +160,13 @@ func TestPluckFundamental(t *testing.T) {
 			// attack; half a second in, only the periodic string
 			// resonance remains.
 			got := estimateFundamental(t, mono[sr/2:], sr)
-			if math.Abs(got-tt.want) > 1.0 {
+			if tt.cents > 0 {
+				best := bestDelayFreq(sr, tt.want)
+				if off := centsBetween(best, got); math.Abs(off) > tt.cents {
+					t.Errorf("fundamental = %.3f Hz, %+.1f cents from best achievable %.3f Hz (target %.3f Hz); want within %.1f cents",
+						got, off, best, tt.want, tt.cents)
+				}
+			} else if math.Abs(got-tt.want) > 1.0 {
 				t.Errorf("fundamental = %.3f Hz, want %.3f ±1 Hz", got, tt.want)
 			}
 		})

@@ -134,19 +134,9 @@ func (a *App) Update() error {
 	case inpututil.IsKeyJustPressed(ebiten.KeyDown):
 		eng.SetTempoScale(eng.TempoScale() - 0.05)
 	case inpututil.IsKeyJustPressed(ebiten.KeyA):
-		b := bars[a.barAt(eng.PosTick())]
-		_, end, on := eng.Loop()
-		if !on || end <= b.Start {
-			end = b.Start + b.Len()
-		}
-		eng.SetLoop(b.Start, end)
+		a.loopSetA()
 	case inpututil.IsKeyJustPressed(ebiten.KeyB):
-		b := bars[a.barAt(eng.PosTick())]
-		start, _, on := eng.Loop()
-		if !on || start >= b.Start+b.Len() {
-			start = b.Start
-		}
-		eng.SetLoop(start, b.Start+b.Len())
+		a.loopSetB()
 	case inpututil.IsKeyJustPressed(ebiten.KeyL):
 		if _, _, on := eng.Loop(); on {
 			eng.ClearLoop()
@@ -170,6 +160,38 @@ func (a *App) Update() error {
 		}
 	}
 	return nil
+}
+
+// loopSetA (the A key) sets the loop start to the current bar, keeping the
+// end if a loop is already set past it. No-op when the displayed track has
+// no bars (barAt returns -1).
+func (a *App) loopSetA() {
+	i := a.barAt(a.eng.PosTick())
+	if i < 0 {
+		return
+	}
+	b := a.displayed().Bars[i]
+	_, end, on := a.eng.Loop()
+	if !on || end <= b.Start {
+		end = b.Start + b.Len()
+	}
+	a.eng.SetLoop(b.Start, end)
+}
+
+// loopSetB (the B key) sets the loop end to the current bar's end, keeping
+// the start if a loop is already set before it. No-op when the displayed
+// track has no bars.
+func (a *App) loopSetB() {
+	i := a.barAt(a.eng.PosTick())
+	if i < 0 {
+		return
+	}
+	b := a.displayed().Bars[i]
+	start, _, on := a.eng.Loop()
+	if !on || start >= b.Start+b.Len() {
+		start = b.Start
+	}
+	a.eng.SetLoop(start, b.Start+b.Len())
 }
 
 func (a *App) toggleMetronome() {

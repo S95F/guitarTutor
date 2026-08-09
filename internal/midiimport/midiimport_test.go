@@ -2,6 +2,7 @@ package midiimport
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"gitlab.com/gomidi/midi/v2"
@@ -312,5 +313,141 @@ func TestImportNoNotes(t *testing.T) {
 func TestImportGarbage(t *testing.T) {
 	if _, _, err := Import([]byte("not a midi file")); err == nil {
 		t.Error("Import accepted garbage")
+	}
+}
+
+func TestImportProgramChangeChannels(t *testing.T) {
+	t.Run("percussion channel ignored", func(t *testing.T) {
+		// A program change on channel 10 (wire channel 9) belongs to
+		// the percussion kit, not the melodic notes: the track must
+		// keep the default program.
+		var tr smf.Track
+		tr.Add(0, midi.ProgramChange(9, 40))
+		tr.Add(0, midi.NoteOn(0, 52, 100))
+		tr.Add(960, midi.NoteOff(0, 52))
+		s, _, err := Import(buildSMF(t, 960, tr))
+		if err != nil {
+			t.Fatalf("Import: %v", err)
+		}
+		if s.Tracks[0].Program != DefaultProgram {
+			t.Errorf("Program = %d, want default %d", s.Tracks[0].Program, DefaultProgram)
+		}
+	})
+	t.Run("melodic channel applied", func(t *testing.T) {
+		var tr smf.Track
+		tr.Add(0, midi.ProgramChange(0, 30))
+		tr.Add(0, midi.NoteOn(0, 52, 100))
+		tr.Add(960, midi.NoteOff(0, 52))
+		s, _, err := Import(buildSMF(t, 960, tr))
+		if err != nil {
+			t.Fatalf("Import: %v", err)
+		}
+		if s.Tracks[0].Program != 30 {
+			t.Errorf("Program = %d, want 30", s.Tracks[0].Program)
+		}
+	})
+}
+
+func TestImportMidBarMeterRebasedToBarline(t *testing.T) {
+	// A meter change at tick 960, inside the first 4/4 bar, is applied
+	// to the bar structure at the next barline (3840). The stored meter
+	// map must be rewritten to that tick so bars and Meters agree.
+	var tr smf.Track
+	tr.Add(0, midi.NoteOn(0, 52, 100))
+	tr.Add(960, smf.MetaMeter(3, 4))
+	tr.Add(6720, midi.NoteOff(0, 52)) // note spans [0, 7680)
+	s, warns, err := Import(buildSMF(t, 960, tr))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	want := score.MeterMap{{Tick: 0, Num: 4, Den: 4}, {Tick: 3840, Num: 3, Den: 4}}
+	if len(s.Meters) != len(want) {
+		t.Fatalf("Meters = %v, want %v", s.Meters, want)
+	}
+	for i, m := range want {
+		if s.Meters[i] != m {
+			t.Errorf("Meters[%d] = %v, want %v", i, s.Meters[i], m)
+		}
+	}
+	starts := map[int64]bool{}
+	for _, bar := range s.Tracks[0].Bars {
+		starts[bar.Start] = true
+	}
+	for _, m := range s.Meters {
+		if !starts[m.Tick] {
+			t.Errorf("meter at tick %d is not a bar start", m.Tick)
+		}
+	}
+	found := false
+	for _, w := range warns {
+		if strings.Contains(w, "not on a barline") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("warnings = %v, want a mid-bar meter warning", warns)
+	}
+}
+
+func TestImportMidBarMeterCollisionLastWins(t *testing.T) {
+	// A mid-bar 3/4 at tick 960 shifts to the barline at 3840, where an
+	// on-barline 6/8 already sits: the later change (the one the bar
+	// structure actually used) must win.
+	var tr smf.Track
+	tr.Add(0, midi.NoteOn(0, 52, 100))
+	tr.Add(960, smf.MetaMeter(3, 4))
+	tr.Add(2880, smf.MetaMeter(6, 8)) // tick 3840, on the barline
+	tr.Add(3840, midi.NoteOff(0, 52)) // note spans [0, 7680)
+	s, _, err := Import(buildSMF(t, 960, tr))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	want := score.MeterMap{{Tick: 0, Num: 4, Den: 4}, {Tick: 3840, Num: 6, Den: 8}}
+	if len(s.Meters) != len(want) {
+		t.Fatalf("Meters = %v, want %v", s.Meters, want)
+	}
+	for i, m := range want {
+		if s.Meters[i] != m {
+			t.Errorf("Meters[%d] = %v, want %v", i, s.Meters[i], m)
+		}
+	}
+	if got := s.Tracks[0].Bars[1]; got.Num != 6 || got.Den != 8 {
+		t.Errorf("bar 1 meter = %d/%d, want 6/8", got.Num, got.Den)
+	}
+}
+
+func TestImportAllNotesUnplayable(t *testing.T) {
+	// Key 20 shifts up an octave to 32, still below the low E (40), so
+	// fretting drops it. With every note dropped, Import must fail the
+	// same way an empty file does, keeping the explanatory warnings.
+	var tr smf.Track
+	tr.Add(0, midi.NoteOn(0, 20, 100))
+	tr.Add(960, midi.NoteOff(0, 20))
+	_, warns, err := Import(buildSMF(t, 960, tr))
+	if err == nil || !strings.Contains(err.Error(), "no playable notes") {
+		t.Fatalf("err = %v, want 'no playable notes in file'", err)
+	}
+	if len(warns) == 0 {
+		t.Error("want warnings explaining the dropped notes, got none")
+	}
+}
+
+func TestImportZeroTempoSkipped(t *testing.T) {
+	// A tempo meta event encoding 0 microseconds per quarter (which
+	// gomidi decodes as +Inf BPM) must be skipped with a warning, with
+	// the tick-0 default supplying 120 BPM.
+	var tr smf.Track
+	tr.Add(0, smf.MetaUndefined(0x51, []byte{0, 0, 0})) // raw tempo meta: 0 us per quarter
+	tr.Add(0, midi.NoteOn(0, 52, 100))
+	tr.Add(960, midi.NoteOff(0, 52))
+	s, warns, err := Import(buildSMF(t, 960, tr))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if len(s.Tempos) != 1 || s.Tempos[0] != (score.Tempo{Tick: 0, USPerQuarter: score.USPerQuarter(120)}) {
+		t.Errorf("Tempos = %v, want single default 120 BPM at tick 0", s.Tempos)
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0], "tempo") {
+		t.Errorf("warnings = %v, want one skipped-tempo warning", warns)
 	}
 }

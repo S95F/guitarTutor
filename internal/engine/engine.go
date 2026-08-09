@@ -231,10 +231,18 @@ func (e *Engine) SeekTick(tick int64) {
 }
 
 // SetLoop sets loop points [a, b) in ticks and enables looping.
-// Callers pass bar boundaries; the engine loops whatever it is given.
+// Callers pass bar boundaries; the engine loops whatever it is given,
+// clamped to the score (a at least 0, b at most the score end). If the
+// clamped span is empty, looping is disabled.
 func (e *Engine) SetLoop(a, b int64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if a < 0 {
+		a = 0
+	}
+	if b > e.scoreEnd {
+		b = e.scoreEnd
+	}
 	if b <= a {
 		e.loopOn = false
 		e.segValid = false
@@ -289,11 +297,19 @@ func (e *Engine) SetRamp(r RampConfig) {
 	e.ramp = r
 }
 
-// SetMetronome toggles the click.
+// SetMetronome toggles the click. Enabling it mid-play takes effect at the
+// next beat boundary at or after the current position.
 func (e *Engine) SetMetronome(on bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if on == e.metronome {
+		return
+	}
 	e.metronome = on
+	// nextBeat only advances while the click is on, so the current
+	// segment's beat schedule may be stale; rebuild it so every beat
+	// since the segment anchor is not fired at once.
+	e.segValid = false
 }
 
 // SetTrackMuted mutes or unmutes a track by index.

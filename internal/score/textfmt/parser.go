@@ -35,8 +35,10 @@ type parser struct {
 	sticky int64        // sticky beat duration in ticks (initially a quarter)
 	sawBar bool         // any bar begun anywhere in the piece
 
-	pendingTempo *float64 // \tempo awaiting the next bar, in BPM
-	pendingMeter *[2]int  // \time awaiting the next bar, as {num, den}
+	pendingTempo     *float64 // \tempo awaiting the next bar, in BPM
+	pendingTempoTick int64    // piece tick where the pending \tempo takes effect
+	pendingMeter     *[2]int  // \time awaiting the next bar, as {num, den}
+	pendingMeterTick int64    // piece tick where the pending \time takes effect
 }
 
 // errAt builds a ParseError at position at.
@@ -84,6 +86,9 @@ func (p *parser) run() error {
 			return err
 		}
 	}
+	if !p.sawBar {
+		return p.errAt(p.sc.pos(), "piece has no bars")
+	}
 	if err := p.checkMeterAlignment(); err != nil {
 		return err
 	}
@@ -115,7 +120,7 @@ func (p *parser) newTrack(name string) *score.Track {
 }
 
 // beginBar opens a new bar on the current track, applying any pending
-// mid-piece \tempo and \time directives at the bar's start tick.
+// mid-piece \tempo and \time directives at their anchored ticks.
 func (p *parser) beginBar() {
 	tr := p.ensureTrack()
 	start := int64(0)
@@ -124,17 +129,33 @@ func (p *parser) beginBar() {
 		start = last.Start + last.Len()
 	}
 	if p.pendingMeter != nil {
-		p.score.Meters = insertMeter(p.score.Meters, score.Meter{Tick: start, Num: p.pendingMeter[0], Den: p.pendingMeter[1]})
+		p.score.Meters = insertMeter(p.score.Meters, score.Meter{Tick: p.pendingMeterTick, Num: p.pendingMeter[0], Den: p.pendingMeter[1]})
 		p.pendingMeter = nil
 	}
 	m := p.score.Meters.At(start)
 	p.bar = tr.AppendBar(m.Num, m.Den)
 	p.filled = 0
 	if p.pendingTempo != nil {
-		p.score.Tempos = insertTempo(p.score.Tempos, score.Tempo{Tick: start, USPerQuarter: score.USPerQuarter(*p.pendingTempo)})
+		p.score.Tempos = insertTempo(p.score.Tempos, score.Tempo{Tick: p.pendingTempoTick, USPerQuarter: score.USPerQuarter(*p.pendingTempo)})
 		p.pendingTempo = nil
 	}
 	p.sawBar = true
+}
+
+// anchorTick returns the piece tick at which a mid-piece \tempo or \time
+// directive takes effect: the end of the current track's last bar, or 0
+// when the current track has no bars yet. Anchoring at directive-parse
+// time keeps the change at the piece position where it was written even
+// when a following \track directive rewinds the next bar's start to
+// tick 0.
+func (p *parser) anchorTick() int64 {
+	if p.track != nil {
+		if n := len(p.track.Bars); n > 0 {
+			last := p.track.Bars[n-1]
+			return last.Start + last.Len()
+		}
+	}
+	return 0
 }
 
 // closeBar ends the open bar, rejecting one whose beats do not exactly
@@ -311,6 +332,13 @@ func (p *parser) noteCore(t *tokScan, tied bool) (score.Note, error) {
 	if ns := len(p.track.Tuning); str < 1 || str > ns {
 		return score.Note{}, p.errAt(sp, "string %d out of range (track has %d strings)", str, ns)
 	}
+	// Tuning, capo, and fret are each in range, but their sum is the
+	// sounding pitch and must fit MIDI (the components are all >= 0, so
+	// only the top can be exceeded).
+	if key := p.track.Tuning[str-1] + p.track.Capo + fret; key > 127 {
+		return score.Note{}, p.errAt(fp, "note sounds MIDI key %d (open %d + capo %d + fret %d), above 127",
+			key, p.track.Tuning[str-1], p.track.Capo, fret)
+	}
 	return score.Note{String: str, Fret: fret, Tied: tied}, nil
 }
 
@@ -414,10 +442,15 @@ func (p *parser) directive() error {
 			return err
 		}
 		bpm, perr := strconv.ParseFloat(arg.text, 64)
-		if perr != nil || bpm <= 0 || bpm > 1000 {
+		// The negated range form also rejects NaN (every comparison with
+		// NaN is false) and infinities, not just ordinary out-of-range
+		// values; anything outside [1, 1000] would over- or underflow
+		// score.USPerQuarter's int64.
+		if perr != nil || !(bpm >= 1 && bpm <= 1000) {
 			return p.errAt(arg.pos, "invalid tempo %q (want BPM in 1-1000)", arg.text)
 		}
 		p.pendingTempo = &bpm
+		p.pendingTempoTick = p.anchorTick()
 		return nil
 
 	case "time":
@@ -433,6 +466,7 @@ func (p *parser) directive() error {
 			return p.errAt(arg.pos, "invalid time signature %q (want n/d with d one of 1 2 4 8 16 32)", arg.text)
 		}
 		p.pendingMeter = &[2]int{num, den}
+		p.pendingMeterTick = p.anchorTick()
 		return nil
 
 	case "track":
