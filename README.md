@@ -119,7 +119,7 @@ guitartutor play -listen -in scarlett -out scarlett testdata/fixture_riff.gtab
 
 Notes you play are matched against the score: green = hit, amber = close (loose intonation or wrong octave), red = miss. **T** opens the tuner; **W** enables wait mode, which holds playback at each note until you actually play it. Scoring is monophonic in this phase — strummed chords get partial credit by design until Phase 4's chord verification. Heavy distortion degrades detection; feed the clean DI signal.
 
-Live mode needs a cgo build (the default when a C compiler is present — on Windows install [mingw-w64](https://www.mingw-w64.org/) or build with [MSYS2](https://www.msys2.org/); if cgo builds misbehave in PowerShell, run the build from Git Bash). A `CGO_ENABLED=0` build still works fully as a playback-only practice player.
+Live mode needs a cgo build (the default when a C compiler is present — on Windows install [mingw-w64](https://www.mingw-w64.org/) or build with [MSYS2](https://www.msys2.org/); if cgo builds misbehave in PowerShell, run the build from Git Bash). On Windows a `CGO_ENABLED=0` build still works fully as a playback-only practice player; on Linux and macOS Ebitengine itself needs cgo, so a C toolchain is required either way there.
 
 There is also an offline renderer — useful for checking a piece without opening the UI:
 

@@ -35,10 +35,14 @@ jobs:
         run: go vet ./...
 
       # The pure-Go playback-only fallback (README "Pure Go until it
-      # can't be") must keep compiling without a C toolchain.
-      - name: Build without cgo
-        if: runner.os == 'Linux'
-        run: CGO_ENABLED=0 go build ./...
+      # can't be") must keep compiling without a C toolchain. This is a
+      # Windows-only promise: Ebitengine and oto are pure Go on Windows
+      # but require cgo (GLFW, ALSA) on Linux.
+      - name: Build without cgo (playback-only fallback)
+        if: runner.os == 'Windows'
+        run: go build ./...
+        env:
+          CGO_ENABLED: "0"
 
       # Ebitengine initializes GLFW at package init, which needs a display;
       # the Linux runner is headless, so tests run under a virtual
