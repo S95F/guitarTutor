@@ -31,6 +31,8 @@ Lightweight decision records for guitarTutor. Each records what was chosen, what
 
 **Consequences:** Pipeline standardizes on 48 kHz float32 stereo (beep is float64 — convert at the boundary). Metronome clicks are synthesized and frame-scheduled, never `time.Ticker`-driven. No pure-Go pitch-preserving time-stretch exists, so *synthesis is the primary playback path* — tempo change is free when rendering from the score — and audio backing tracks are secondary (slowdown pitch-shifts; documented).
 
+**Amendment (Phase 1 as built):** two deviations from the plan above. (1) beep was not needed: the engine renders synthesis and the metronome itself and hands frames straight to oto, so beep's streamer graph added nothing — it enters at Phase 3 with audio-file decoding, as planned decoders. (2) The *default* voice is a built-in Karplus-Strong plucked-string synth (`internal/synth`), which needs zero assets and sounds guitar-appropriate; go-meltysynth remains the SF2 path when the user supplies a SoundFont (`-sf2`). This sidesteps bundling/downloading a multi-megabyte GM SoundFont entirely. meltysynth is imported, not yet forked — fork at the first needed patch.
+
 ## D3 — Piece formats: MIDI + own text format first; Guitar Pro 7/8 next; MusicXML later
 
 **Decision:** Phase 1 imports Standard MIDI Files via [gomidi/midi v2](https://gitlab.com/gomidi/midi) and a small in-house text tab format (alphaTex-*inspired*, deliberately not alphaTex-compatible). Phase 3 adds a clean-room Guitar Pro 7/8 `.gp` importer, then a MusicXML subset.
@@ -63,9 +65,9 @@ Lightweight decision records for guitarTutor. Each records what was chosen, what
 
 **Consequences:** "Wait mode" (pause until the right note) ships with detection — the most-loved learning feature in comparable OSS tools. Dynamic difficulty, 3D highways, catalogs, amp modeling, and gamification are explicit non-goals (see [ROADMAP](../ROADMAP.md)).
 
-## D6 — Open: UI/rendering — native Go vs. embedded alphaTab (Phase 0 spike)
+## D6 — UI/rendering: native Go with Ebitengine (spike resolved)
 
-**Status: undecided — resolved by a timeboxed prototype in Phase 0.**
+**Status: decided — native Go.** The Phase 1 scrolling-tab renderer, HUD, and keyboard transport were built natively on Ebitengine (`internal/ui`) at modest cost, which is precisely the evidence the spike existed to gather. One language, one clock domain, single-binary builds — and no webview, IPC bridge, or MPL boundary to manage. The trade-off accepted: Guitar Pro/MusicXML importers (Phase 3) are ours to write, per D3. The original analysis follows.
 
 Native Go (Ebitengine is the leading candidate — game-loop rendering suits a scrolling tab, and it shares an ecosystem with oto) means writing our own tab renderer and importers but keeps one language, one clock domain, and easy cross-compilation. Embedding [alphaTab](https://github.com/CoderLine/alphaTab) in a webview (e.g. Wails) would gift GP3–8 + MusicXML import and mature tab rendering — at the cost of a webview dependency, JS↔Go IPC, MPL-2.0 boundary management, and a second clock domain that must be reconciled with Go-side scoring timestamps. This is the single biggest fork in the architecture; it gets decided by evidence in week one, because it determines whether Phases 1 and 3 include a renderer and importers at all.
 

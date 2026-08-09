@@ -1,0 +1,34 @@
+// Richer cross-feature fixture: two tracks (lead + backing), drop-D lead
+// with a capo, a mid-piece tempo and meter change, dotted and triplet
+// durations, and every technique letter.
+\title Rich Fixture
+\tempo 96
+\time 4/4
+
+\track Lead
+\tuning D2 A2 D3 G3 B3 E4 // drop D, written low to high
+\capo 2
+\program 27
+
+// Bar 1 (4/4): dotted quarter, eighth, an eighth-note triplet (the
+// triplet duration sticks), and a closing quarter.
+0.6.4. 3.6.8 0.5.8t 2.5 3.5 5.5.4 |
+// Bar 2 (4/4): all six technique letters.
+2.4.8h 4.4.8p 5.4.8s 7.4.8b 7.4.4v 9.4x |
+
+\tempo 132
+\time 3/4
+
+// Bar 3 (3/4): a chord held into a tied chord.
+(2.4 3.3 2.2).2 ~(2.4 3.3 2.2).4 |
+// Bar 4 (3/4): rests around a tied pair.
+r.4 5.3.4 ~5.3.8 r.8 |
+
+\track Rhythm
+\backing
+\program 33
+
+0.6.1 |
+0.5.2 2.4.2 |
+2.4.2. |
+r.2.

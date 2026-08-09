@@ -1,0 +1,38 @@
+# Build + vet + test on the platforms Phase 1 targets. Ubuntu needs
+# Ebitengine's C build dependencies (GL, X11, ALSA) even for pure-Go
+# builds, because its platform glue compiles against their headers.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.x
+          cache: true
+
+      - name: Install Ebitengine build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev xorg-dev libasound2-dev pkg-config
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -count=1
