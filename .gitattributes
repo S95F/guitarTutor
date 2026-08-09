@@ -4,6 +4,12 @@
 *.md text eol=lf
 *.yml text eol=lf
 *.gtab text eol=lf
+*.musicxml text eol=lf
+*.txt text eol=lf
 *.mid binary
+*.gp binary
+*.mxl binary
 *.wav binary
+*.flac binary
+*.mp3 binary
 *.sf2 binary
