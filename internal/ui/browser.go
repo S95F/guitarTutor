@@ -17,8 +17,9 @@ package ui
 // of the fs.FS contract. It is recoverable in this version because the
 // desktop implementation backs each root entry with os.Open, and the
 // *os.File it returns reports the real path from Name(); see
-// browserDroppedPaths, which falls back to ignoring the drop rather than
-// guessing if a future implementation stops doing that.
+// browserDroppedPaths, which falls back to skipping the items it cannot
+// recover — rather than guessing, and rather than throwing away the
+// whole drop — if a future implementation stops doing that.
 
 import (
 	"fmt"
@@ -126,7 +127,19 @@ type Browser struct {
 	recentTop int
 	// forgotten holds recents dismissed with Delete, so they stay gone
 	// for this session even when Prefs cannot remove them permanently.
+	// Opening a piece again clears its entry: a pane that keeps hiding a
+	// file the user just opened disagrees with the configuration it is
+	// supposed to be showing, and stays wrong until the next restart.
 	forgotten map[string]bool
+	// recentStatus remembers, per recent path, whether the file was
+	// missing the one time it was probed. reloadRecents runs on the game
+	// loop — from every open and every Delete — and stat on an
+	// unreachable network share blocks for seconds, so a path that is
+	// already on the list is never probed a second time.
+	recentStatus map[string]bool
+	// statFn probes one recent path; nil means os.Stat. Tests replace it
+	// to count the probes and to stand in for a path that blocks.
+	statFn func(string) (fs.FileInfo, error)
 
 	dir       string
 	listing   []browserEntry
@@ -225,22 +238,52 @@ func browserIsDir(path string) bool {
 	return err == nil && fi.IsDir()
 }
 
+// statRecent probes one recent path. Production stats it; tests replace
+// the hook.
+func (b *Browser) statRecent(path string) (fs.FileInfo, error) {
+	if b.statFn != nil {
+		return b.statFn(path)
+	}
+	return os.Stat(path)
+}
+
 // reloadRecents rebuilds the recents pane from Prefs, dropping entries
 // forgotten this session and flagging the ones whose file has gone away.
+//
+// It runs on the game loop, and it is called again after every open and
+// every Delete, so it must not touch the filesystem for paths it has
+// already seen: one recent on a disconnected network share would
+// otherwise stall the window for seconds each time. A path's status is
+// therefore probed exactly once — when it first appears on the list —
+// and carried forward from then on. The only paths that appear later in
+// a session are pieces the opener has just read successfully, so the
+// probe that does happen on the loop is of a file known to be reachable.
+// The cache is rebuilt from the current list on each pass, so a path
+// that leaves the recents stops being remembered.
 func (b *Browser) reloadRecents() {
 	b.recents = nil
+	known := b.recentStatus
+	status := make(map[string]bool, len(known))
 	if pr := b.prefs(); pr != nil {
 		for _, p := range pr.Recents() {
 			if b.forgotten[p] {
 				continue
 			}
-			e := browserEntry{name: filepath.Base(p), path: p, parent: filepath.Dir(p)}
-			if fi, err := os.Stat(p); err != nil || fi.IsDir() {
-				e.missing = true
+			missing, seen := known[p]
+			if !seen {
+				fi, err := b.statRecent(p)
+				missing = err != nil || fi == nil || fi.IsDir()
 			}
-			b.recents = append(b.recents, e)
+			status[p] = missing
+			b.recents = append(b.recents, browserEntry{
+				name:    filepath.Base(p),
+				path:    p,
+				parent:  filepath.Dir(p),
+				missing: missing,
+			})
 		}
 	}
+	b.recentStatus = status
 	b.recentSel = browserClamp(b.recentSel, len(b.recents))
 	b.recentTop = browserClampTop(b.recentSel, b.recentTop, brwRecentRows, len(b.recents))
 }
@@ -523,7 +566,12 @@ func (b *Browser) openPath(path string) {
 		return
 	}
 	// The shell just recorded it; show it at the top of the list for
-	// when the user comes back from practising.
+	// when the user comes back from practising. Opening a piece also
+	// un-forgets it: it is back in the configuration's recents, and a
+	// pane that went on hiding it would contradict what was saved until
+	// the next restart.
+	delete(b.forgotten, path)
+	delete(b.recentStatus, path)
 	b.reloadRecents()
 	b.setSelection(browserPaneRecent, 0)
 }
@@ -551,59 +599,108 @@ func (b *Browser) forgetRecent() {
 }
 
 // browserDroppedPaths recovers the real paths behind a dropped-files
-// fs.FS. The root of that filesystem lists the dropped items by base
-// name; the real path comes back from the *os.File the desktop
-// implementation opens them with. Anything whose path cannot be
-// recovered and confirmed on disk is skipped rather than guessed at.
-func browserDroppedPaths(fsys fs.FS) []string {
+// fs.FS, and reports how many of the dropped items it had to give up on.
+// The root of that filesystem lists the dropped items by base name; the
+// real path comes back from the *os.File the desktop implementation
+// opens them with. Anything whose path cannot be recovered and confirmed
+// on disk is skipped rather than guessed at — one unusable item must not
+// cost the user the rest of the drop.
+//
+// The listing is taken as far as it goes even when reading it failed:
+// the desktop implementation stats each dropped item and, when one of
+// them cannot be stat'd, hands back a slice that is the right length but
+// holds a nil fs.DirEntry at and after the failure, alongside the error.
+// Calling Name on one of those nils panics, so the nil check below is
+// load-bearing, not defensive.
+func browserDroppedPaths(fsys fs.FS) (paths []string, skipped int) {
 	if fsys == nil {
-		return nil
+		return nil, 0
 	}
 	ents, err := fs.ReadDir(fsys, ".")
-	if err != nil {
-		return nil
+	if err != nil && len(ents) == 0 {
+		return nil, 0
 	}
-	var out []string
 	for _, de := range ents {
-		f, err := fsys.Open(de.Name())
-		if err != nil {
+		if de == nil {
+			skipped++
 			continue
 		}
-		named, ok := f.(interface{ Name() string })
-		if ok {
-			if p := named.Name(); p != "" && filepath.Base(p) == de.Name() {
-				if _, err := os.Stat(p); err == nil {
-					out = append(out, p)
-				}
-			}
+		f, err := fsys.Open(de.Name())
+		if err != nil {
+			skipped++
+			continue
+		}
+		real := ""
+		if named, ok := f.(interface{ Name() string }); ok {
+			real = named.Name()
 		}
 		_ = f.Close()
+		if real == "" || filepath.Base(real) != de.Name() {
+			skipped++
+			continue
+		}
+		if _, err := os.Stat(real); err != nil {
+			skipped++
+			continue
+		}
+		paths = append(paths, real)
 	}
-	return out
+	return paths, skipped
+}
+
+// browserSkipNote describes the dropped items that could not be read, in
+// the singular or the plural.
+func browserSkipNote(n int) string {
+	if n == 1 {
+		return "1 dropped item could not be read and was skipped"
+	}
+	return fmt.Sprintf("%d dropped items could not be read and were skipped", n)
+}
+
+// noteSkipped appends the skipped-items note to whatever the drop has
+// already reported, so the outcome is never silent.
+func (b *Browser) noteSkipped(skipped int) {
+	if skipped <= 0 {
+		return
+	}
+	if b.errMsg == "" {
+		b.errMsg = browserSkipNote(skipped)
+		return
+	}
+	b.errMsg += "; " + browserSkipNote(skipped)
 }
 
 // handleDrop acts on files dropped onto the window: the first supported
-// piece is opened, or the first directory is browsed to. A drop of
-// nothing usable says so rather than failing silently.
+// piece is opened, or the first directory is browsed to. Items the
+// platform could not hand over are skipped, and the outcome is always
+// reported — including a drop of nothing usable, which must say so
+// rather than fail silently.
 func (b *Browser) handleDrop(fsys fs.FS) {
-	paths := browserDroppedPaths(fsys)
+	paths, skipped := browserDroppedPaths(fsys)
 	if len(paths) == 0 {
+		b.errMsg = "nothing dropped on the window could be opened"
+		b.noteSkipped(skipped)
 		return
 	}
 	for _, p := range paths {
 		if browserIsDir(p) {
 			b.setDir(p)
 			b.focus = browserPaneBrowse
+			b.errMsg = ""
+			b.noteSkipped(skipped)
 			return
 		}
 	}
 	for _, p := range paths {
 		if browserSupported(p) {
+			// openPath resets the status line and fills it in on failure.
 			b.openPath(p)
+			b.noteSkipped(skipped)
 			return
 		}
 	}
 	b.errMsg = "dropped file is not a piece guitarTutor can open: " + filepath.Base(paths[0])
+	b.noteSkipped(skipped)
 }
 
 // browserKeys are every key the start screen reacts to.
@@ -745,20 +842,65 @@ func (b *Browser) handleMouse() {
 	}
 }
 
-// Update translates this frame's input into state changes. It returns
-// errQuit when the user leaves the screen; import failures are held for
-// display instead of being returned, so a bad file cannot end the app.
-func (b *Browser) Update() error {
-	if fsys := ebiten.DroppedFiles(); fsys != nil {
-		b.handleDrop(fsys)
+// queuedEdits reports how many stack edits the shell is holding for the
+// end of this frame. It goes up the moment one of this screen's actions
+// pushes another screen, which is how the input loop below knows to stop.
+func (b *Browser) queuedEdits() int {
+	if b.sh == nil {
+		return 0
 	}
+	return len(b.sh.pending)
+}
+
+// browserKeyFiresNow reports whether a key acts this frame, reading
+// Ebitengine's press durations. Split out so handleKeys can be driven
+// from a test with a canned set of presses.
+func browserKeyFiresNow(k ebiten.Key) bool {
+	return browserKeyFires(browserRepeatKeys[k], inpututil.KeyPressDuration(k))
+}
+
+// handleKeys applies every key that fires this frame, asking fires about
+// each one in turn, and stops at the first key that changes the screen
+// stack.
+//
+// Stopping matters: opening a piece only queues the push, which the
+// Shell applies at the end of the frame. A later key in the same frame
+// that returned errQuit would have the Shell pop this screen and apply
+// the push in the same pass — building a practice screen it immediately
+// discards, without the CloseCurrent that releases its audio stream, and
+// swallowing the quit into the bargain. One action per frame is enough.
+func (b *Browser) handleKeys(fires func(ebiten.Key) bool) error {
+	queued := b.queuedEdits()
 	for _, k := range browserKeys {
-		if !browserKeyFires(browserRepeatKeys[k], inpututil.KeyPressDuration(k)) {
+		if !fires(k) {
 			continue
 		}
 		if err := b.handleKey(k); err != nil {
 			return err
 		}
+		if b.queuedEdits() != queued {
+			return nil
+		}
+	}
+	return nil
+}
+
+// Update translates this frame's input into state changes. It returns
+// errQuit when the user leaves the screen; import failures are held for
+// display instead of being returned, so a bad file cannot end the app.
+func (b *Browser) Update() error {
+	queued := b.queuedEdits()
+	if fsys := ebiten.DroppedFiles(); fsys != nil {
+		b.handleDrop(fsys)
+	}
+	if b.queuedEdits() != queued {
+		return nil
+	}
+	if err := b.handleKeys(browserKeyFiresNow); err != nil {
+		return err
+	}
+	if b.queuedEdits() != queued {
+		return nil
 	}
 	b.handleMouse()
 	return nil

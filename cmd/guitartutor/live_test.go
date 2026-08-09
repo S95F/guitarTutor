@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/S95F/guitarTutor/internal/appconfig"
 	"github.com/S95F/guitarTutor/internal/audio"
@@ -11,6 +14,7 @@ import (
 	"github.com/S95F/guitarTutor/internal/pitch"
 	"github.com/S95F/guitarTutor/internal/practice"
 	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/guitarTutor/internal/ui"
 )
 
 // Fake device lists for the resolution tests. The capture default and the
@@ -391,5 +395,149 @@ func TestOnNotesWaitWiring(t *testing.T) {
 		if !res.Matched || res.ErrFrames != 0 {
 			t.Errorf("result %+v: wait-confirmed note carries a timing error", res)
 		}
+	}
+}
+
+// TestCalibrationPassCancel is the regression test for the uncancellable
+// calibration. A pass holds the audio device until the capture completes
+// or the 20 s deadline expires; before the context was threaded through
+// there was no third way out, so a calibration started from a settings
+// screen the user then left kept the device (and kept writing to the
+// config) for the rest of that timeout. Cancelling must take the same
+// Stop/Close exit, promptly.
+//
+// The stub stream never delivers audio, so completion is impossible: what
+// this measures is purely whether cancellation is honoured.
+func TestCalibrationPassCancel(t *testing.T) {
+	backend := &stubBackend{capture: testCapture, playback: testPlayback}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	type result struct {
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		_, _, err := calibrationPass(ctx, backend, "cap-usb", "pb-usb", nil)
+		done <- result{err}
+	}()
+
+	waitFor(t, "the pass to open and start the stream", func() bool {
+		streams := backend.openStreams()
+		if len(streams) != 1 {
+			return false
+		}
+		started, _, _ := streams[0].counts()
+		return started == 1
+	})
+
+	cancel()
+	select {
+	case r := <-done:
+		if !errors.Is(r.err, errCalibrationCanceled) {
+			t.Fatalf("cancelled pass returned %v, want an error wrapping errCalibrationCanceled", r.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("calibrationPass did not return within 5 s of cancellation (it is waiting out the 20 s deadline)")
+	}
+
+	streams := backend.openStreams()
+	_, stopped, closed := streams[0].counts()
+	if stopped != 1 || closed != 1 {
+		t.Errorf("after cancellation the stream was stopped %d and closed %d times, want 1 and 1: the device is still held",
+			stopped, closed)
+	}
+}
+
+// TestCalibrationPassAlreadyCanceled: a context cancelled before the call
+// must not open the device at all.
+func TestCalibrationPassAlreadyCanceled(t *testing.T) {
+	backend := &stubBackend{capture: testCapture, playback: testPlayback}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _, err := calibrationPass(ctx, backend, "cap-usb", "pb-usb", nil)
+	if !errors.Is(err, errCalibrationCanceled) {
+		t.Fatalf("err = %v, want an error wrapping errCalibrationCanceled", err)
+	}
+	if n := backend.openCount(); n != 0 {
+		t.Errorf("backend saw %d opens for an already-cancelled pass, want 0", n)
+	}
+}
+
+// TestSetupListenRollsBackTapOnFailure is the regression test for the
+// leaked event tap. setupListen installs the tap before starting the
+// session; when the session fails to start, its caller falls back to plain
+// playback — and used to leave the engine feeding expectations into a
+// Scorer that nothing would ever drain, so its pending list grew without
+// bound and reallocated inside the render callback. The failure path must
+// clear the tap, at setupListen itself, so every caller is covered.
+//
+// The engine exposes no way to read the tap back, so the assertion goes
+// through the setEventTap seam: the last thing setupListen does to the
+// engine on a failed wiring must be to clear it.
+func TestSetupListenRollsBackTapOnFailure(t *testing.T) {
+	t.Setenv(appconfig.EnvConfigDir, t.TempDir())
+
+	backend := &stubBackend{
+		capture:  testCapture,
+		playback: testPlayback,
+		openErr:  errors.New("stub device refused"),
+	}
+	useStubBackend(t, backend)
+
+	var installed []bool // one entry per SetEventTap call: was it non-nil?
+	prev := setEventTap
+	setEventTap = func(eng *engine.Engine, fn func(ev score.NoteEvent, outFrame int64)) {
+		installed = append(installed, fn != nil)
+		prev(eng, fn)
+	}
+	t.Cleanup(func() { setEventTap = prev })
+
+	sc := oneBarScore(t)
+	eng := newEngine(sc, engine.Options{})
+	app := ui.New(eng, sc, 0)
+
+	session, err := setupListen(eng, app, 0, "", "")
+	if err == nil {
+		session.Stop()
+		t.Fatal("setupListen with a refusing backend returned nil error")
+	}
+	if len(installed) == 0 {
+		t.Fatal("setupListen never touched the event tap; the test is not exercising the leak")
+	}
+	if installed[len(installed)-1] {
+		t.Error("a failed setupListen left the event tap installed: the engine keeps feeding an orphaned scorer")
+	}
+}
+
+// TestSetupListenKeepsTapOnSuccess: the rollback must not fire on the
+// happy path — the live session depends on the tap being installed.
+func TestSetupListenKeepsTapOnSuccess(t *testing.T) {
+	t.Setenv(appconfig.EnvConfigDir, t.TempDir())
+
+	backend := &stubBackend{capture: testCapture, playback: testPlayback}
+	useStubBackend(t, backend)
+
+	var installed []bool
+	prev := setEventTap
+	setEventTap = func(eng *engine.Engine, fn func(ev score.NoteEvent, outFrame int64)) {
+		installed = append(installed, fn != nil)
+		prev(eng, fn)
+	}
+	t.Cleanup(func() { setEventTap = prev })
+
+	sc := oneBarScore(t)
+	eng := newEngine(sc, engine.Options{})
+	app := ui.New(eng, sc, 0)
+
+	session, err := setupListen(eng, app, 0, "", "")
+	if err != nil {
+		t.Fatalf("setupListen: %v", err)
+	}
+	defer session.Stop()
+	if len(installed) != 1 || !installed[0] {
+		t.Errorf("event tap calls = %v, want exactly one install and no rollback", installed)
 	}
 }

@@ -6,6 +6,7 @@ package ui
 // splitDeviceWarning), so covering them covers the screen.
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -130,6 +131,122 @@ func (a *settingsFakeAudio) callCount() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.calls
+}
+
+// settingsBlockingAudio is an AudioServices whose calibration blocks until
+// the test releases it or the run's context is cancelled — the two ways a
+// real measurement ends. It offers the cancellable entry point, so it
+// stands in for a backend that hands the device back when asked. Setting
+// refuse makes Calibrate decline at once, which is how the device's own
+// cross-instance guard turns a second screen's request down.
+type settingsBlockingAudio struct {
+	capture  []DeviceOption
+	playback []DeviceOption
+
+	started chan struct{} // one value per entered call
+	release chan struct{} // closed to let a blocked run succeed
+
+	frames int
+	conf   float64
+
+	mu        sync.Mutex
+	refuse    error
+	calls     int
+	cancelled int
+	returned  int
+	offsets   map[string]settingsOffset
+}
+
+func newSettingsBlockingAudio() *settingsBlockingAudio {
+	capture, playback := settingsDevices()
+	return &settingsBlockingAudio{
+		capture:  capture,
+		playback: playback,
+		started:  make(chan struct{}, 8),
+		release:  make(chan struct{}),
+		frames:   1440,
+		conf:     0.9,
+	}
+}
+
+func (a *settingsBlockingAudio) BackendName() string { return "blocking" }
+
+func (a *settingsBlockingAudio) Devices() ([]DeviceOption, []DeviceOption, error) {
+	return a.capture, a.playback, nil
+}
+
+func (a *settingsBlockingAudio) SampleRate() int { return 48000 }
+
+func (a *settingsBlockingAudio) CalibratedOffset(captureID, playbackID string) (int, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	o := a.offsets[captureID+"|"+playbackID]
+	return o.frames, o.ok
+}
+
+func (a *settingsBlockingAudio) Calibrate(captureID, playbackID string, progress func(float64)) (int, float64, error) {
+	return a.CalibrateContext(context.Background(), captureID, playbackID, progress)
+}
+
+func (a *settingsBlockingAudio) CalibrateContext(ctx context.Context, captureID, playbackID string, progress func(float64)) (int, float64, error) {
+	a.mu.Lock()
+	a.calls++
+	refuse := a.refuse
+	a.mu.Unlock()
+	if refuse != nil {
+		return 0, 0, refuse
+	}
+	a.started <- struct{}{}
+	progress(0.5)
+	select {
+	case <-ctx.Done():
+		a.mu.Lock()
+		a.cancelled++
+		a.returned++
+		a.mu.Unlock()
+		return 0, 0, ctx.Err()
+	case <-a.release:
+	}
+	a.mu.Lock()
+	if a.offsets == nil {
+		a.offsets = map[string]settingsOffset{}
+	}
+	a.offsets[captureID+"|"+playbackID] = settingsOffset{a.frames, true}
+	a.returned++
+	a.mu.Unlock()
+	return a.frames, a.conf, nil
+}
+
+func (a *settingsBlockingAudio) stats() (calls, cancelled, returned int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.calls, a.cancelled, a.returned
+}
+
+func (a *settingsBlockingAudio) setRefusal(err error) {
+	a.mu.Lock()
+	a.refuse = err
+	a.mu.Unlock()
+}
+
+// settingsPlainAudio exposes only the AudioServices methods, hiding the
+// cancellable entry point: a backend that cannot be interrupted. The inner
+// services are held in a field rather than embedded precisely so
+// CalibrateContext is not promoted.
+type settingsPlainAudio struct{ inner *settingsBlockingAudio }
+
+func (a *settingsPlainAudio) BackendName() string { return a.inner.BackendName() }
+
+func (a *settingsPlainAudio) Devices() ([]DeviceOption, []DeviceOption, error) {
+	return a.inner.Devices()
+}
+
+func (a *settingsPlainAudio) CalibratedOffset(captureID, playbackID string) (int, bool) {
+	return a.inner.CalibratedOffset(captureID, playbackID)
+}
+
+func (a *settingsPlainAudio) Calibrate(captureID, playbackID string, progress func(float64)) (int, float64, error) {
+	return a.inner.Calibrate(captureID, playbackID, progress)
 }
 
 // settingsDevices is a realistic Windows enumeration: an onboard Realtek
@@ -614,6 +731,267 @@ func TestSettingsCalibrationConcurrentReads(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("calibration never finished")
 		}
+	}
+}
+
+// TestSettingsCloseCancelsCalibration is the fix for a calibration that
+// outlived the screen that started it: Escape popped the screen while the
+// run kept the capture and playback devices for the rest of its timeout,
+// so a piece opened seconds later collided with a live duplex stream.
+// Close must cancel the run, wait for the goroutine, and leave nothing
+// that can write back into the popped screen.
+func TestSettingsCloseCancelsCalibration(t *testing.T) {
+	audio := newSettingsBlockingAudio()
+	s, _ := newSettingsFixture(t, audio)
+
+	if !s.startCalibration() {
+		t.Fatal("startCalibration refused")
+	}
+	<-audio.started
+	if sn := s.calSnapshot(); sn.Phase != calRunning {
+		t.Fatalf("phase = %v, want running", sn.Phase)
+	}
+	run := s.run
+	if run == nil {
+		t.Fatal("the screen kept no handle on the run it started")
+	}
+
+	start := time.Now()
+	s.Close()
+	elapsed := time.Since(start)
+
+	// Close waited for the goroutine rather than timing out: a backend
+	// that honours the context has already given the devices back.
+	select {
+	case <-run.done:
+	default:
+		t.Fatalf("Close returned after %v with the calibration goroutine still running", elapsed)
+	}
+	if elapsed > 2*settingsCloseGrace {
+		t.Errorf("Close blocked for %v, want a bound near %v", elapsed, settingsCloseGrace)
+	}
+	if _, cancelled, _ := audio.stats(); cancelled != 1 {
+		t.Errorf("backend cancellations = %d, want 1: Close must ask for the device back", cancelled)
+	}
+	if !run.abandonedNow() {
+		t.Error("the run was not marked abandoned, so it may still publish into a popped screen")
+	}
+	if sn := s.calSnapshot(); sn.Phase != calIdle {
+		t.Errorf("phase after Close = %v, want idle", sn.Phase)
+	}
+	// The goroutine finished after the screen let go, and wrote nothing
+	// anyone can see.
+	if got := run.snapshot(); got.Phase != calRunning || got.Frames != 0 {
+		t.Errorf("an abandoned run published %+v, want nothing", got)
+	}
+	s.syncSettings()
+	if s.offOK {
+		t.Error("an abandoned run's offset reached the screen")
+	}
+	s.Close() // idempotent, and safe with no run in flight
+	if _, cancelled, _ := audio.stats(); cancelled != 1 {
+		t.Errorf("a second Close touched the backend again (cancellations = %d)", cancelled)
+	}
+}
+
+// TestSettingsCloseIsBoundedWithoutCancellation: a backend that ignores
+// cancellation must not hold the game loop. Close gives up waiting, but
+// the run is detached all the same, so its late result lands nowhere.
+func TestSettingsCloseIsBoundedWithoutCancellation(t *testing.T) {
+	inner := newSettingsBlockingAudio()
+	s, _ := newSettingsFixture(t, &settingsPlainAudio{inner: inner})
+
+	if !s.startCalibration() {
+		t.Fatal("startCalibration refused")
+	}
+	<-inner.started
+	run := s.run
+	if run == nil {
+		t.Fatal("the screen kept no handle on the run it started")
+	}
+
+	start := time.Now()
+	s.Close()
+	if elapsed := time.Since(start); elapsed > 5*settingsCloseGrace {
+		t.Errorf("Close blocked the game loop for %v on a backend that ignores cancellation", elapsed)
+	}
+	if !run.abandonedNow() {
+		t.Fatal("the run was not detached")
+	}
+	if sn := s.calSnapshot(); sn.Phase != calIdle {
+		t.Errorf("phase after Close = %v, want idle", sn.Phase)
+	}
+
+	// The run finishes long after the screen is gone.
+	close(inner.release)
+	select {
+	case <-run.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the calibration goroutine never returned")
+	}
+	if got := run.snapshot(); got.Phase != calRunning || got.Frames != 0 {
+		t.Errorf("a run that outlived its screen published %+v, want nothing", got)
+	}
+	s.syncSettings()
+	if s.offOK || s.calSnapshot().Phase != calIdle {
+		t.Errorf("a run that outlived its screen wrote into it: offOK=%v phase=%v", s.offOK, s.calSnapshot().Phase)
+	}
+}
+
+// TestSettingsStaleResultIsNotShownForANewPair: a measurement describes
+// the pair it was taken on. Changing the pair mid-run used to publish the
+// old pair's result against the new one, so the screen claimed a device
+// combination was calibrated when it never had been.
+func TestSettingsStaleResultIsNotShownForANewPair(t *testing.T) {
+	audio := newSettingsAudio()
+	audio.reached = make(chan struct{})
+	audio.release = make(chan struct{})
+	audio.frames, audio.conf = 1440, 0.9
+	s, _ := newSettingsFixture(t, audio)
+
+	if !s.startCalibration() {
+		t.Fatal("startCalibration refused")
+	}
+	<-audio.reached
+	measuredCap, measuredPlay := s.selectedIDs()
+
+	// The pair changes while the measurement is in flight. The input layer
+	// refuses this mid-run; the state method is driven directly, because
+	// the result must stay bound to its pair however the pair changes.
+	s.cycleCapture(+1)
+	if capID, _ := s.selectedIDs(); capID == measuredCap {
+		t.Fatalf("capture device did not change (still %q)", capID)
+	}
+
+	// Even the running run's progress must not read as this pair's.
+	txt, _ := s.calibrationText(s.calSnapshot())
+	if !strings.Contains(txt, "previous pair") {
+		t.Errorf("text while measuring a superseded pair = %q, want it to say which pair is being measured", txt)
+	}
+
+	close(audio.release)
+	settingsWaitPhase(t, s, calDone)
+	s.syncSettings()
+
+	txt, _ = s.calibrationText(s.calSnapshot())
+	if strings.Contains(txt, "1440") || strings.Contains(txt, "confidence") {
+		t.Errorf("a result measured on %q is shown for the pair now selected: %q", measuredCap, txt)
+	}
+	if !strings.Contains(txt, "not measured") {
+		t.Errorf("text for the unmeasured pair = %q, want it to admit there is no measurement", txt)
+	}
+
+	// Back on the pair it was measured for, the stored value is shown.
+	s.cycleCapture(-1)
+	if capID, playID := s.selectedIDs(); capID != measuredCap || playID != measuredPlay {
+		t.Fatalf("selection = (%q, %q), want the measured pair", capID, playID)
+	}
+	txt, _ = s.calibrationText(s.calSnapshot())
+	if !strings.Contains(txt, "1440 frames") {
+		t.Errorf("text back on the measured pair = %q, want the stored 1440 frames", txt)
+	}
+}
+
+// TestSettingsRefusedCalibrationSaysSo: a refusal is a message, not a
+// silent no-op — both the one this screen makes and the one the device's
+// owner makes when another screen is already measuring.
+func TestSettingsRefusedCalibrationSaysSo(t *testing.T) {
+	audio := newSettingsBlockingAudio()
+	s, _ := newSettingsFixture(t, audio)
+
+	if !s.startCalibration() {
+		t.Fatal("startCalibration refused")
+	}
+	<-audio.started
+	if s.startCalibration() {
+		t.Error("a second calibration started while one was in flight")
+	}
+	if !strings.Contains(s.notice, "already running") {
+		t.Errorf("notice after a refused second run = %q, want it to say one is already running", s.notice)
+	}
+	if calls, _, _ := audio.stats(); calls != 1 {
+		t.Errorf("Calibrate called %d times, want 1", calls)
+	}
+
+	// A second visit builds a new screen, so the guard that matters lives
+	// with the device. Its refusal comes back as an error and is shown.
+	busy := errors.New("a calibration is already running on this device")
+	audio.setRefusal(busy)
+	s2 := NewSettings(s.sh)
+	if !s2.startCalibration() {
+		t.Fatal("the second screen never asked the backend")
+	}
+	sn := settingsWaitPhase(t, s2, calFailed)
+	txt, col := s2.calibrationText(sn)
+	if !strings.Contains(txt, busy.Error()) {
+		t.Errorf("refusal text = %q, want the device owner's message", txt)
+	}
+	if col != colMiss {
+		t.Errorf("refusal color = %v, want colMiss", col)
+	}
+
+	s2.Close()
+	s.Close()
+}
+
+// TestSettingsInputLockedWhileCalibrating: the device rows and the
+// count-in are the settings a running measurement depends on, so they
+// ignore input until it finishes — visibly, and only until it finishes.
+func TestSettingsInputLockedWhileCalibrating(t *testing.T) {
+	audio := newSettingsBlockingAudio()
+	s, p := newSettingsFixture(t, audio)
+	capBefore, playBefore, countBefore := s.capIdx, s.playIdx, s.countIn
+
+	if !s.startCalibration() {
+		t.Fatal("startCalibration refused")
+	}
+	<-audio.started
+	savesBefore := p.saves
+
+	s.cur = 0 // capture
+	s.adjust(+1)
+	if s.capIdx != capBefore {
+		t.Errorf("capture index changed by left/right mid-run: %d, want %d", s.capIdx, capBefore)
+	}
+	s.activate()
+	if s.capIdx != capBefore {
+		t.Errorf("capture index changed by enter mid-run: %d, want %d", s.capIdx, capBefore)
+	}
+	s.cur = 1 // playback
+	s.adjust(-1)
+	if s.playIdx != playBefore {
+		t.Errorf("playback index changed mid-run: %d, want %d", s.playIdx, playBefore)
+	}
+	s.cur = len(s.rows) - 1 // count-in
+	s.adjust(+1)
+	s.activate()
+	if s.countIn != countBefore || p.countIn != countBefore {
+		t.Errorf("count-in changed mid-run: %d (prefs %d), want %d", s.countIn, p.countIn, countBefore)
+	}
+	if p.saves != savesBefore {
+		t.Errorf("a locked row still wrote to prefs (saves = %d, was %d)", p.saves, savesBefore)
+	}
+	if !strings.Contains(s.notice, "locked") {
+		t.Errorf("ignored input left no message: %q", s.notice)
+	}
+	// Navigation is never locked: the user can still read the screen.
+	s.moveCursor(+1)
+	s.moveCursor(-1)
+
+	close(audio.release)
+	settingsWaitPhase(t, s, calDone)
+	s.syncSettings()
+	if s.notice != "" {
+		t.Errorf("the lock notice outlived the run: %q", s.notice)
+	}
+
+	s.cur = 0
+	s.adjust(+1)
+	if s.capIdx == capBefore {
+		t.Error("the capture row is still locked after the run finished")
+	}
+	if p.saves == savesBefore {
+		t.Error("the change accepted after the run was not saved")
 	}
 }
 

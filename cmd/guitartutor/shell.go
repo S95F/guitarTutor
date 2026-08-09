@@ -1,11 +1,16 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/ebitengine/oto/v3"
 
@@ -47,33 +52,130 @@ func runShell() error {
 // --- Prefs -------------------------------------------------------------
 
 // shellPrefs adapts the persisted config to the UI's Prefs facade. Every
-// setter writes through to the in-memory config; Save persists. Screens
-// call it only from the game loop, so no locking is needed.
+// setter writes through to the in-memory config; Save persists.
+//
+// It is safe for concurrent use, and has to be: the calibration wizard
+// runs off the game loop (AudioServices.Calibrate blocks for seconds) and
+// stores its result into the same config the game loop is reading and
+// saving. Without the mutex below that is a concurrent map write against
+// a concurrent map iteration inside encoding/json — a fatal, unrecoverable
+// runtime throw that kills the process mid-practice.
+//
+// Config.Save's value receiver is NOT protection: copying a Config copies
+// the map headers, so the marshaller still walks the very maps another
+// goroutine is writing. Save therefore takes a deep copy under the lock
+// and marshals that, outside the lock (the write touches the disk and has
+// no business blocking the game loop).
+//
+// Two Saves must also not reach the file at the same time: appconfig.Save
+// is atomic per call (write a temp file, rename over the target), but two
+// concurrent renames onto one path fail outright on Windows ("Access is
+// denied"), which would surface to the user as a bogus "could not save".
+// saveMu serializes the write. It is taken BEFORE the snapshot, so the
+// last snapshot taken is the last one written and a queued Save can never
+// overwrite newer state with older.
 type shellPrefs struct {
-	cfg appconfig.Config
+	saveMu sync.Mutex
+	mu     sync.Mutex
+	cfg    appconfig.Config
 }
 
 func (p *shellPrefs) Recents() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	out := make([]string, len(p.cfg.Recents))
 	copy(out, p.cfg.Recents)
 	return out
 }
 
-func (p *shellPrefs) AddRecent(path string) { p.cfg.AddRecent(path) }
+func (p *shellPrefs) AddRecent(path string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cfg.AddRecent(path)
+}
 
 // RemoveRecent is the optional extension the browser probes for, so
 // forgetting a recent survives a restart instead of lasting one session.
-func (p *shellPrefs) RemoveRecent(path string) { p.cfg.ForgetRecent(path) }
+func (p *shellPrefs) RemoveRecent(path string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cfg.ForgetRecent(path)
+}
 
-func (p *shellPrefs) SoundFont() string         { return p.cfg.SoundFontPath }
-func (p *shellPrefs) SetSoundFont(path string)  { p.cfg.SoundFontPath = path }
-func (p *shellPrefs) CountIn() int              { return p.cfg.CountInBeats }
-func (p *shellPrefs) SetCountIn(beats int)      { p.cfg.CountInBeats = beats }
-func (p *shellPrefs) Devices() (string, string) { return p.cfg.CaptureDeviceID, p.cfg.PlaybackDeviceID }
+func (p *shellPrefs) SoundFont() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cfg.SoundFontPath
+}
+
+func (p *shellPrefs) SetSoundFont(path string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cfg.SoundFontPath = path
+}
+
+func (p *shellPrefs) CountIn() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cfg.CountInBeats
+}
+
+func (p *shellPrefs) SetCountIn(beats int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cfg.CountInBeats = beats
+}
+
+func (p *shellPrefs) Devices() (string, string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cfg.CaptureDeviceID, p.cfg.PlaybackDeviceID
+}
+
 func (p *shellPrefs) SetDevices(cap, play string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.cfg.CaptureDeviceID, p.cfg.PlaybackDeviceID = cap, play
 }
-func (p *shellPrefs) Save() error { return p.cfg.Save() }
+
+func (p *shellPrefs) Save() error {
+	p.saveMu.Lock()
+	defer p.saveMu.Unlock()
+	return p.snapshot().Save()
+}
+
+// snapshot returns a deep copy of the config: the maps and the recents
+// slice are cloned, so nothing the caller (or encoding/json inside Save)
+// touches afterwards aliases state another goroutine may be writing.
+func (p *shellPrefs) snapshot() appconfig.Config {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	c := p.cfg
+	c.LatencyOffsets = maps.Clone(p.cfg.LatencyOffsets)
+	c.LatencyConfidence = maps.Clone(p.cfg.LatencyConfidence)
+	c.Recents = slices.Clone(p.cfg.Recents)
+	return c
+}
+
+// offsetFor reads a stored calibration under the lock. calibratedOffset
+// takes a Config by value, which shares the map headers — so the read has
+// to happen while the lock is held, not on a copy handed out first.
+func (p *shellPrefs) offsetFor(captureID, playbackID string) (int, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return calibratedOffset(p.cfg, captureID, playbackID)
+}
+
+// StoreOffset records a calibration result and persists it, all under the
+// same lock discipline as everything else here. It exists so the
+// calibration goroutine never reaches into p.cfg directly: that reach was
+// the write half of the fatal map race.
+func (p *shellPrefs) StoreOffset(captureID, playbackID string, offsetFrames int, confidence float64) error {
+	p.mu.Lock()
+	p.cfg.SetOffset(captureID, playbackID, offsetFrames, confidence)
+	p.mu.Unlock()
+	return p.Save()
+}
 
 // Path is the optional extension the settings screen uses for its footer.
 // An unresolvable config location is shown as such rather than hidden.
@@ -87,10 +189,34 @@ func (p *shellPrefs) Path() string {
 
 // --- Audio -------------------------------------------------------------
 
-// shellAudio adapts the duplex backend to the UI's AudioServices.
+// errCalibrationBusy reports a calibration refused because one is already
+// running. The guard lives here, on the object that owns the device, and
+// not on the settings screen: the shell rebuilds that screen on every
+// visit, so a per-screen flag guards nothing across visits.
+var errCalibrationBusy = errors.New("a calibration is already running on this device — wait for it to finish")
+
+// The settings screen discovers cancellation by type-asserting for this
+// method set, so dropping it would not break the build — it would silently
+// leave a calibration holding the audio device for its full timeout after
+// the user has left the screen. That is the exact class of silent
+// degradation this project keeps finding in review, so assert the shape at
+// compile time instead of trusting a runtime probe.
+var _ interface {
+	ui.AudioServices
+	CalibrateContext(ctx context.Context, captureID, playbackID string, progress func(float64)) (int, float64, error)
+} = (*shellAudio)(nil)
+
+// shellAudio adapts the duplex backend to the UI's AudioServices. One
+// instance is created per run and owns the capture/playback pair, so it is
+// also the right place for the "one calibration at a time" guard.
 type shellAudio struct {
 	backend audio.Backend
 	prefs   *shellPrefs
+
+	// calibrating is true while a pass holds the device. Two settings
+	// screens (or a screen and a stale goroutine from the previous one)
+	// must not drive one device pair at the same time.
+	calibrating atomic.Bool
 }
 
 func (a *shellAudio) BackendName() string { return a.backend.Name() }
@@ -116,16 +242,34 @@ func toOptions(devs []audio.DeviceInfo) []ui.DeviceOption {
 }
 
 func (a *shellAudio) CalibratedOffset(captureID, playbackID string) (int, bool) {
-	return calibratedOffset(a.prefs.cfg, captureID, playbackID)
+	return a.prefs.offsetFor(captureID, playbackID)
 }
 
+// Calibrate satisfies ui.AudioServices. It runs uncancellable — callers
+// that can abandon the wizard should use CalibrateContext instead.
 func (a *shellAudio) Calibrate(captureID, playbackID string, progress func(float64)) (int, float64, error) {
-	off, conf, err := calibrationPass(a.backend, captureID, playbackID, progress)
+	return a.CalibrateContext(context.Background(), captureID, playbackID, progress)
+}
+
+// CalibrateContext is the optional cancellable extension the settings
+// screen probes for: cancelling ctx aborts the pass and releases the
+// device promptly instead of holding it for the rest of the timeout after
+// the screen that started it is gone.
+//
+// Only one pass runs at a time. A second attempt is refused with
+// errCalibrationBusy rather than opening a second stream on the same
+// device pair.
+func (a *shellAudio) CalibrateContext(ctx context.Context, captureID, playbackID string, progress func(float64)) (int, float64, error) {
+	if !a.calibrating.CompareAndSwap(false, true) {
+		return 0, 0, errCalibrationBusy
+	}
+	defer a.calibrating.Store(false)
+
+	off, conf, err := calibrationPass(ctx, a.backend, captureID, playbackID, progress)
 	if err != nil {
 		return off, conf, err
 	}
-	a.prefs.cfg.SetOffset(captureID, playbackID, off, conf)
-	if err := a.prefs.Save(); err != nil {
+	if err := a.prefs.StoreOffset(captureID, playbackID, off, conf); err != nil {
 		return off, conf, fmt.Errorf("measured %d frames but could not save it: %w", off, err)
 	}
 	return off, conf, nil
@@ -152,6 +296,15 @@ type shellOpener struct {
 }
 
 func (o *shellOpener) Open(path string) (ui.Screen, []string, error) {
+	// Whatever the last Open started is finished the moment another piece
+	// is opened. This is the first statement, not something the success
+	// path does at the end: the Shell pops a practice screen (and calls
+	// CloseCurrent) only when the user leaves it, and nothing stops a
+	// second Open — nor does a load that fails halfway — so any later
+	// placement would strand the previous player or live session with its
+	// device still held and no reference left to close it.
+	o.CloseCurrent()
+
 	sc, warns, err := load(path)
 	if err != nil {
 		return nil, warns, err
@@ -192,9 +345,12 @@ func (o *shellOpener) Open(path string) (ui.Screen, []string, error) {
 	}
 
 	// Live scoring turns on when the user has chosen a capture device in
-	// settings; otherwise the piece plays back through oto.
+	// settings; otherwise the piece plays back through oto. setupListen
+	// resolves the backend itself and reports a missing one as an error,
+	// so a build without live audio lands in the same warn-and-fall-back
+	// path as a device that will not open, and says so.
 	captureID, _ := o.prefs.Devices()
-	if captureID != "" && audio.Available() != nil {
+	if captureID != "" {
 		session, err := setupListen(eng, app, display, "", "")
 		if err != nil {
 			// Losing live input must not stop practice: fall back to
@@ -221,8 +377,8 @@ func (o *shellOpener) Open(path string) (ui.Screen, []string, error) {
 // on different physical interfaces run on independent sample clocks that
 // drift apart over a session, which a static calibration cannot fix.
 func (o *shellOpener) warnOnSplitDevices(app *ui.App) {
-	b := audio.Available()
-	if b == nil {
+	b, err := liveBackend()
+	if err != nil {
 		return
 	}
 	capture, playback, err := b.Devices()

@@ -9,15 +9,23 @@ package ui
 // All state and every decision live in plain methods (moveCursor, adjust,
 // activate, setCountIn, startCalibration, syncSettings...) that tests
 // drive directly; Draw is a projection of that state and makes no
-// decisions of its own. Latency calibration blocks for seconds, so it runs
-// on its own goroutine and publishes through a mutex-guarded block that
-// the game loop only ever reads as a whole snapshot.
+// decisions of its own.
+//
+// Latency calibration blocks for seconds, so it runs on its own goroutine.
+// That goroutine never holds a reference to the screen: it writes into a
+// calRun, a small mutex-guarded value it shares with the Settings that
+// started it. Close (called by the Shell when the screen is popped) cancels
+// the run and marks the calRun abandoned, so a measurement that outlives
+// its screen publishes nowhere and, on a backend that honours the context,
+// gives the audio device back before the next screen asks for it.
 
 import (
+	"context"
 	"fmt"
 	"image/color"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
@@ -59,12 +67,113 @@ const (
 // lock and handed to the game loop as one value. Reading fields off the
 // live struct would let Draw see a half-written result; everything that
 // renders a calibration goes through a snapshot.
+//
+// CaptureID and PlaybackID are the pair the run was started for. A result
+// describes only the pair it was measured on, so the projections compare
+// them against the current selection and refuse to show a measurement the
+// user has since navigated away from.
 type calSnap struct {
 	Phase      calPhase
 	Progress   float64 // [0, 1], as reported by the callback
 	Frames     int     // valid when Phase == calDone
 	Confidence float64 // valid when Phase == calDone
 	Err        error   // valid when Phase == calFailed
+	CaptureID  string  // the pair this run was started for
+	PlaybackID string
+}
+
+// calRun is the mutable state of one calibration run. It is the only thing
+// the calibration goroutine writes to: the goroutine captures a *calRun and
+// never a *Settings, so a run that outlives its screen cannot touch it.
+//
+// capID, playID, cancel and done are set before the goroutine starts and
+// never written again, so they are read without the lock; everything below
+// mu is written by the goroutine and read by the game loop.
+type calRun struct {
+	capID  string
+	playID string
+	cancel context.CancelFunc
+	done   chan struct{} // closed when the goroutine returns
+
+	mu        sync.Mutex
+	abandoned bool // the screen was closed; publish nothing more
+	phase     calPhase
+	progress  float64
+	frames    int
+	conf      float64
+	err       error
+}
+
+// setProgress moves the bar, clamped, for as long as the run is both
+// current and still wanted.
+func (r *calRun) setProgress(p float64) {
+	if p < 0 {
+		p = 0
+	} else if p > 1 {
+		p = 1
+	}
+	r.mu.Lock()
+	if !r.abandoned && r.phase == calRunning {
+		r.progress = p
+	}
+	r.mu.Unlock()
+}
+
+// finish publishes the outcome in one critical section, so the game loop
+// never sees a frame count without its phase. An abandoned run publishes
+// nothing: its screen is gone and the result belongs to nobody.
+func (r *calRun) finish(frames int, conf float64, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.abandoned {
+		return
+	}
+	if err != nil {
+		r.phase, r.err = calFailed, err
+		return
+	}
+	r.phase, r.frames, r.conf, r.progress = calDone, frames, conf, 1
+}
+
+// abandon detaches the run from its screen and asks the backend to stop.
+// It never blocks: the caller waits on done separately, so a progress
+// callback contending for mu cannot deadlock the game loop.
+func (r *calRun) abandon() {
+	r.mu.Lock()
+	r.abandoned = true
+	r.mu.Unlock()
+	if r.cancel != nil {
+		r.cancel()
+	}
+}
+
+// abandonedNow reports whether the run has been detached from its screen.
+func (r *calRun) abandonedNow() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.abandoned
+}
+
+// snapshot copies the published state out under the lock.
+func (r *calRun) snapshot() calSnap {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return calSnap{
+		Phase:      r.phase,
+		Progress:   r.progress,
+		Frames:     r.frames,
+		Confidence: r.conf,
+		Err:        r.err,
+		CaptureID:  r.capID,
+		PlaybackID: r.playID,
+	}
+}
+
+// running reports whether the measurement is still in flight.
+func (r *calRun) running() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.phase == calRunning
 }
 
 // settingsPather is the optional interface a Prefs implementation may
@@ -79,10 +188,33 @@ type settingsPather interface{ Path() string }
 // settingsDefaultRate, or whatever SetSampleRate was given.
 type settingsRater interface{ SampleRate() int }
 
+// settingsCanceller is the optional interface an AudioServices
+// implementation may satisfy to accept a cancellation context for a
+// calibration run. A backend that implements it gives the capture and
+// playback devices back as soon as the screen is closed, instead of
+// holding them for the rest of the measurement; one that does not is still
+// detached from the screen by Close, it just keeps the device until its own
+// timeout expires.
+type settingsCanceller interface {
+	CalibrateContext(ctx context.Context, captureID, playbackID string, progress func(float64)) (frames int, confidence float64, err error)
+}
+
+// calibrateWith runs a measurement, preferring the cancellable entry point
+// when the backend offers one.
+func calibrateWith(ctx context.Context, a AudioServices, captureID, playbackID string, progress func(float64)) (int, float64, error) {
+	if c, ok := a.(settingsCanceller); ok {
+		return c.CalibrateContext(ctx, captureID, playbackID, progress)
+	}
+	return a.Calibrate(captureID, playbackID, progress)
+}
+
 // Settings is the configuration screen: audio devices, latency
 // calibration, SoundFont and count-in, each writing through
 // Services().Prefs and saving immediately. A save error is displayed in
 // the footer and never blocks the UI.
+//
+// The screen owns at most one calibration run at a time, and gives it up
+// in Close, which the Shell calls when the screen is popped.
 //
 // The zero value is not usable; build one with NewSettings.
 type Settings struct {
@@ -115,22 +247,30 @@ type Settings struct {
 
 	pick func(exts []string, chosen func(string))
 
-	// mu guards everything written from outside the game loop: the
-	// calibration run's published state and the file picker's mailbox.
-	// The game loop reads them through calSnapshot and syncSettings.
-	mu        sync.Mutex
-	phase     calPhase
-	progress  float64
-	calFrames int
-	calConf   float64
-	calErr    error
-	pendingSF *string
+	// run is the calibration this screen started, or nil. The pointer is
+	// game-loop-owned (startCalibration, resetCalibration and Close are the
+	// only writers, and all three run on the loop); the value it points at
+	// carries its own lock, because the calibration goroutine writes to it.
+	run *calRun
 	// lastPhase is game-loop-owned: syncSettings compares it against the
 	// snapshot to notice a run that has just finished.
 	lastPhase calPhase
+	// notice explains a refused action — a second calibration, or a device
+	// or count-in change during a run — so a locked key is visibly ignored
+	// rather than silently dropped.
+	notice string
+
+	// mu guards the file picker's mailbox, which the picker's completion
+	// callback may write from any goroutine.
+	mu        sync.Mutex
+	pendingSF *string
 }
 
 var _ Screen = (*Settings)(nil)
+
+// The Shell's teardown hook probes a popped screen for this interface, and
+// Settings answers it: see Close.
+var _ interface{ Close() } = (*Settings)(nil)
 
 // NewSettings builds the settings screen for sh. It enumerates the audio
 // devices once, up front: a settings screen that re-scans every frame
@@ -315,12 +455,46 @@ func (s *Settings) focused() (settingsRow, bool) {
 	return s.rows[s.cur], true
 }
 
+// calibrating reports whether a measurement this screen started is still
+// in flight.
+func (s *Settings) calibrating() bool { return s.run != nil && s.run.running() }
+
+// calLockedNotice is what the screen says when it ignores a key because a
+// measurement is running.
+const calLockedNotice = "a calibration is running: the device pair and count-in are locked until it finishes" +
+	" (changing them mid-run would measure one pair and store it against another)"
+
+// calBusyNotice is what the screen says when a second calibration is asked
+// for while one is still in flight.
+const calBusyNotice = "a calibration is already running: two overlapping runs would measure each other"
+
+// lockedDuringRun reports whether row r must ignore input right now, and
+// posts the explanation when it does. The device pair and the count-in are
+// the rows a running measurement depends on: the pair is what is being
+// measured, and the count-in writes and saves preferences the run's own
+// store-and-save will race with.
+func (s *Settings) lockedDuringRun(r settingsRow) bool {
+	if !s.calibrating() {
+		return false
+	}
+	switch r {
+	case srCapture, srPlayback, srCountIn:
+		s.notice = calLockedNotice
+		return true
+	}
+	return false
+}
+
 // adjust applies a Left (d = -1) or Right (d = +1) to the focused row.
 func (s *Settings) adjust(d int) {
 	r, ok := s.focused()
 	if !ok {
 		return
 	}
+	if s.lockedDuringRun(r) {
+		return
+	}
+	s.notice = ""
 	switch r {
 	case srCapture:
 		s.cycleCapture(d)
@@ -350,14 +524,19 @@ func (s *Settings) activate() {
 	if !ok {
 		return
 	}
+	if s.lockedDuringRun(r) {
+		return
+	}
 	switch r {
 	case srCountIn:
+		s.notice = ""
 		if s.countIn >= maxCountIn {
 			s.setCountIn(0)
 		} else {
 			s.setCountIn(s.countIn + 1)
 		}
 	case srSoundFont:
+		s.notice = ""
 		if s.pick == nil {
 			s.clearSoundFont()
 		} else {
@@ -477,80 +656,112 @@ func (s *Settings) save() {
 // ---- calibration ---------------------------------------------------------
 
 // startCalibration launches a measurement for the selected pair on its
-// own goroutine and reports whether it started. It refuses while a run is
-// already in flight — Calibrate drives the device for several seconds and
-// two overlapping runs would measure each other.
+// own goroutine and reports whether it started. It refuses, with a visible
+// notice, while a run this screen started is already in flight — Calibrate
+// drives the device for several seconds and two overlapping runs would
+// measure each other.
+//
+// That guard only covers this instance. The screen is rebuilt on every
+// visit, so the device's owner — the AudioServices implementation — holds
+// the guard that spans instances; its refusal comes back as an error from
+// Calibrate and is displayed like any other failure.
 func (s *Settings) startCalibration() bool {
 	a := s.audio()
 	if a == nil || !s.hasDevices() {
 		return false
 	}
-	// The device pair is read here, on the game loop, so the goroutine
-	// never touches the selection state.
-	capID, playID := s.selectedIDs()
-
-	s.mu.Lock()
-	if s.phase == calRunning {
-		s.mu.Unlock()
+	if s.calibrating() {
+		s.notice = calBusyNotice
 		return false
 	}
-	s.phase, s.progress = calRunning, 0
-	s.calFrames, s.calConf, s.calErr = 0, 0, nil
-	s.mu.Unlock()
+	// The device pair is read here, on the game loop, so the goroutine
+	// never touches the selection state — and the result stays bound to
+	// the pair it was measured for.
+	capID, playID := s.selectedIDs()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	run := &calRun{
+		capID:  capID,
+		playID: playID,
+		cancel: cancel,
+		done:   make(chan struct{}),
+		phase:  calRunning,
+	}
+	s.run = run
+	s.lastPhase = calRunning
+	s.notice = ""
 
 	go func() {
-		frames, conf, err := a.Calibrate(capID, playID, func(p float64) {
-			if p < 0 {
-				p = 0
-			} else if p > 1 {
-				p = 1
-			}
-			s.mu.Lock()
-			// Only a run that is still current may move the bar.
-			if s.phase == calRunning {
-				s.progress = p
-			}
-			s.mu.Unlock()
-		})
-		s.mu.Lock()
-		// The result lands in one critical section, so the game loop
-		// never sees a frame count without its phase.
-		if err != nil {
-			s.phase, s.calErr = calFailed, err
-		} else {
-			s.phase, s.calFrames, s.calConf = calDone, frames, conf
-			s.progress = 1
-		}
-		s.mu.Unlock()
+		// The goroutine closes over run, ctx and a — never over s — so
+		// nothing it does can reach a screen that has been popped.
+		defer close(run.done)
+		defer cancel()
+		frames, conf, err := calibrateWith(ctx, a, capID, playID, run.setProgress)
+		run.finish(frames, conf, err)
 	}()
 	return true
+}
+
+// settingsCloseGrace bounds how long Close waits for a cancelled
+// calibration to return. A backend that honours the context returns at
+// once; one that does not must not hold the game loop hostage, so the wait
+// gives up and the (already detached) run finishes on its own.
+const settingsCloseGrace = 300 * time.Millisecond
+
+// Close releases what the screen owns. The Shell calls it when the screen
+// is popped: an Escape during a measurement would otherwise leave the run
+// holding the capture and playback devices for the rest of its timeout,
+// and a piece opened seconds later would collide with a live duplex
+// stream.
+//
+// It cancels the run, detaches it so nothing it publishes can be seen
+// again, and waits — briefly — for the goroutine to return, so the device
+// is free before the next screen asks for it. Calling it twice, or with no
+// run in flight, does nothing.
+func (s *Settings) Close() {
+	run := s.run
+	s.run = nil
+	s.lastPhase = calIdle
+	if run == nil {
+		return
+	}
+	run.abandon()
+	select {
+	case <-run.done:
+	case <-time.After(settingsCloseGrace):
+	}
 }
 
 // resetCalibration drops the displayed result of the last run. A run
 // still in flight is left alone: it owns the device until it returns.
 func (s *Settings) resetCalibration() {
-	s.mu.Lock()
-	if s.phase != calRunning {
-		s.phase, s.progress = calIdle, 0
-		s.calFrames, s.calConf, s.calErr = 0, 0, nil
-		s.lastPhase = calIdle
+	if s.run == nil || s.run.running() {
+		return
 	}
-	s.mu.Unlock()
+	s.run = nil
+	s.lastPhase = calIdle
 }
 
-// calSnapshot copies the calibration state out under the lock. Every
+// calSnapshot copies the calibration state out under the run's lock. Every
 // reader — Update, Draw, tests — goes through it, so no caller can
 // observe a partially written result.
 func (s *Settings) calSnapshot() calSnap {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return calSnap{
-		Phase:      s.phase,
-		Progress:   s.progress,
-		Frames:     s.calFrames,
-		Confidence: s.calConf,
-		Err:        s.calErr,
+	if s.run == nil {
+		return calSnap{Phase: calIdle}
 	}
+	return s.run.snapshot()
+}
+
+// snapIsCurrent reports whether sn describes the pair the user is looking
+// at. A measurement taken on one pair says nothing about another, so a
+// snapshot whose pair has been superseded is not shown as a result for the
+// pair now selected.
+func (s *Settings) snapIsCurrent(sn calSnap) bool {
+	if sn.Phase == calIdle {
+		return true
+	}
+	capID, playID := s.selectedIDs()
+	return sn.CaptureID == capID && sn.PlaybackID == playID
 }
 
 // syncSettings drains what other goroutines have posted: a SoundFont
@@ -561,14 +772,19 @@ func (s *Settings) syncSettings() {
 	s.mu.Lock()
 	sf := s.pendingSF
 	s.pendingSF = nil
-	phase := s.phase
 	s.mu.Unlock()
 
 	if sf != nil && *sf != s.soundFont {
 		s.applySoundFont(*sf)
 	}
+	phase := s.calSnapshot().Phase
 	if phase != s.lastPhase {
 		s.lastPhase = phase
+		if phase != calRunning {
+			// Whatever the run was blocking is allowed again, so the
+			// notice explaining the block has expired with it.
+			s.notice = ""
+		}
 		if phase == calDone {
 			s.refreshOffset()
 		}
@@ -765,9 +981,29 @@ func (s *Settings) soundFontText() string {
 	return s.soundFont
 }
 
+// storedCalibrationText renders what is known about the selected pair
+// without any live run: the offset the backend has on file, or an admission
+// that there is none.
+func (s *Settings) storedCalibrationText() (string, color.RGBA) {
+	if s.offOK {
+		return "stored " + s.framesText(s.offFrames), colHUD
+	}
+	return "not measured for this pair", colClose
+}
+
 // calibrationText renders the calibration row's value and the color to
-// draw it in, from a snapshot taken by the caller.
+// draw it in, from a snapshot taken by the caller. A snapshot belonging to
+// a pair the user has left behind is never shown as this pair's result:
+// the stored value stands instead, and a run still measuring the old pair
+// says so rather than letting its progress read as this pair's.
 func (s *Settings) calibrationText(sn calSnap) (string, color.RGBA) {
+	if !s.snapIsCurrent(sn) {
+		txt, col := s.storedCalibrationText()
+		if sn.Phase == calRunning {
+			return txt + "  (measuring the previous pair)", col
+		}
+		return txt, col
+	}
 	switch sn.Phase {
 	case calRunning:
 		return fmt.Sprintf("measuring... %3.0f%%", sn.Progress*100), colSounding
@@ -776,10 +1012,7 @@ func (s *Settings) calibrationText(sn calSnap) (string, color.RGBA) {
 	case calFailed:
 		return "failed: " + sn.Err.Error(), colMiss
 	}
-	if s.offOK {
-		return "stored " + s.framesText(s.offFrames), colHUD
-	}
-	return "not measured for this pair", colClose
+	return s.storedCalibrationText()
 }
 
 // configText renders the footer's config-file location.
@@ -873,7 +1106,7 @@ func (s *Settings) Draw(dst *ebiten.Image) {
 		txt, col := s.calibrationText(sn)
 		s.drawRow(dst, &y, row, "round-trip offset", txt, col)
 		row++
-		if sn.Phase == calRunning {
+		if sn.Phase == calRunning && s.snapIsCurrent(sn) {
 			const barW, barH = 320, 8
 			x0 := float32(settingsValueX)
 			vector.StrokeRect(dst, x0, float32(y), barW, barH, 1, colString, false)
@@ -886,6 +1119,16 @@ func (s *Settings) Draw(dst *ebiten.Image) {
 	} else {
 		drawText(dst, "unavailable without a capture and playback device", settingsValueX, y, colBarline)
 		y += settingsLineH + 6
+	}
+
+	// An input the run is holding off was ignored on purpose; say so where
+	// the user is looking rather than swallowing the key.
+	if s.notice != "" {
+		for _, l := range wrapText(s.notice, 132) {
+			drawText(dst, l, settingsValueX, y, colClose)
+			y += settingsLineH
+		}
+		y += 4
 	}
 
 	// --- soundfont ---

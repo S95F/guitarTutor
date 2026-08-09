@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -20,12 +22,25 @@ import (
 )
 
 // liveBackend returns the duplex backend or a friendly explanation.
-func liveBackend() (audio.Backend, error) {
+//
+// It is a variable rather than a plain function so tests can substitute a
+// fake backend: every path that reaches a real device funnels through
+// here, and a unit test must not open the machine's sound card.
+var liveBackend = func() (audio.Backend, error) {
 	b := audio.Available()
 	if b == nil {
 		return nil, fmt.Errorf("no live audio backend: this build has no cgo audio support or no audio system initialized (playback still works; live input does not)")
 	}
 	return b, nil
+}
+
+// setEventTap installs (or, with nil, removes) the engine's expected-note
+// tap. It is a variable for the same reason liveBackend is: the engine
+// offers no way to read the tap back, so nothing else could tell an
+// installed tap from a cleared one, and the rollback in setupListen is
+// precisely what needs testing.
+var setEventTap = func(eng *engine.Engine, fn func(ev score.NoteEvent, outFrame int64)) {
+	eng.SetEventTap(fn)
 }
 
 // runDevices lists capture and playback endpoints by name; -in/-out take a
@@ -293,7 +308,12 @@ func mergeNote(buf []pitch.Note, n pitch.Note) []pitch.Note {
 
 // setupListen wires the live practice loop: duplex stream -> engine
 // playback + pitch analysis -> scorer and wait gate -> UI feeds.
-func setupListen(eng *engine.Engine, app *ui.App, track int, inQ, outQ string) (*live.Session, error) {
+//
+// Every failure path leaves the engine exactly as it was found: in
+// particular the event tap is rolled back, so a caller that falls back to
+// plain playback is not left with an engine feeding expectations into a
+// scorer nobody drains (see the rollback below).
+func setupListen(eng *engine.Engine, app *ui.App, track int, inQ, outQ string) (session *live.Session, err error) {
 	b, err := liveBackend()
 	if err != nil {
 		return nil, err
@@ -319,9 +339,21 @@ func setupListen(eng *engine.Engine, app *ui.App, track int, inQ, outQ string) (
 	}
 	scorer := practice.NewScorer(pcfg)
 	gate := practice.NewWaitGate(pcfg)
-	eng.SetEventTap(scorer.ExpectNote)
+	// From here on the engine feeds this scorer. If the wiring below
+	// fails, the session that would have drained the scorer never exists,
+	// and an engine left tapped keeps appending expectations to a list
+	// nothing ever reads: unbounded growth, reallocating inside the render
+	// callback. Roll the tap back on every failure path — here, at the
+	// point that installed it, so no caller has to remember.
+	setEventTap(eng, scorer.ExpectNote)
+	wired := false
+	defer func() {
+		if !wired {
+			setEventTap(eng, nil)
+		}
+	}()
 
-	session, err := live.Start(live.Config{
+	session, err = live.Start(live.Config{
 		Backend: b,
 		Engine:  eng,
 		Stream: audio.StreamConfig{
@@ -348,17 +380,36 @@ func setupListen(eng *engine.Engine, app *ui.App, track int, inQ, outQ string) (
 	})
 	app.SetWaitControl(true)
 	fmt.Printf("listening on %s (offset %d frames, calibrated: %v)\n", b.Name(), offset, calibrated)
+	wired = true
 	return session, nil
 }
+
+// errCalibrationCanceled reports a pass abandoned through its context —
+// the caller asked for it (the settings screen was left), so it is not a
+// device fault and callers can tell the two apart.
+var errCalibrationCanceled = errors.New("calibration canceled")
 
 // calibrationPass plays the click train over a duplex stream, records the
 // input, and recovers the round-trip offset. progress, when non-nil, is
 // called from the audio thread with the capture's completion in [0, 1] —
 // so it must not block; the settings screen posts to a mailbox.
 //
+// The pass holds the audio device for as long as it runs, so it is
+// cancellable: cancelling ctx takes the same Stop/Close exit as the
+// timeout and returns errCalibrationCanceled promptly, instead of keeping
+// the device for the rest of the 20 s deadline after whoever wanted the
+// measurement has gone away.
+//
 // Shared by the `calibrate` subcommand and the in-app settings screen so
 // the two can never measure differently.
-func calibrationPass(b audio.Backend, inID, outID string, progress func(float64)) (int, float64, error) {
+func calibrationPass(ctx context.Context, b audio.Backend, inID, outID string, progress func(float64)) (int, float64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Already abandoned: do not touch the device at all.
+	if err := ctx.Err(); err != nil {
+		return 0, 0, fmt.Errorf("%w: %w", errCalibrationCanceled, err)
+	}
 	train := latency.ClickTrain(sampleRate, calClicks, calSpacing)
 	// Record for the train plus a second of slack so a large delay still
 	// lands inside the capture.
@@ -408,9 +459,15 @@ func calibrationPass(b audio.Backend, inID, outID string, progress func(float64)
 	}
 	// The run captures ~9 s of audio (8 clicks a second apart plus slack);
 	// well past that with no completion, no audio is flowing.
+	deadline := time.NewTimer(20 * time.Second)
+	defer deadline.Stop()
 	select {
 	case <-done:
-	case <-time.After(20 * time.Second):
+	case <-ctx.Done():
+		stream.Stop()
+		stream.Close()
+		return 0, 0, fmt.Errorf("%w: %w", errCalibrationCanceled, ctx.Err())
+	case <-deadline.C:
 		stream.Stop()
 		stream.Close()
 		return 0, 0, fmt.Errorf("calibration timed out — no audio flowed (check the devices with 'guitartutor devices')")
@@ -453,7 +510,9 @@ func runCalibrate(args []string) error {
 
 	fmt.Println("playing calibration clicks — the input must be able to hear the")
 	fmt.Println("output (mic near the speakers, or a loopback cable)...")
-	off, conf, err := calibrationPass(b, inID, outID, nil)
+	// The subcommand has no UI to abandon it from; Ctrl-C ends the
+	// process, so the timeout is the only bound it needs.
+	off, conf, err := calibrationPass(context.Background(), b, inID, outID, nil)
 	if err != nil {
 		return err
 	}

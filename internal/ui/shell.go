@@ -14,9 +14,30 @@ import (
 // screen finishes, the application exits. A Screen that wants to open
 // another one calls Shell.Show — screens are constructed by the package
 // that hosts them, so they may capture the Shell they belong to.
+//
+// A Screen that owns something beyond memory — a background goroutine, an
+// audio device — implements the optional Closer extension below, and the
+// Shell releases it on the way out.
 type Screen interface {
 	Update() error
 	Draw(*ebiten.Image)
+}
+
+// A Closer is the optional extension a Screen implements when leaving it
+// must release something: the Shell calls Close exactly once, when the
+// screen is popped, before the screen beneath resumes.
+//
+// This is how the settings screen cancels a calibration in flight instead
+// of letting it hold the audio device for the rest of its 20 s timeout,
+// long after the screen that started it is gone. Close must return
+// promptly — it runs on the game loop, so any wait it does for a
+// goroutine to unwind has to be bounded.
+//
+// It is declared as its own interface rather than folded into Screen so
+// that every existing screen keeps satisfying Screen unchanged; the Shell
+// probes for it with a type assertion.
+type Closer interface {
+	Close()
 }
 
 // An Opener turns a piece on disk into a practice screen, and tears the
@@ -195,6 +216,11 @@ func (s *Shell) Update() error {
 		if _, isPractice := top.(*App); isPractice && s.svc.Opener != nil {
 			s.svc.Opener.CloseCurrent()
 			s.SetTitle("guitarTutor")
+		}
+		// A screen that owns resources of its own releases them here, so
+		// nothing it started outlives it (see Closer).
+		if c, ok := top.(Closer); ok {
+			c.Close()
 		}
 		err = nil
 	}
