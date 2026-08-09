@@ -88,6 +88,18 @@ type Detector struct {
 	prevHop     float64 // previous hop's RMS, for the rising-edge test
 	lastOnset   int64   // center stamp of the last onset
 
+	// Chroma/strum accumulation, all nil/zero unless Config.Strums.
+	chroma     *chromaFold
+	acc        [PitchClasses]float64 // unnormalized chroma of the open span
+	accActive  bool
+	accHops    int   // folded hops so far; -1 skips the onset hop itself
+	accFrame   int64 // the onset's stamp, which the Strum carries
+	accRMS     float64
+	accClarity float64
+	strums     []Strum
+
+	winF32 []float32 // Config.Estimator's input window; nil without one
+
 	out []Frame
 }
 
@@ -135,6 +147,17 @@ func NewDetector(cfg Config) *Detector {
 	d.msum = make([]float64, d.tauMax+2)
 	d.nsdf = make([]float64, d.tauMax+2)
 	d.yin = make([]float64, d.tauMax+2)
+	if cfg.Strums {
+		hi := float64(chromaMaxHz)
+		if cfg.MaxHz > hi {
+			hi = cfg.MaxHz
+		}
+		d.chroma = newChromaFold(cfg.SampleRate, 2*w, cfg.MinHz, hi)
+		d.strums = make([]Strum, 0, 8)
+	}
+	if cfg.Estimator != nil {
+		d.winF32 = make([]float32, w)
+	}
 	return d
 }
 
@@ -142,6 +165,7 @@ func NewDetector(cfg Config) *Detector {
 // returned slice is reused across calls — copy anything you keep.
 func (d *Detector) Process(samples []float32) []Frame {
 	out := d.out[:0]
+	d.strums = d.strums[:0]
 	for _, s := range samples {
 		d.ring[d.pos] = float64(s)
 		d.pos++
@@ -159,11 +183,110 @@ func (d *Detector) Process(samples []float32) []Frame {
 	return out
 }
 
-// analyze runs the full per-hop pipeline — energy gate, onset detector,
-// MPM NSDF via FFT autocorrelation, octave guard, YIN cross-check — over
-// the window that just completed, and returns its Frame stamped at the
-// window's center.
+// Strums returns the Strums COMPLETED by the most recent Process call —
+// same convention as the Frames Process returns, including the reused
+// backing array: copy anything you keep. It is always empty unless
+// Config.Strums is set.
+//
+// "Completed" means the strum's whole accumulation window has been fed, so
+// a Strum surfaces about StrumWindowHops hops after its onset and carries
+// that onset's frame stamp. An onset in the last few hops of a stream
+// never completes and is never reported.
+func (d *Detector) Strums() []Strum { return d.strums }
+
+// EstimatorName identifies the pitch estimator in use — Config.Estimator's
+// Name, or "mpm" for the built-in one — for logs and the settings UI.
+func (d *Detector) EstimatorName() string {
+	if d.cfg.Estimator != nil {
+		return d.cfg.Estimator.Name()
+	}
+	return "mpm"
+}
+
+// analyze runs one hop: the per-window pipeline, then the strum
+// accumulator that spans several hops.
 func (d *Detector) analyze() Frame {
+	f := d.analyzeWindow()
+	if d.chroma != nil {
+		d.advanceStrum(&f)
+	}
+	return f
+}
+
+// beginStrum opens a strum accumulation at an onset stamped at center. An
+// onset inside an open span truncates it: the evidence for the earlier
+// attack is whatever sounded before this one.
+func (d *Detector) beginStrum(center int64) {
+	d.finishStrum()
+	d.acc = [PitchClasses]float64{}
+	d.accActive = true
+	// -1 skips the onset hop's own window, which is mostly pre-attack
+	// (the attack only just entered its last hop) and whose spectrum is
+	// therefore the pick transient rather than the strings.
+	d.accHops = -1
+	d.accFrame = center
+	d.accRMS = 0
+	d.accClarity = 0
+}
+
+// advanceStrum credits one analyzed hop to the open span and emits the
+// Strum once the span is full.
+func (d *Detector) advanceStrum(f *Frame) {
+	if !d.accActive {
+		return
+	}
+	if d.accHops < 0 {
+		d.accHops = 0 // the onset hop, skipped
+		return
+	}
+	if f.RMS > d.accRMS {
+		d.accRMS = f.RMS
+	}
+	if f.Clarity > d.accClarity {
+		d.accClarity = f.Clarity
+	}
+	d.accHops++
+	if d.accHops >= d.cfg.StrumWindowHops {
+		d.finishStrum()
+	}
+}
+
+// finishStrum emits the open span, if any, as a Strum.
+func (d *Detector) finishStrum() {
+	if !d.accActive {
+		return
+	}
+	d.strums = append(d.strums, Strum{
+		Frame:   d.accFrame,
+		Chroma:  normalizeChroma(&d.acc),
+		RMS:     d.accRMS,
+		Clarity: d.accClarity,
+	})
+	d.accActive = false
+}
+
+// spectrum fills d.coeff with the power spectrum |X(k)|^2 of the current
+// window, zero-padded to 2W. Both the MPM autocorrelation (which inverts
+// it) and the chroma fold (which reads it) run off this one transform.
+func (d *Detector) spectrum() {
+	w := d.cfg.Window
+	copy(d.padded, d.win)
+	for i := w; i < 2*w; i++ {
+		d.padded[i] = 0
+	}
+	d.fft.Coefficients(d.coeff, d.padded)
+	for i, c := range d.coeff {
+		re, im := real(c), imag(c)
+		d.coeff[i] = complex(re*re+im*im, 0)
+	}
+}
+
+// analyzeWindow runs the full per-hop pipeline — energy gate, onset
+// detector, MPM NSDF via FFT autocorrelation, octave guard, YIN
+// cross-check — over the window that just completed, and returns its Frame
+// stamped at the window's center. A configured Config.Estimator replaces
+// everything from the NSDF onward; see estimateExternal.
+func (d *Detector) analyzeWindow() Frame {
 	w := d.cfg.Window
 	// Unroll the ring into chronological order: the oldest sample sits
 	// at the write position.
@@ -196,6 +319,9 @@ func (d *Detector) analyze() Frame {
 	if hopRMS > ref*d.jumpRatio && hopRMS > d.prevHop && center-d.lastOnset >= d.refractory {
 		frame.Onset = true
 		d.lastOnset = center
+		if d.chroma != nil {
+			d.beginStrum(center)
+		}
 	}
 	d.prevHop = hopRMS
 	d.smoothedHop = onsetSmoothing*d.smoothedHop + (1-onsetSmoothing)*hopRMS
@@ -204,19 +330,30 @@ func (d *Detector) analyze() Frame {
 		return frame // gated: unvoiced, no pitch analysis
 	}
 
+	// Chroma needs the same spectrum the autocorrelation does, so hops
+	// inside an open strum span pay for the transform even on the
+	// external-estimator path (which otherwise skips it entirely).
+	foldChroma := d.chroma != nil && d.accActive && d.accHops >= 0
+
+	if d.cfg.Estimator != nil {
+		if foldChroma {
+			d.spectrum()
+			d.chroma.fold(d.coeff, &d.acc)
+		}
+		return d.estimateExternal(frame)
+	}
+
 	tauLim := d.tauMax + 1
 
-	// r(tau) by FFT: zero-pad to 2W so the circular correlation equals
-	// the linear one, forward transform, power spectrum, inverse. The
-	// gonum transform is unnormalized, hence the 1/(2W).
-	copy(d.padded, d.win)
-	for i := w; i < 2*w; i++ {
-		d.padded[i] = 0
-	}
-	d.fft.Coefficients(d.coeff, d.padded)
-	for i, c := range d.coeff {
-		re, im := real(c), imag(c)
-		d.coeff[i] = complex(re*re+im*im, 0)
+	// r(tau) by FFT: spectrum zero-pads to 2W so the circular correlation
+	// equals the linear one and leaves the power spectrum in d.coeff;
+	// Sequence inverts it. The gonum transform is unnormalized, hence the
+	// 1/(2W).
+	d.spectrum()
+	if foldChroma {
+		// Before Sequence, which reads d.coeff without touching it —
+		// the fold and the autocorrelation share one transform.
+		d.chroma.fold(d.coeff, &d.acc)
 	}
 	d.fft.Sequence(d.acf, d.coeff)
 	inv := 1 / float64(2*w)
@@ -354,6 +491,41 @@ func (d *Detector) analyze() Frame {
 
 	frame.Clarity = clarity
 	if clarity >= d.cfg.ClarityThreshold {
+		frame.F0 = f0
+	}
+	return frame
+}
+
+// estimateExternal fills in frame's pitch from Config.Estimator instead of
+// the built-in MPM peak picking, and is only reached with one configured.
+//
+// What the estimator replaces: everything downstream of the FFT in the
+// monophonic path — NSDF key-maximum picking, the octave guard, the
+// sub-range alias guard, and the YIN cross-check. Those all arbitrate
+// between autocorrelation peaks, and an external estimator reports no
+// peaks to arbitrate; asking it for a second opinion on itself would be
+// theatre. The transform itself is skipped too unless a strum span needs
+// the spectrum for chroma.
+//
+// What still applies, unchanged: the RMS noise gate (a gated window never
+// reaches here), the onset detector and its refractory period, strum
+// accumulation, ClarityThreshold as the voicing rule, the MinHz/MaxHz
+// search range — enforced here so an out-of-range estimate is unvoiced
+// rather than a note the config says cannot exist, exactly as the built-in
+// path's bounded lag search guarantees — and, downstream, the Tracker's
+// median filter and note hysteresis, which only ever see Frames.
+func (d *Detector) estimateExternal(frame Frame) Frame {
+	for i, v := range d.win {
+		d.winF32[i] = float32(v)
+	}
+	f0, clarity := d.cfg.Estimator.EstimateF0(d.winF32)
+	if clarity > 1 {
+		clarity = 1
+	} else if clarity < 0 {
+		clarity = 0
+	}
+	frame.Clarity = clarity
+	if f0 >= d.cfg.MinHz && f0 <= d.cfg.MaxHz && clarity >= d.cfg.ClarityThreshold {
 		frame.F0 = f0
 	}
 	return frame

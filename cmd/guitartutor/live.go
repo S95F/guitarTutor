@@ -330,6 +330,15 @@ func setupListen(eng *engine.Engine, app *ui.App, track int, inQ, outQ string) (
 			PlaybackDevice: outID,
 		},
 		OnNotes: newOnNotes(eng, app, scorer, gate),
+		// Chord verification and palm-mute credit (Phase 4) both hang
+		// off strums; supplying this callback is what enables them.
+		// Without it the session silently scores like Phase 3: one hit
+		// and N-1 misses per strummed chord.
+		OnStrums: func(sts []pitch.Strum) {
+			for _, st := range sts {
+				scorer.DetectedStrum(st)
+			}
+		},
 	})
 	if err != nil {
 		return nil, err

@@ -83,6 +83,15 @@ func TestLiveLoopScoresLoopback(t *testing.T) {
 		Engine:  eng,
 		Stream:  audio.StreamConfig{SampleRate: sr, PeriodFrames: period},
 		OnNotes: onNotes,
+		// Phase 4: strums carry the chroma that verifies chords. Wired
+		// exactly as cmd/guitartutor does, so this test fails if that
+		// wiring is ever dropped — without it the bar-3 chord silently
+		// reverts to one hit and two misses.
+		OnStrums: func(sts []pitch.Strum) {
+			for _, st := range sts {
+				scorer.DetectedStrum(st)
+			}
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -134,12 +143,15 @@ func TestLiveLoopScoresLoopback(t *testing.T) {
 	if total != 16 {
 		t.Fatalf("judged %d notes, want 16 (stats %+v)", total, stats)
 	}
-	// Same floor as the scorer's own round trip: the strummed chord's
-	// three notes cannot all be verified by a monophonic detector.
-	if acc := stats.Accuracy(); acc < 0.80 {
-		t.Errorf("accuracy = %.3f, want >= 0.80 (stats %+v)", acc, stats)
+	// Phase 4 floor. Before chord verification the strummed chord cost
+	// three misses and capped this at 0.8125, so anything at or above
+	// 0.95 is unreachable without strums actually reaching the scorer
+	// through the live session — which is the point of asserting it here
+	// rather than only in the scorer's own round trip.
+	if acc := stats.Accuracy(); acc < 0.95 {
+		t.Errorf("accuracy = %.3f, want >= 0.95 (stats %+v)", acc, stats)
 	}
-	if stats.Hit < 12 {
+	if stats.Hit < 15 {
 		t.Errorf("hits = %d, want >= 12 (stats %+v)", stats.Hit, stats)
 	}
 }

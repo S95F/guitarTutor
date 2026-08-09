@@ -28,8 +28,8 @@ type Config struct {
 	Engine *engine.Engine
 	// Stream requests device/latency parameters (zero values default).
 	Stream audio.StreamConfig
-	// Pitch parameterizes detection; zero Window/Hop take defaults for
-	// the negotiated sample rate.
+	// Pitch parameterizes detection; zero fields take defaults for the
+	// negotiated sample rate. Setting OnStrums forces Pitch.Strums on.
 	Pitch pitch.Config
 	// OnNotes, when set, receives closed notes and the current sounding
 	// note after each analysis batch, plus the total capture frames
@@ -39,6 +39,26 @@ type Config struct {
 	// through as silence — so consumed never drifts from the device
 	// clock. Called on the analysis goroutine.
 	OnNotes func(closed []pitch.Note, current pitch.Note, sounding bool, consumed int64)
+	// OnStrums, when set, receives the strums (attack plus the chroma of
+	// the audio that followed it) completed by each analysis batch —
+	// what internal/practice.Scorer.DetectedStrum verifies chords and
+	// palm mutes from (ROADMAP Phase 4, docs/DECISIONS.md D4/D5).
+	// Setting it turns Pitch.Strums on, so a caller that wants chord
+	// scoring only has to supply the callback.
+	//
+	// A parallel callback rather than more parameters on OnNotes: the
+	// two carry different clocks (a Strum is stamped at its ONSET, a
+	// Note only when the tracker CLOSES it, seconds later for a ringing
+	// note), most call sites want only notes, and every existing one
+	// keeps compiling unchanged.
+	//
+	// Within a batch OnStrums runs BEFORE OnNotes, and the slice is only
+	// valid for the call — the detector reuses it. The order matters:
+	// OnNotes carries the consumed clock that wiring drives
+	// Scorer.Advance from, and Advance is what ages expectations into
+	// verdicts, so a strum from the same batch must be in the scorer's
+	// hands before that happens. Called on the analysis goroutine.
+	OnStrums func(strums []pitch.Strum)
 }
 
 // A Session is a running duplex practice session.
@@ -92,10 +112,17 @@ func Start(cfg Config) (*Session, error) {
 	neg := stream.Config()
 	pcfg := cfg.Pitch
 	if pcfg.SampleRate == 0 {
-		pcfg = pitch.DefaultConfig(neg.SampleRate)
+		// Only the rate is filled in from the negotiated stream;
+		// pitch.Config.withDefaults supplies the rest, so a caller who
+		// set (say) Strums or Estimator but left SampleRate at 0 keeps
+		// those fields instead of having the whole struct replaced.
+		pcfg.SampleRate = neg.SampleRate
+	}
+	if cfg.OnStrums != nil {
+		pcfg.Strums = true
 	}
 
-	go s.analyze(pcfg, kick, cfg.OnNotes)
+	go s.analyze(pcfg, kick, cfg.OnNotes, cfg.OnStrums)
 
 	if err := stream.Start(); err != nil {
 		close(s.stop)
@@ -107,9 +134,9 @@ func Start(cfg Config) (*Session, error) {
 }
 
 // analyze drains the ring through the detector/tracker until Stop.
-func (s *Session) analyze(cfg pitch.Config, kick <-chan struct{}, onNotes func([]pitch.Note, pitch.Note, bool, int64)) {
+func (s *Session) analyze(cfg pitch.Config, kick <-chan struct{}, onNotes func([]pitch.Note, pitch.Note, bool, int64), onStrums func([]pitch.Strum)) {
 	defer close(s.done)
-	a := newAnalyzer(s, cfg, onNotes)
+	a := newAnalyzer(s, cfg, onNotes, onStrums)
 	for {
 		select {
 		case <-s.stop:
@@ -128,10 +155,11 @@ type gapRec struct{ at, n int64 }
 // analyzer is the drain-loop state behind Session.analyze, split out so
 // tests can drive it synchronously against a hand-fed ring.
 type analyzer struct {
-	s       *Session
-	det     *pitch.Detector
-	trk     *pitch.Tracker
-	onNotes func([]pitch.Note, pitch.Note, bool, int64)
+	s        *Session
+	det      *pitch.Detector
+	trk      *pitch.Tracker
+	onNotes  func([]pitch.Note, pitch.Note, bool, int64)
+	onStrums func([]pitch.Strum)
 
 	chunk []float32
 	zeros []float32
@@ -143,14 +171,15 @@ type analyzer struct {
 	gaps        []gapRec // pending overflow gaps, in stream order
 }
 
-func newAnalyzer(s *Session, cfg pitch.Config, onNotes func([]pitch.Note, pitch.Note, bool, int64)) *analyzer {
+func newAnalyzer(s *Session, cfg pitch.Config, onNotes func([]pitch.Note, pitch.Note, bool, int64), onStrums func([]pitch.Strum)) *analyzer {
 	return &analyzer{
-		s:       s,
-		det:     pitch.NewDetector(cfg),
-		trk:     pitch.NewTracker(cfg),
-		onNotes: onNotes,
-		chunk:   make([]float32, 4096),
-		zeros:   make([]float32, 4096),
+		s:        s,
+		det:      pitch.NewDetector(cfg),
+		trk:      pitch.NewTracker(cfg),
+		onNotes:  onNotes,
+		onStrums: onStrums,
+		chunk:    make([]float32, 4096),
+		zeros:    make([]float32, 4096),
 	}
 }
 
@@ -195,6 +224,23 @@ func (a *analyzer) drain() {
 // reports the results. synthetic marks overflow-gap filler, which never
 // reaches the level meter (the meter shows what the device captured, not
 // what the ring lost).
+//
+// Strums are drained from the detector immediately after Process (the
+// slice it returns is reused on the next call) and delivered before the
+// notes, per Config.OnStrums.
+//
+// The zeroed splice cannot manufacture a strum, because it cannot
+// manufacture an ONSET: the detector fires one only when a hop's RMS
+// exceeds max(smoothed level, noise floor) times the jump ratio AND rises
+// above the previous hop, and a zeroed hop has an RMS of exactly 0 while
+// the noise-floor clamp keeps the comparison level strictly positive. So
+// filler is delivered here on the same terms as real capture and needs no
+// suppression. Two consequences worth naming: a strum whose accumulation
+// window was still open when the ring overflowed is completed over the
+// filler and still reported — it is genuine evidence about the audio
+// before the gap, only with a truncated tail — and the attack when real
+// capture resumes fires an onset exactly as it would have after real
+// silence, which is what the player played.
 func (a *analyzer) process(buf []float32, synthetic bool) {
 	if len(buf) == 0 {
 		return
@@ -204,7 +250,11 @@ func (a *analyzer) process(buf []float32, synthetic bool) {
 		a.s.publishLevel(buf)
 	}
 	frames := a.det.Process(buf)
+	strums := a.det.Strums()
 	closed := a.trk.Feed(frames)
+	if a.onStrums != nil && len(strums) > 0 {
+		a.onStrums(strums)
+	}
 	if a.onNotes != nil {
 		cur, ok := a.trk.Current()
 		a.onNotes(closed, cur, ok, a.consumed)

@@ -16,12 +16,33 @@
 // in two same-key windows goes to the expectation about to expire rather
 // than the nearest one (nearest-in-time let an early detection steal a
 // later duplicate's expectation and starve the earlier one into a
-// spurious Miss). Each pairing is final — one
-// detection satisfies at most one expectation and vice versa. Chords are
-// scored one expectation per chord note; the pitch engine is monophonic
-// (D4), so a strummed chord typically yields one match and the remaining
-// chord notes go Close/Miss. That is the honest Phase 2 behavior — chord
-// verification proper is Phase 4.
+// spurious Miss). Each pairing is final — one detection satisfies at most
+// one expectation and vice versa.
+//
+// Chords (Phase 4, D4). The pitch engine is monophonic, so a strummed
+// chord can never produce one detection per chord note; through Phase 3
+// that cost a chord one match and N-1 Misses on perfect audio. Chords are
+// therefore scored from a different signal: pitch.Strum, an attack plus
+// the octave-folded chroma of the audio that followed it. Because the app
+// already knows which notes are expected, verification only has to ask
+// whether each expected pitch class is present in that chroma —
+// expected-note verification by chroma-template correlation (Oudre et
+// al.), never blind polyphonic transcription. See DetectedStrum.
+//
+// Two clocks, two arrival times. A Strum reaches DetectedStrum at ONSET
+// time; a monophonic Note reaches Detected only when the tracker CLOSES
+// it, which for a ringing note is seconds later. Chord notes are
+// therefore judged early, off the strum, and the later Detected call
+// finds nothing pending and drops its detection. Single notes are left
+// alone by the strum path precisely because the late monophonic
+// detection scores them better — it carries cents, which chroma cannot.
+//
+// Damped notes (D5). A palm mute has an unmistakable attack and an
+// unusable fundamental: the tracker never opens a note, so the old
+// deadline path called it a Miss. An expectation that reaches its
+// deadline unmatched but with a Strum recorded in its window, and with
+// chroma energy at its own pitch class, now scores Close instead —
+// erring toward "we heard you" is the direction D5 asks for.
 package practice
 
 import (
@@ -96,6 +117,27 @@ type Config struct {
 	// sounded by the engine at output frame F arrives back in the
 	// capture stream near input frame F + offset.
 	LatencyOffsetFrames int
+	// ChordPresenceRatio is the fraction of a Strum's LARGEST chroma bin
+	// at or above which an expected pitch class counts as sounding
+	// during chord verification. A fraction rather than an absolute
+	// level because Chroma is normalized per strum, so only ratios are
+	// comparable across strums. 0 takes the default (0.45).
+	ChordPresenceRatio float64
+	// ChordCorrelationMin is the sanity gate on chord verification: the
+	// Pearson correlation between the Strum's chroma and the expected
+	// chord's binary pitch-class template must reach it before any
+	// per-note verdict is drawn from that strum. It rejects the two ways
+	// per-bin thresholding lies — a featureless chroma (noise, in which
+	// every bin is "present") and a chord that is simply not the one
+	// expected. Below it the strum still counts as an ONSET, so the
+	// damped-note path can still credit it. 0 takes the default (0.30);
+	// a perfect match scores 1, flat noise 0, a foreign chord negative.
+	ChordCorrelationMin float64
+	// MuteEnergyRatio is the fraction of the largest chroma bin at which
+	// an unmatched expectation with an onset in its window scores Close
+	// (a damped or palm-muted note) rather than Miss. 0 takes the
+	// default (0.20).
+	MuteEnergyRatio float64
 }
 
 // Default tolerance values for zero Config fields.
@@ -104,6 +146,20 @@ const (
 	defaultWindowMillis   = 150
 	defaultCentsTolerance = 35
 	defaultCloseCents     = 70
+	// defaultChordPresence is deliberately well below 1: chroma folds
+	// every partial of every string into 12 bins, so a chord tone that is
+	// not the loudest one still sits some way under the peak. Measured on
+	// the synthetic round-trip fixture's E5 chord (roundtrip_test.go, real
+	// detector), the two expected classes land at E 1.00 and B 0.68 while
+	// the loudest unexpected bin reaches 0.36 — 0.45 sits in that gap with
+	// room on both sides.
+	defaultChordPresence = 0.45
+	// defaultChordCorrMin is loose on purpose. The same fixture chord
+	// correlates 0.93 with its template, so the gate is nowhere near
+	// binding on a chord that is actually right; it exists to catch the
+	// featureless-chroma and wrong-chord cases, which score 0 and below.
+	defaultChordCorrMin = 0.30
+	defaultMuteEnergy   = 0.20
 )
 
 // withDefaults fills zero Config fields with the documented defaults.
@@ -123,6 +179,15 @@ func (cfg Config) withDefaults() Config {
 	if cfg.CloseCents < cfg.CentsTolerance {
 		cfg.CloseCents = cfg.CentsTolerance
 	}
+	if cfg.ChordPresenceRatio <= 0 {
+		cfg.ChordPresenceRatio = defaultChordPresence
+	}
+	if cfg.ChordCorrelationMin <= 0 {
+		cfg.ChordCorrelationMin = defaultChordCorrMin
+	}
+	if cfg.MuteEnergyRatio <= 0 {
+		cfg.MuteEnergyRatio = defaultMuteEnergy
+	}
 	return cfg
 }
 
@@ -131,10 +196,21 @@ func (cfg Config) withDefaults() Config {
 // abandoned marks one whose answering window was cut short by a seek or a
 // loop change rather than by the player (see AbandonBefore): it can still
 // be matched, but its deadline drops it instead of scoring a Miss.
+//
+// onset records that a Strum landed inside this expectation's timing
+// window without finalizing it (DetectedStrum). onsetEnergy is the best
+// chroma energy seen at the expectation's OWN pitch class across those
+// strums, as a fraction of that strum's largest bin, and onsetFrames the
+// timing error of the strum that supplied it. Together they are the
+// damped-note evidence Advance uses: an attack in the window plus energy
+// at the right pitch class is a palm mute, not a miss (D5).
 type expectation struct {
-	ev        score.NoteEvent
-	outFrame  int64
-	abandoned bool
+	ev          score.NoteEvent
+	outFrame    int64
+	abandoned   bool
+	onset       bool
+	onsetEnergy float64
+	onsetFrames int64
 }
 
 // A preMatch records a wait-confirming detection observed before its
@@ -170,6 +246,9 @@ type Scorer struct {
 	preMatch []preMatch // wait confirmations awaiting their released expectations
 	clock    int64      // latest output-clock frame seen from any feed (approximate; see WaitConfirmed)
 	stats    Stats
+	// strumCand is DetectedStrum's scratch list of in-window pending
+	// indices, kept to kill its per-strum allocation.
+	strumCand []int
 }
 
 // NewScorer builds a scorer. Zero Config fields take the documented
@@ -180,9 +259,10 @@ func NewScorer(cfg Config) *Scorer {
 		// Preallocated so ExpectNote (render goroutine) does not
 		// allocate in steady state; growth beyond this is rare and
 		// amortized.
-		pending:  make([]expectation, 0, 256),
-		results:  make([]NoteResult, 0, 256),
-		preMatch: make([]preMatch, 0, 8),
+		pending:   make([]expectation, 0, 256),
+		results:   make([]NoteResult, 0, 256),
+		preMatch:  make([]preMatch, 0, 8),
+		strumCand: make([]int, 0, 16),
 	}
 }
 
@@ -288,6 +368,206 @@ func (s *Scorer) Detected(notes []pitch.Note) {
 	}
 }
 
+// DetectedStrum feeds one attack-plus-chroma observation from the pitch
+// detector: the Phase 4 chord-verification path (D4).
+//
+// The strum's onset frame is mapped to the output clock the same way
+// Detected maps a note's Start — minus LatencyOffsetFrames — and the
+// pending expectations whose TimingWindowFrames window contains it are
+// the ones it may speak for. With none, the strum is dropped: the player
+// is noodling between phrases and D5 never penalizes that.
+//
+// CHORDS. Two or more in-window expectations sharing one Start tick (so
+// one outFrame) are a chord, and this strum is the only evidence that can
+// judge all of them — the monophonic tracker cannot report N simultaneous
+// notes by construction. The strum's chroma is correlated against the
+// chord's binary pitch-class template; if that clears
+// ChordCorrelationMin, each expected note is verified INDEPENDENTLY —
+// pitch class at or above ChordPresenceRatio of the largest bin is a Hit,
+// below it a Miss — and all of them finalize from this one strum. The
+// largest in-window chord group wins, nearest in time on a tie. Below the
+// correlation gate nothing is finalized: the chroma is either
+// featureless or belongs to some other chord, and the expectations are
+// left to their deadlines (which see the recorded onset).
+//
+// A chord Hit means "this pitch class was present in the strum", NOT "in
+// tune to CentsTolerance". Chroma is octave-folded energy and carries no
+// cents at all, so a chord-verified result reports ErrCents 0 with
+// Matched true, and ErrFrames measured from the onset. Do not read a 0
+// there as perfect intonation.
+//
+// SINGLE NOTES are deliberately not finalized here. The monophonic path
+// judges them strictly better — it has cents — and it is worth waiting
+// for even though the tracker delivers it much later, when the note
+// CLOSES. The strum only records that an onset happened inside the
+// expectation's window, along with the chroma energy at that
+// expectation's own pitch class; Advance turns that into damped-note
+// credit if no detection ever arrives.
+//
+// Ordering. Because a strum lands at onset time and a note lands at close
+// time, a chord's expectations are typically gone by the time Detected
+// sees the tracker's belated single-f0 reading of the same strum. That
+// detection then matches nothing and is dropped — the intended outcome,
+// and the reason judgement cannot be doubled: finalizing removes an
+// expectation from the pending set, so neither a later detection nor a
+// later strum can reach it again.
+func (s *Scorer) DetectedStrum(st pitch.Strum) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	win := int64(s.cfg.TimingWindowFrames)
+	off := int64(s.cfg.LatencyOffsetFrames)
+	stOut := st.Frame - off
+	if stOut > s.clock {
+		s.clock = stOut
+	}
+
+	cand := s.strumCand[:0]
+	for j := range s.pending {
+		if dt := stOut - s.pending[j].outFrame; dt >= -win && dt <= win {
+			cand = append(cand, j)
+		}
+	}
+	s.strumCand = cand
+	if len(cand) == 0 {
+		return
+	}
+
+	// Record the onset on every candidate BEFORE any finalizing, so the
+	// indices in cand stay valid; whatever the chord path then finalizes
+	// leaves the pending set and takes its recording with it.
+	peak := chromaPeak(st.Chroma)
+	for _, j := range cand {
+		exp := &s.pending[j]
+		e := 0.0
+		if peak > 0 {
+			e = float64(st.Chroma[pitch.ChromaOf(exp.ev.Key)]) / peak
+		}
+		if !exp.onset || e > exp.onsetEnergy {
+			exp.onsetEnergy = e
+			exp.onsetFrames = stOut - exp.outFrame
+		}
+		exp.onset = true
+	}
+
+	// The chord group: the largest set of candidates sharing a Start tick
+	// and outFrame, nearest in time on a tie.
+	group, groupN := -1, 0
+	for _, j := range cand {
+		n := 0
+		for _, k := range cand {
+			if s.pending[k].ev.Start == s.pending[j].ev.Start && s.pending[k].outFrame == s.pending[j].outFrame {
+				n++
+			}
+		}
+		if n < 2 {
+			continue
+		}
+		if group < 0 || n > groupN ||
+			(n == groupN && absInt64(stOut-s.pending[j].outFrame) < absInt64(stOut-s.pending[group].outFrame)) {
+			group, groupN = j, n
+		}
+	}
+	if group >= 0 {
+		s.verifyChord(st, stOut, s.pending[group].ev.Start, s.pending[group].outFrame, peak)
+	}
+}
+
+// verifyChord judges every pending expectation at (start, outFrame) from
+// one strum, or leaves them all pending if the strum is not credibly that
+// chord. Caller holds mu.
+func (s *Scorer) verifyChord(st pitch.Strum, stOut, start, outFrame int64, peak float64) {
+	if peak <= 0 {
+		return // no energy to fold: the strum says nothing
+	}
+	var tmpl [pitch.PitchClasses]bool
+	for j := range s.pending {
+		if s.pending[j].ev.Start == start && s.pending[j].outFrame == outFrame {
+			tmpl[pitch.ChromaOf(s.pending[j].ev.Key)] = true
+		}
+	}
+	if chordCorrelation(st.Chroma, tmpl) < s.cfg.ChordCorrelationMin {
+		return
+	}
+	thresh := s.cfg.ChordPresenceRatio * peak
+	keep := s.pending[:0]
+	for _, exp := range s.pending {
+		if exp.ev.Start != start || exp.outFrame != outFrame {
+			keep = append(keep, exp)
+			continue
+		}
+		r := NoteResult{Event: exp.ev, OutFrame: exp.outFrame, Verdict: VerdictMiss}
+		if float64(st.Chroma[pitch.ChromaOf(exp.ev.Key)]) >= thresh {
+			// ErrCents stays 0: chroma is octave-folded energy and
+			// knows nothing about intonation (see DetectedStrum).
+			r.Verdict = VerdictHit
+			r.Matched = true
+			r.ErrFrames = stOut - exp.outFrame
+		}
+		s.finalize(r)
+	}
+	s.pending = keep
+}
+
+// chromaPeak returns the largest bin. Chroma is documented normalized to
+// a peak of 1, but every threshold here is expressed against the measured
+// peak so an un-normalized or all-zero chroma degrades safely instead of
+// declaring every pitch class present.
+func chromaPeak(ch pitch.Chroma) float64 {
+	peak := 0.0
+	for _, v := range ch {
+		if float64(v) > peak {
+			peak = float64(v)
+		}
+	}
+	return peak
+}
+
+// chordCorrelation is the Pearson correlation between a strum's chroma
+// and the expected chord's binary pitch-class template — the sanity gate
+// on chord verification, following the chroma-template literature (Oudre
+// et al.) cited in D4.
+//
+// Mean-centering is what makes it useful. A raw dot product rewards loud
+// chroma regardless of shape, so noise with every bin lit scores well; a
+// centered correlation scores a featureless chroma 0 (no variance to
+// explain), a chord matching the template 1, and a chord whose energy
+// sits everywhere EXCEPT the expected classes negative. A degenerate
+// template (no classes, or all twelve) also yields 0, which the caller
+// reads as "not verifiable".
+func chordCorrelation(ch pitch.Chroma, tmpl [pitch.PitchClasses]bool) float64 {
+	var sumC, sumT float64
+	for i, v := range ch {
+		sumC += float64(v)
+		if tmpl[i] {
+			sumT++
+		}
+	}
+	meanC := sumC / pitch.PitchClasses
+	meanT := sumT / pitch.PitchClasses
+	var dot, normC, normT float64
+	for i, v := range ch {
+		a := float64(v) - meanC
+		b := -meanT
+		if tmpl[i] {
+			b = 1 - meanT
+		}
+		dot += a * b
+		normC += a * a
+		normT += b * b
+	}
+	if normC <= 0 || normT <= 0 {
+		return 0
+	}
+	return dot / math.Sqrt(normC*normT)
+}
+
+func absInt64(v int64) int64 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
 // Advance finalizes expectations whose windows have passed as of the
 // given input-stream frame (call it as capture progresses).
 //
@@ -318,17 +598,38 @@ func (s *Scorer) Advance(inFrame int64) {
 			// player never got their window, so neither a Miss
 			// nor a Hit is honest (AbandonBefore).
 			if !exp.abandoned {
-				s.finalize(NoteResult{
-					Event:    exp.ev,
-					OutFrame: exp.outFrame,
-					Verdict:  VerdictMiss,
-				})
+				s.finalize(s.deadlineResult(exp))
 			}
 			continue
 		}
 		keep = append(keep, exp)
 	}
 	s.pending = keep
+}
+
+// deadlineResult judges an expectation nothing ever matched.
+//
+// Plain Miss, unless a Strum landed in its window (DetectedStrum) AND
+// that strum carried at least MuteEnergyRatio of its peak at this note's
+// pitch class — the signature of a palm-muted or otherwise damped note,
+// which has an unmistakable attack and a fundamental too smothered for
+// the tracker to ever open a note on. Calling that a Miss is the false
+// negative D5 names as the #1 rage-quit cause in this category, so it
+// scores Close instead: credit for the attack landing in the right place
+// on the right string, not for a pitch nobody could measure. Like a chord
+// Hit it carries Matched true with ErrCents 0 — the onset was matched,
+// the intonation was never observed.
+//
+// An onset with no energy at the expected class is still a plain Miss:
+// something was struck, but not this note.
+func (s *Scorer) deadlineResult(exp expectation) NoteResult {
+	r := NoteResult{Event: exp.ev, OutFrame: exp.outFrame, Verdict: VerdictMiss}
+	if exp.onset && exp.onsetEnergy >= s.cfg.MuteEnergyRatio {
+		r.Verdict = VerdictClose
+		r.Matched = true
+		r.ErrFrames = exp.onsetFrames
+	}
+	return r
 }
 
 // AbandonBefore marks every expectation stamped before outFrame as

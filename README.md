@@ -5,7 +5,7 @@ Plug in your electric guitar. Load a piece. Practice it properly.
 
 guitarTutor is an open-source guitar practice companion written in Go. You import a piece of music (or write one in a simple text format), and the app plays it back — synthesized from the score, with a metronome and scrolling tablature — while you play along on a real guitar plugged into your audio interface. Loop the hard bars, slow them down, and let the app ramp the tempo back up as you nail each pass. Later phases listen to your playing and tell you which notes you hit.
 
-> **Status: Phases 1–3 core work, pre-alpha.** The practice player is functional; the app can hear you (`play -listen`: live pitch detection, hit/close/miss on the tab, a tuner, wait mode); and it now opens **Guitar Pro 7/8 `.gp`** and **MusicXML** files directly and plays **backing tracks** (WAV/FLAC/MP3) pinned to score time. The importers are built clean-room against the documented formats and validated on a self-authored corpus — real Guitar-Pro- and MuseScore-exported files are the remaining validation gap, so bug reports with real files are gold. Chord verification and detection robustness remain (Phase 4). See the [roadmap](ROADMAP.md) and [decisions](docs/DECISIONS.md).
+> **Status: Phases 1–4 core work, pre-alpha.** The practice player is functional; the app can hear you (`play -listen`: live pitch detection, hit/close/miss on the tab, a tuner, wait mode); and it now opens **Guitar Pro 7/8 `.gp`** and **MusicXML** files directly and plays **backing tracks** (WAV/FLAC/MP3) pinned to score time. Chords are now scored by verifying each expected note against the strum's spectrum. The importers are built clean-room against the documented formats and validated on a self-authored corpus, and detection thresholds are tuned on synthesized audio — real Guitar-Pro/MuseScore exports and real guitar recordings are the remaining validation gaps, so files and bug reports are gold. Next up is the app shell (Phase 5): today every piece and setting arrives as a command-line flag. See the [roadmap](ROADMAP.md) and [decisions](docs/DECISIONS.md).
 
 ## Why
 
@@ -43,11 +43,16 @@ guitarTutor aims to fill it with the practice loop every guitarist converges on:
 - Guitar Pro 7/8 (`.gp`) and MusicXML (`.musicxml`/`.mxl`) import with authored fingerings
 - Backing-track audio (WAV/FLAC/MP3) pinned to score time
 
-**Later (Phases 4–6)**
+**Phase 4 — chords and robustness (landed)**
 
-- Expected-chord verification (chord scoring against the score, not blind transcription)
+- Expected-chord verification: every string of a strum scored, via chroma-template correlation against the notes the score expects — not blind transcription
+- Palm-muted and damped notes credited for their attack instead of failed for an unclear pitch
+- Optional SwiftF0 ONNX pitch backend behind a build tag (the default binary stays free of any runtime DLL)
+
+**Later (Phases 5–6)**
+
+- The app shell: start screen, piece browser, in-app settings and device pickers, in-window calibration
 - macOS and Linux ports
-- Optional ML pitch backend (SwiftF0 via ONNX) for noisy/distorted signals
 - An opt-in [note highway](docs/HIGHWAY.md) — notes approaching down string lanes, for when you want to read what's coming rather than read notation. The tab stays the default
 - A [practice log](docs/PROGRESS.md) with streaks and badges, built so a detection error can never cost you either
 
@@ -136,7 +141,9 @@ guitartutor calibrate -in scarlett -out scarlett
 guitartutor play -listen -in scarlett -out scarlett testdata/fixture_riff.gtab
 ```
 
-Notes you play are matched against the score: green = hit, amber = close (loose intonation or wrong octave), red = miss. **T** opens the tuner; **W** enables wait mode, which holds playback at each note until you actually play it. Scoring is monophonic in this phase — strummed chords get partial credit by design until Phase 4's chord verification. Heavy distortion degrades detection; feed the clean DI signal.
+Notes you play are matched against the score: green = hit, amber = close (loose intonation, wrong octave, or a damped note whose attack landed but whose pitch never spoke), red = miss. **T** opens the tuner; **W** enables wait mode, which holds playback at each note until you actually play it.
+
+**Chords are scored too.** The pitch tracker is monophonic — it answers "which single note is sounding" — so instead of guessing at a chord, the app checks the notes it already knows to expect: each strum's pitch-class spectrum is correlated against the expected chord, and every string is verified independently. A chord whose spectrum doesn't match convicts nobody; the notes simply fall through to their normal deadline. Heavy distortion degrades detection; feed the clean DI signal.
 
 Live mode needs a cgo build (the default when a C compiler is present — on Windows install [mingw-w64](https://www.mingw-w64.org/) or build with [MSYS2](https://www.msys2.org/); if cgo builds misbehave in PowerShell, run the build from Git Bash). On Windows a `CGO_ENABLED=0` build still works fully as a playback-only practice player; on Linux and macOS Ebitengine itself needs cgo, so a C toolchain is required either way there.
 

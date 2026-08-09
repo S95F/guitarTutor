@@ -8,6 +8,15 @@
 // 2–4 cycles, so expect ~25–50 ms from onset to a stable estimate. Frames
 // and notes are stamped in input-stream sample frames so callers can align
 // them against the playback clock after latency calibration.
+//
+// The f0 path is monophonic and always will be: it answers "which single
+// note is sounding", so a strummed chord yields one note and N-1 misses.
+// Phase 4 adds the second channel of evidence that fixes chord scoring
+// without attempting real-time polyphonic transcription — Config.Strums
+// turns each onset into a Strum carrying the octave-folded pitch-class
+// energy (Chroma) that followed it. Callers that know which notes are
+// EXPECTED can check them against that chroma; nothing here tries to infer
+// a chord from scratch (docs/DECISIONS.md D4).
 package pitch
 
 // Config parameterizes the detector and tracker.
@@ -29,6 +38,21 @@ type Config struct {
 	// RMS is below it is unvoiced without any pitch analysis, and onsets
 	// never fire below it. 0 takes the default (-55 dBFS).
 	NoiseFloorDB float64
+	// Strums enables chroma accumulation and Strum emission (Phase 4
+	// chord verification). Off by default: it costs a spectral fold on
+	// each hop of a strum span — and, with an Estimator that would
+	// otherwise skip it, the FFT those hops need — while callers that
+	// only track single notes never look at the result.
+	Strums bool
+	// StrumWindowHops is how many hops of chroma are folded into a
+	// Strum after its onset. 0 takes the default (4 hops ~ 40 ms at the
+	// default hop) — long enough for every string of a strum to speak,
+	// short enough not to swallow the next beat at practice tempos.
+	StrumWindowHops int
+	// Estimator swaps the single-window pitch estimator. Nil selects the
+	// built-in MPM implementation; internal/pitchml provides an ONNX
+	// backend behind a build tag.
+	Estimator F0Estimator
 }
 
 // DefaultConfig returns the guitar-tuned defaults for a sample rate.
@@ -41,6 +65,7 @@ func DefaultConfig(sampleRate int) Config {
 		MaxHz:            1500,
 		ClarityThreshold: 0.80,
 		NoiseFloorDB:     -55,
+		StrumWindowHops:  defaultStrumWindowHops,
 	}
 }
 
@@ -89,6 +114,9 @@ func (cfg Config) withDefaults() Config {
 	if cfg.NoiseFloorDB == 0 {
 		cfg.NoiseFloorDB = def.NoiseFloorDB
 	}
+	if cfg.StrumWindowHops <= 0 {
+		cfg.StrumWindowHops = def.StrumWindowHops
+	}
 	return cfg
 }
 
@@ -106,6 +134,55 @@ type Frame struct {
 	// Onset marks an attack transient detected at (or near) this hop.
 	Onset bool
 }
+
+// PitchClasses is the number of chroma bins: one per semitone of the
+// octave, C at index 0.
+const PitchClasses = 12
+
+// A Chroma is octave-folded spectral energy, one bin per pitch class
+// (C, C#, D, ... B), normalized so the largest bin is 1 (all-zero when
+// there was no energy to fold).
+type Chroma [PitchClasses]float32
+
+// A Strum is an attack with the harmonic content that followed it: the
+// evidence chord verification runs on (ROADMAP Phase 4, docs/DECISIONS.md
+// D4). The detector emits one per onset, after accumulating chroma over a
+// short window, so a strummed chord yields a single Strum whose Chroma
+// holds every string that sounded — something the monophonic f0 path
+// cannot report by construction.
+//
+// A Strum is also the honest signal for a palm-muted or heavily damped
+// note: the attack is unambiguous even when the fundamental never gets
+// clear enough to track, so scoring can credit the onset without claiming
+// to know the pitch.
+type Strum struct {
+	// Frame is the input-stream sample frame of the onset.
+	Frame int64
+	// Chroma is the normalized pitch-class energy over the window
+	// following the onset.
+	Chroma Chroma
+	// RMS is the peak window RMS over that same span.
+	RMS float64
+	// Clarity is the best monophonic clarity seen in the span: high
+	// means one note dominated, low means a chord, a mute, or noise.
+	Clarity float64
+}
+
+// An F0Estimator is the swappable single-window pitch estimator behind
+// the detector: the built-in MPM implementation by default, or an ML
+// backend (internal/pitchml's SwiftF0, build-tagged so the base app ships
+// without an ONNX runtime). Implementations must be allocation-free in
+// steady state and safe to call from the analysis goroutine only.
+type F0Estimator interface {
+	// Name identifies the estimator for logs and the settings UI.
+	Name() string
+	// EstimateF0 returns the fundamental in Hz and a confidence in
+	// [0, 1] for one analysis window. Returning 0 means unvoiced.
+	EstimateF0(window []float32) (f0 float64, clarity float64)
+}
+
+// ChromaOf folds a MIDI key into its pitch class (C = 0).
+func ChromaOf(key int) int { return ((key % PitchClasses) + PitchClasses) % PitchClasses }
 
 // A Note is a discrete note event assembled from consecutive voiced
 // frames: quantized to the nearest MIDI key with a cents deviation.

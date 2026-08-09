@@ -9,6 +9,7 @@ require (
 	github.com/hajimehoshi/go-mp3 v0.3.4
 	github.com/mewkiz/flac v1.0.13
 	github.com/sinshu/go-meltysynth v0.0.0-20230205031334-05d311382fc4
+	github.com/yalue/onnxruntime_go v1.32.0
 	gitlab.com/gomidi/midi/v2 v2.3.24
 	golang.org/x/image v0.44.0
 	gonum.org/v1/gonum v0.17.0
@@ -24,7 +25,6 @@ require (
 	github.com/mewkiz/pkg v0.0.0-20250417130911-3f050ff8c56d // indirect
 	github.com/mewpkg/term v0.0.0-20241026122259-37a80af23985 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
-	github.com/yalue/onnxruntime_go v1.32.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.36.0 // indirect
 	golang.org/x/text v0.40.0 // indirect

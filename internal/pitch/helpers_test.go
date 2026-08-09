@@ -1,7 +1,10 @@
 package pitch
 
 import (
+	"fmt"
 	"math"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/S95F/guitarTutor/internal/synth"
@@ -106,6 +109,95 @@ func ksNote(key int, seconds float64) []float32 {
 // silence returns seconds of zeros.
 func silence(seconds float64) []float32 {
 	return make([]float32, int(seconds*testSR))
+}
+
+// mix sums signals sample-wise into a new buffer as long as the longest —
+// several strings sounding at once.
+func mix(sigs ...[]float32) []float32 {
+	n := 0
+	for _, s := range sigs {
+		if len(s) > n {
+			n = len(s)
+		}
+	}
+	out := make([]float32, n)
+	for _, s := range sigs {
+		for i, v := range s {
+			out[i] += v
+		}
+	}
+	return out
+}
+
+// scale returns x with every sample multiplied by g.
+func scale(x []float32, g float32) []float32 {
+	out := make([]float32, len(x))
+	for i, v := range x {
+		out[i] = v * g
+	}
+	return out
+}
+
+// ksChord renders keys plucked simultaneously, mixed to mono.
+func ksChord(seconds float64, keys ...int) []float32 {
+	sigs := make([][]float32, len(keys))
+	for i, k := range keys {
+		sigs[i] = ksNote(k, seconds)
+	}
+	return mix(sigs...)
+}
+
+// strumConfig is the default config with Phase 4 strum emission on.
+func strumConfig() Config {
+	cfg := DefaultConfig(testSR)
+	cfg.Strums = true
+	return cfg
+}
+
+// feedStrums drives d with x in fixed-size chunks and returns copies of
+// every emitted Frame and Strum (both slices are reused by the detector).
+func feedStrums(d *Detector, x []float32, chunk int) ([]Frame, []Strum) {
+	var frames []Frame
+	var strums []Strum
+	for off := 0; off < len(x); off += chunk {
+		end := off + chunk
+		if end > len(x) {
+			end = len(x)
+		}
+		frames = append(frames, d.Process(x[off:end])...)
+		strums = append(strums, d.Strums()...)
+	}
+	return frames, strums
+}
+
+// chromaRank returns the pitch classes of c ordered by descending energy.
+func chromaRank(c Chroma) []int {
+	order := make([]int, PitchClasses)
+	for i := range order {
+		order[i] = i
+	}
+	slices.SortStableFunc(order, func(a, b int) int {
+		switch {
+		case c[a] > c[b]:
+			return -1
+		case c[a] < c[b]:
+			return 1
+		}
+		return 0
+	})
+	return order
+}
+
+// pitchClassNames labels chroma bins in test failures.
+var pitchClassNames = [PitchClasses]string{"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"}
+
+// formatChroma renders a Chroma for a failure message.
+func formatChroma(c Chroma) string {
+	var b strings.Builder
+	for i, v := range c {
+		fmt.Fprintf(&b, " %s=%.2f", pitchClassNames[i], v)
+	}
+	return b.String()
 }
 
 // feedAll drives d with x in fixed-size chunks and returns copies of every

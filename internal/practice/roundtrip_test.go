@@ -1,42 +1,54 @@
 package practice
 
-// The money test: prove the whole Phase 2 chain hangs together with no
-// microphone in the loop. The fixture riff is parsed from .gtab, rendered
-// offline through the real engine and Karplus-Strong synth, and the
-// rendered audio is fed straight back through the real pitch detector and
-// tracker into the scorer. Output and input share one clock (the audio
-// never leaves the process), so LatencyOffsetFrames is 0.
+// The money test: prove the whole chain hangs together with no microphone
+// in the loop. The fixture riff is parsed from .gtab, rendered offline
+// through the real engine and Karplus-Strong synth, and the rendered audio
+// is fed straight back through the real pitch detector and tracker into
+// the scorer. Output and input share one clock (the audio never leaves the
+// process), so LatencyOffsetFrames is 0.
 //
-// Observed accounting over the fixture's 16 note events (documented from
-// the actual run; the numbers are stable because everything is
-// deterministic):
-//   - The 13 single notes — 8 eighths in bar 1, three notes in bar 2,
-//     the lone quarter in bar 3, and bar 4's tied whole note (which
-//     score.Events merges into ONE expectation) — all judge Hit, with
-//     ErrFrames of roughly +1000..+3000 (the detector needs 2-4 cycles
-//     plus tracker hysteresis before a note opens: D4's physics budget).
-//   - The bar-3 chord is 3 expectations (E2+B2+E3, keys 40/47/52) and
-//     all 3 judge Miss. The design allowed for 1 match + 2 misses
-//     (monophonic detector, one note per moment), but in practice MPM
-//     cannot lock onto ANY single f0 while all three tones sound: it
-//     first reports a stable E2 ~0.8 s after the strum, once the upper
-//     tones have decayed — far outside the ±150 ms window, so even the
-//     one hoped-for match does not materialize. That detection (and a
-//     second re-opened E2 during the release tail) matches nothing and
-//     is dropped, never mispaired. Chord verification proper is Phase 4
-//     (docs/DECISIONS.md D4/D5).
+// This is also the test that measures Phase 4. Through Phase 3 the run
+// scored 13 Hit / 3 Miss, accuracy 0.8125: the 13 single notes all hit,
+// and the bar-3 chord (E2+B2+E3, keys 40/47/52 — three expectations on one
+// tick) contributed nothing at all. The design had allowed for 1 match + 2
+// misses, since a monophonic detector reports one note per moment, but in
+// practice MPM could not lock onto ANY single f0 while all three tones
+// sounded: it first reported a stable E2 ~0.8 s after the strum, once the
+// upper tones had decayed, far outside the +/-150 ms window. Even the one
+// hoped-for match never materialized.
 //
-// Observed accuracy is therefore (13 Hit + 0.5*0 Close)/16 = 0.8125; the
-// asserted floor is 0.80 — the 0.875 best case less the chord's possible
-// match. The run must also explain itself: the test asserts that the ONLY
-// Misses are the three chord notes, so a regression anywhere else in the
-// chain fails even when accuracy stays above the floor.
+// With pitch.Config.Strums on, the detector also emits a Strum per onset —
+// the attack plus the chroma of the audio that followed it — and
+// Scorer.DetectedStrum verifies the expected chord against it
+// (docs/DECISIONS.md D4, ROADMAP Phase 4). Observed accounting over the
+// fixture's 16 note events, from the actual run:
+//   - The 13 single notes still judge Hit, with ErrFrames of roughly
+//     +1000..+3000 (the detector needs 2-4 cycles plus tracker hysteresis
+//     before a note opens: D4's physics budget). Their strums record only
+//     an onset and leave the cents-bearing monophonic verdict alone.
+//   - The bar-3 chord's 3 expectations now all judge Hit, off ONE strum
+//     stamped 896 frames (~19 ms) before the chord's output frame — the
+//     onset hop's center trails the attack by half an analysis window.
+//     Its chroma puts the two expected classes at E 1.00 and B 0.68 with
+//     no unexpected bin above 0.36, correlating 0.93 with the expected
+//     template: clear of the 0.45 presence ratio and the 0.30 correlation
+//     gate with margin on both, on a Karplus-Strong pluck rich enough in
+//     partials to be a fair test of the fold.
+//   - The tracker's belated E2 reading of that same chord (and a second
+//     re-opened E2 in the release tail) now finds nothing pending and is
+//     dropped, as before — never mispaired.
 //
-// Advance is driven with a LAGGED frame during streaming: the tracker
-// only delivers a note when it CLOSES, which for a long note is seconds
-// after its Start, so finalizing against the live capture frame would
-// Miss expectations whose detections are still open. The final Advance
-// past the stream end (after Flush) finalizes the rest.
+// Observed accuracy is therefore 16/16 = 1.000, up from 0.8125. The
+// asserted floor is 0.95, which cannot be reached without the chord: 13
+// Hits out of 16 caps at 0.8125, and even 13 Hits plus 3 Closes only
+// reaches 0.906. The run must also explain itself: the test asserts there
+// are no Misses at all, so a regression anywhere in the chain fails.
+//
+// Advance is driven with a LAGGED frame during streaming: the tracker only
+// delivers a note when it CLOSES, which for a long note is seconds after
+// its Start, so finalizing against the live capture frame would Miss
+// expectations whose detections are still open. The final Advance past the
+// stream end (after Flush) finalizes the rest.
 
 import (
 	"os"
@@ -75,8 +87,10 @@ func TestRoundTripFixtureRiff(t *testing.T) {
 	e.SetEventTap(scorer.ExpectNote)
 	e.Play()
 
-	det := pitch.NewDetector(pitch.DefaultConfig(sr))
-	trk := pitch.NewTracker(pitch.DefaultConfig(sr))
+	pcfg := pitch.DefaultConfig(sr)
+	pcfg.Strums = true // Phase 4: chord verification needs the chroma
+	det := pitch.NewDetector(pcfg)
+	trk := pitch.NewTracker(pcfg)
 
 	// 4 bars of 4/4 at 120 BPM = 8 s; render 9 s so the last note decays
 	// and the tracker closes it before Flush.
@@ -86,6 +100,7 @@ func TestRoundTripFixtureRiff(t *testing.T) {
 	right := make([]float32, block)
 	mono := make([]float32, block)
 	var fed int64
+	var nStrums int
 	for fed < total {
 		n := block
 		if rem := total - fed; rem < block {
@@ -95,7 +110,17 @@ func TestRoundTripFixtureRiff(t *testing.T) {
 		for i := 0; i < n; i++ {
 			mono[i] = 0.5 * (left[i] + right[i])
 		}
-		scorer.Detected(trk.Feed(det.Process(mono[:n])))
+		frames := det.Process(mono[:n])
+		// Strums first, exactly as live.analyzer.process delivers them:
+		// a strum is stamped at its onset, a note only when the tracker
+		// closes it, and Advance below must not age a chord out before
+		// its strum has been offered.
+		for _, st := range det.Strums() {
+			t.Logf("strum @%7d rms %.4f clarity %.2f chroma %v", st.Frame, st.RMS, st.Clarity, st.Chroma)
+			scorer.DetectedStrum(st)
+			nStrums++
+		}
+		scorer.Detected(trk.Feed(frames))
 		fed += int64(n)
 		// Lag the miss deadline behind capture by 3 s (longer than any
 		// note in the piece) so still-open notes are not misjudged; see
@@ -107,7 +132,7 @@ func TestRoundTripFixtureRiff(t *testing.T) {
 
 	results := scorer.Results(nil)
 	st := scorer.Stats()
-	t.Logf("round trip: %d results, stats %+v, accuracy %.3f", len(results), st, st.Accuracy())
+	t.Logf("round trip: %d results, %d strums, stats %+v, accuracy %.3f", len(results), nStrums, st, st.Accuracy())
 	for _, r := range results {
 		t.Logf("  key %3d out %7d -> verdict %d matched %v errCents %+6.1f errFrames %+6d",
 			r.Event.Key, r.OutFrame, r.Verdict, r.Matched, r.ErrCents, r.ErrFrames)
@@ -116,17 +141,25 @@ func TestRoundTripFixtureRiff(t *testing.T) {
 	if len(results) != nEvents {
 		t.Fatalf("judged %d expectations, want %d", len(results), nEvents)
 	}
-	// Floor 0.80: 13/16 single-note Hits with the whole chord missed
-	// (see the file comment for why the chord contributes 0, not 1).
-	if got := st.Accuracy(); got < 0.80 {
-		t.Errorf("accuracy %.3f, want >= 0.80", got)
+	if nStrums == 0 {
+		t.Fatal("the detector emitted no strums: chord verification never ran")
 	}
-	if st.Hit < 13 {
-		t.Errorf("hits %d, want all 13 single notes hit", st.Hit)
+	// Floor 0.95: unreachable without the chord (13 single-note Hits out
+	// of 16 cap at 0.8125, and 13 Hits + 3 Closes only reach 0.906), so
+	// this asserts the Phase 4 result rather than the Phase 3 one.
+	if got := st.Accuracy(); got < 0.95 {
+		t.Errorf("accuracy %.3f, want >= 0.95 (Phase 3 measured 0.8125 with the chord unscored)", got)
 	}
-	// Every Miss must be explained: the only expectations allowed to miss
-	// are chord notes (bar 3 starts at tick of the chord; all three chord
-	// events share one OutFrame, and exactly one of them may match).
+	if st.Hit < 16 {
+		t.Errorf("hits %d, want all 16 events hit (13 single notes + the 3-note chord)", st.Hit)
+	}
+	if st.Miss != 0 {
+		t.Errorf("misses %d, want 0: every expectation must be explained", st.Miss)
+	}
+
+	// The chord specifically: three expectations on one output frame, all
+	// judged Hit off the strum, and none of them claiming a cents figure
+	// chroma cannot supply.
 	chordFrame := int64(-1)
 	frames := map[int64]int{}
 	for _, r := range results {
@@ -141,8 +174,17 @@ func TestRoundTripFixtureRiff(t *testing.T) {
 		t.Fatal("no 3-event chord frame found in results")
 	}
 	for _, r := range results {
-		if r.Verdict == VerdictMiss && r.OutFrame != chordFrame {
-			t.Errorf("unexplained Miss: key %d at out frame %d", r.Event.Key, r.OutFrame)
+		if r.OutFrame != chordFrame {
+			continue
+		}
+		if r.Verdict != VerdictHit || !r.Matched {
+			t.Errorf("chord note key %d: got %+v, want a matched Hit from the strum", r.Event.Key, r)
+		}
+		if r.ErrCents != 0 {
+			t.Errorf("chord note key %d: ErrCents %v, want 0 (chroma carries no intonation)", r.Event.Key, r.ErrCents)
+		}
+		if r.ErrFrames > 0 {
+			t.Errorf("chord note key %d: ErrFrames %d, want the onset's lead over the output frame", r.Event.Key, r.ErrFrames)
 		}
 	}
 	// The tied whole note must be one expectation, judged once, and not a

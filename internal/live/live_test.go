@@ -25,15 +25,25 @@ type analyzeRun struct {
 	s        *Session
 	a        *analyzer
 	closed   []pitch.Note
+	strums   []pitch.Strum
+	order    []string // callback order within the run ("strums"/"notes")
 	consumed int64
 }
 
 func newAnalyzeRun(ringSize int) *analyzeRun {
+	cfg := pitch.DefaultConfig(testRate)
+	cfg.Strums = true
 	r := &analyzeRun{s: &Session{ringBuf: newRing(ringSize)}}
-	r.a = newAnalyzer(r.s, pitch.DefaultConfig(testRate), func(closed []pitch.Note, _ pitch.Note, _ bool, consumed int64) {
-		r.closed = append(r.closed, closed...)
-		r.consumed = consumed
-	})
+	r.a = newAnalyzer(r.s, cfg,
+		func(closed []pitch.Note, _ pitch.Note, _ bool, consumed int64) {
+			r.closed = append(r.closed, closed...)
+			r.consumed = consumed
+			r.order = append(r.order, "notes")
+		},
+		func(strums []pitch.Strum) {
+			r.strums = append(r.strums, strums...)
+			r.order = append(r.order, "strums")
+		})
 	return r
 }
 
@@ -128,5 +138,83 @@ func TestAnalyzeOverflowKeepsDeviceClock(t *testing.T) {
 	}
 	if ctrl.consumed != total {
 		t.Errorf("control run consumed = %d, want %d", ctrl.consumed, total)
+	}
+
+	// Phase 4: the zeroed splice must not manufacture onsets, or a stall
+	// would invent a strum — and a strum is a scoring event now (it can
+	// verify a chord or credit a palm mute). It cannot: the detector's
+	// onset test needs a hop RMS above max(smoothed, noise floor) times
+	// the jump ratio, and a zeroed hop's RMS is 0. Both runs must see the
+	// same strums, and neither may stamp one inside the gap.
+	if len(over.strums) != len(ctrl.strums) {
+		t.Fatalf("overflow run saw %d strums, control run %d: the splice changed the onset stream",
+			len(over.strums), len(ctrl.strums))
+	}
+	for i := range ctrl.strums {
+		if d := over.strums[i].Frame - ctrl.strums[i].Frame; d < -hop || d > hop {
+			t.Errorf("strum %d: Frame = %d, want %d +/- one hop", i, over.strums[i].Frame, ctrl.strums[i].Frame)
+		}
+	}
+	// Interior of the gap. A Strum is stamped at its onset hop's CENTER,
+	// which trails the audio by half a window, so the attack that ends
+	// the gap legitimately stamps up to a window BEFORE the gap does —
+	// hence the upper bound backs off by one window.
+	loGap, hiGap := int64(toneALen), int64(toneALen+gap-cfg.Window)
+	for _, st := range over.strums {
+		if st.Frame >= loGap && st.Frame < hiGap {
+			t.Errorf("strum stamped at %d, inside the silent splice [%d, %d): the gap manufactured an onset",
+				st.Frame, loGap, hiGap)
+		}
+	}
+}
+
+// TestAnalyzeDeliversStrums pins the Phase 4 plumbing: an attack produces
+// a Strum on OnStrums, stamped near the attack, and delivered BEFORE the
+// batch's OnNotes call — wiring drives Scorer.Advance off the consumed
+// clock OnNotes carries, so a strum from the same batch has to reach the
+// scorer first or its expectations can age out before it is seen.
+func TestAnalyzeDeliversStrums(t *testing.T) {
+	const lead = 9600 // silence, so the attack is a real rising edge
+	r := newAnalyzeRun(1 << 17)
+	r.feed(make([]float32, lead))
+	if len(r.strums) != 0 {
+		t.Fatalf("silence produced %d strums, want 0", len(r.strums))
+	}
+	r.feed(sineTone(440, 24000))
+	r.feed(make([]float32, 4800))
+
+	if len(r.strums) == 0 {
+		t.Fatal("the attack produced no strum")
+	}
+	st := r.strums[0]
+	cfg := pitch.DefaultConfig(testRate)
+	win := int64(cfg.Window)
+	if st.Frame < lead-win || st.Frame > lead+win {
+		t.Errorf("first strum at frame %d, want within one window (%d) of the attack at %d", st.Frame, win, lead)
+	}
+	if st.RMS <= 0 {
+		t.Errorf("strum RMS = %v, want the attack's energy", st.RMS)
+	}
+	var peak float32
+	for _, v := range st.Chroma {
+		if v > peak {
+			peak = v
+		}
+	}
+	if peak <= 0 {
+		t.Error("strum chroma is all-zero: no spectral evidence was folded")
+	}
+	seen := false
+	for i, tag := range r.order {
+		if tag != "strums" {
+			continue
+		}
+		seen = true
+		if i+1 >= len(r.order) || r.order[i+1] != "notes" {
+			t.Errorf("callback order %v: a strums call at %d was not immediately followed by its batch's notes call", r.order, i)
+		}
+	}
+	if !seen {
+		t.Error("no OnStrums call recorded")
 	}
 }
