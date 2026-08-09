@@ -63,7 +63,7 @@ Lightweight decision records for guitarTutor. Each records what was chosen, what
 
 **Rejected:** detection-first ordering (the Yousician/Rocksmith model — ship the listening gimmick, backfill the practice tools). It front-loads the hardest, most complaint-prone engineering, forces cgo into the first release, and produces nothing usable until detection is good, which is exactly the failure mode of most abandoned open-source attempts in this space.
 
-**Consequences:** "Wait mode" (pause until the right note) ships with detection — the most-loved learning feature in comparable OSS tools. Dynamic difficulty, 3D highways, catalogs, amp modeling, and gamification are explicit non-goals (see [ROADMAP](../ROADMAP.md)).
+**Consequences:** "Wait mode" (pause until the right note) ships with detection — the most-loved learning feature in comparable OSS tools. Dynamic difficulty, catalogs, and amp modeling are explicit non-goals (see [ROADMAP](../ROADMAP.md)). Highways and gamification were too; both are revisited and narrowed in D7.
 
 ## D6 — UI/rendering: native Go with Ebitengine (spike resolved)
 
@@ -75,3 +75,22 @@ Two constraints the spike must respect, whichever way it lands:
 
 1. **Audio stays Go-side.** The frame-counted sequencer and synthesis remain in Go per the one-clock rule even under alphaTab — alphaTab's bundled synth would go unused, and the webview would be display-only, driven by the Go clock.
 2. **The Phase 1 single-binary, no-external-runtime promise in the README is load-bearing.** If the webview route can't ship as a self-contained Windows executable with no install-time dependencies, it loses regardless of its other gifts.
+
+## D7 — Reading aids and practice recognition (amends D5)
+
+**Decision:** Ship a perspective note highway as an **opt-in second view** alongside the scrolling tab, and a **practice-history store with additive recognition** — score, combo, streak, badges. Both amend D5's non-goals list and the corresponding rows in the ROADMAP table. Designs in [HIGHWAY.md](HIGHWAY.md) and [PROGRESS.md](PROGRESS.md).
+
+**Why:** D5 rejected these as a bundle, and the bundle contained distinct claims that deserve separate verdicts.
+
+The highway was rejected on cost and on tab-reading transfer. Both objections survive intact rather than being waived: the view is one file over the score model that already exists, and the tab it sits beside is untouched and still the default, so the transfer argument still holds for anyone who wants it. What changed is the evidence — D6's spike resolved to a native Ebitengine renderer whose existing primitives make a perspective projection a matter of arithmetic, so "cheaper" now cuts the other way. And the two views answer genuinely different questions: bar spacing on the tab is musically meaningful, while distance on the highway is time-to-play. A speed trainer wants both.
+
+Gamification was rejected as a retention funnel, and **that judgment stands** — no XP grind, no loss framing, no leaderboards, nothing that buys anything. What it over-rejected is a *practice log*, which ROADMAP Phase 5 wanted independently ("per-piece, per-section accuracy and tempo progression over time"), and recognition for deliberate practice. A badge for a clean pass at 70% tempo points at the behaviour this tool exists to encourage; a streak that counts minutes practiced is a log entry, not a hook. The distinction is not rhetorical, and the design is built so it can be checked: the streak never reads a verdict, and half the badge catalog is earnable with nothing plugged in.
+
+**Rejected:**
+- **Verdict-driven streaks and any punitive scoring.** D5's own false-positive argument applies with far more force once a number is attached — and the detector's failure modes are documented, not hypothetical (a monophonic detector produces guaranteed misses on every chord). A streak broken by our own bug is the worst outcome this feature can produce.
+- **Leaderboards and social comparison** — offline-first, and comparison is not practice.
+- **Dynamic difficulty** — still a non-goal, untouched by this. Slow-then-ramp at full difficulty remains the practice loop.
+- **XP that unlocks or buys anything** — the moment recognition gates content, the tool is a funnel.
+- **Highway as the primary or only view**, which would sacrifice the tab-reading transfer for nothing.
+
+**Consequences:** The "never punish a detection error" rules become a **contract with tests**, not a style preference — `TestMissNeverReducesAnything` is the flagship, and the scoring path contains no subtraction operator for it to catch. Scoring is withheld entirely behind a credibility gate rather than shown with a caveat: a number the user cannot trust is worse than no number. `internal/progress` owns persisted user data, so its durability rules are stricter than `appconfig`'s (never overwrite a newer schema; quarantine rather than replace a corrupt file). Highway lookahead reads the score model, **not** the engine event tap — the tap fires at sounding time, which is far too late to draw an approaching note, and its single subscriber slot belongs to the scorer. Recognition and the highway are both opt-out, and neither may block practice.

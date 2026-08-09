@@ -38,13 +38,15 @@ guitarTutor aims to fill it with the practice loop every guitarist converges on:
 - "Wait mode": playback pauses until you play the right note
 - Tuner view, latency calibration wizard
 
-**Later (Phases 3–5)**
+**Later (Phases 3–6)**
 
 - Guitar Pro 7/8 (`.gp`) and MusicXML import
 - Expected-chord verification (chord scoring against the score, not blind transcription)
 - Audio backing-track import (WAV/FLAC/MP3)
 - macOS and Linux ports
 - Optional ML pitch backend (SwiftF0 via ONNX) for noisy/distorted signals
+- An opt-in [note highway](docs/HIGHWAY.md) — notes approaching down string lanes, for when you want to read what's coming rather than read notation. The tab stays the default
+- A [practice log](docs/PROGRESS.md) with streaks and badges, built so a detection error can never cost you either
 
 See the full [ROADMAP](ROADMAP.md) for phasing, acceptance criteria, and explicit non-goals.
 
@@ -134,12 +136,14 @@ To write your own pieces, see the [text tab format](docs/TEXTFORMAT.md).
 - **No Rocksmith `.psarc`/CDLC ingestion** — legally hazardous (Ubisoft issued a DMCA takedown against a similar project in 2026). Import your own Guitar Pro, MIDI, and MusicXML files instead.
 - **No bundled songs or catalog** — licensing is how practice apps die.
 - **No amp modeling** — use your amp sim of choice alongside; the app only needs your dry signal.
-- **No dynamic difficulty, no 3D note highway, no XP/streak gamification** — slow-then-ramp at full difficulty on a 2D tab is the practice loop that works.
+- **No dynamic difficulty** — slow-then-ramp at full difficulty is the practice loop that works.
+- **No XP grind, no loss-framing streaks, no leaderboards.** A practice log and additive recognition are planned ([docs/PROGRESS.md](docs/PROGRESS.md)), built so that misses cannot subtract and the streak never reads a note verdict — a detection error must never cost you anything. This is a practice tool, not a retention funnel.
+- **The 2D tab stays the primary view.** A perspective [note highway](docs/HIGHWAY.md) is planned as an opt-in second view, because reading tab transfers to reading real tab and that's worth keeping.
 - **No subscriptions, ever.**
 
 ## Contributing
 
-The project is at the "argue about the roadmap" stage — issues and discussion are very welcome, especially from guitarists who practice with existing tools and from anyone who has fought Go audio or DSP before. Start with [ROADMAP.md](ROADMAP.md) and [docs/DECISIONS.md](docs/DECISIONS.md).
+The project is at the "argue about the roadmap" stage — issues and discussion are very welcome, especially from guitarists who practice with existing tools and from anyone who has fought Go audio or DSP before. Start with [ROADMAP.md](ROADMAP.md) and [docs/DECISIONS.md](docs/DECISIONS.md). The two Phase 6 features have their designs written up ahead of the code, and both reverse an earlier non-goal — [docs/HIGHWAY.md](docs/HIGHWAY.md) and [docs/PROGRESS.md](docs/PROGRESS.md) are where to argue with them.
 
 ## License
 

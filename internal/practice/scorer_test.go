@@ -246,6 +246,114 @@ func TestScorerReset(t *testing.T) {
 	}
 }
 
+// TestScorerAbandonBefore is the seek regression: a seek or loop edit
+// truncates the answering window of whatever just sounded, and Advance
+// used to age those expectations into Misses seconds later — a false "you
+// missed" for notes the player never got their window on (D5).
+func TestScorerAbandonBefore(t *testing.T) {
+	// A seek at output frame 30000, with one expectation on each side.
+	const seekFrame = 30000
+
+	tests := []struct {
+		name      string
+		expFrame  int64
+		detect    bool
+		wantCount int
+		want      Verdict
+	}{
+		{
+			name:      "sounded before the seek, unanswered: dropped, not missed",
+			expFrame:  24000,
+			wantCount: 0,
+		},
+		{
+			name:      "sounded before the seek, answered in flight: still a Hit",
+			expFrame:  24000,
+			detect:    true,
+			wantCount: 1,
+			want:      VerdictHit,
+		},
+		{
+			name:      "sounded after the seek, unanswered: still a Miss",
+			expFrame:  36000,
+			wantCount: 1,
+			want:      VerdictMiss,
+		},
+		{
+			name:      "sounded after the seek, answered: a Hit",
+			expFrame:  36000,
+			detect:    true,
+			wantCount: 1,
+			want:      VerdictHit,
+		},
+	}
+	for _, c := range tests {
+		t.Run(c.name, func(t *testing.T) {
+			s := NewScorer(testConfig())
+			s.ExpectNote(ev(40), c.expFrame)
+			s.AbandonBefore(seekFrame)
+			if c.detect {
+				// The tracker closes the note after the seek:
+				// the player did answer, so the credit stands.
+				s.Detected([]pitch.Note{det(c.expFrame+900, 40, 3)})
+			}
+			rs := drain(s)
+			if len(rs) != c.wantCount {
+				t.Fatalf("got %d results %+v, want %d", len(rs), rs, c.wantCount)
+			}
+			if c.wantCount == 1 && rs[0].Verdict != c.want {
+				t.Errorf("verdict = %v, want %v", rs[0].Verdict, c.want)
+			}
+		})
+	}
+}
+
+// TestScorerAbandonKeepsEarnedStats: abandoning must not touch accumulated
+// judgements — the accuracy HUD would otherwise reset every time the user
+// pressed an arrow key. This is why the fix is not Scorer.Reset, which
+// clears stats and results wholesale.
+func TestScorerAbandonKeepsEarnedStats(t *testing.T) {
+	s := NewScorer(testConfig())
+	s.ExpectNote(ev(40), 0)
+	s.Detected([]pitch.Note{det(0, 40, 0)}) // judged Hit before the seek
+	s.ExpectNote(ev(45), 24000)             // still pending when the seek lands
+
+	s.AbandonBefore(30000)
+
+	if st := s.Stats(); st != (Stats{Hit: 1}) {
+		t.Errorf("stats after AbandonBefore = %+v, want one Hit preserved", st)
+	}
+	rs := drain(s)
+	if len(rs) != 1 || rs[0].Verdict != VerdictHit {
+		t.Fatalf("results = %+v, want the earned Hit and no ghost Miss", rs)
+	}
+	if st := s.Stats(); st.Miss != 0 {
+		t.Errorf("stats = %+v, want no Miss invented by the seek", st)
+	}
+}
+
+// TestScorerAbandonDropsStaleWaitConfirm: a seek abandons a wait point, so
+// its recorded confirmation must not fire on a later pass over the same
+// tick. preMatchExpirySeconds could only approximate this before the
+// engine exposed a discontinuity frame.
+func TestScorerAbandonDropsStaleWaitConfirm(t *testing.T) {
+	s := NewScorer(testConfig())
+	waited := score.NoteEvent{Track: 0, Key: 40, Start: 960}
+	s.WaitConfirmed([]score.NoteEvent{waited}, []pitch.Note{det(0, 40, 2)})
+
+	s.AbandonBefore(1) // the confirm was recorded at clock 0
+
+	// The same tick comes round again on a later pass: it must be judged
+	// on its merits, not released by the abandoned confirmation.
+	s.ExpectNote(waited, 48000)
+	if rs := s.Results(nil); len(rs) != 0 {
+		t.Fatalf("stale wait confirm fired on a later pass: %+v", rs)
+	}
+	if rs := drain(s); len(rs) != 1 || rs[0].Verdict != VerdictMiss {
+		t.Errorf("results = %+v, want the re-passed note judged normally (Miss, unplayed)", rs)
+	}
+}
+
 func TestScorerIgnoresOtherTracks(t *testing.T) {
 	s := NewScorer(testConfig())
 	s.ExpectNote(score.NoteEvent{Track: 1, Key: 40}, 24000)

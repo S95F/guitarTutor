@@ -114,6 +114,81 @@ func TestVerdictKeying(t *testing.T) {
 	}
 }
 
+// TestVerdictNotPaintedAheadOfPlayhead is the regression test for the
+// loop-pass staleness bug: verdicts are keyed by tick and never cleared,
+// so the tab used to paint pass 1's verdict on a note pass 2 had not
+// reached yet — an upcoming note rendering green before it was played.
+func TestVerdictNotPaintedAheadOfPlayhead(t *testing.T) {
+	a := newApp(t, 2)
+	a.OfferResults([]practice.NoteResult{result(960, 6, practice.VerdictHit)})
+	a.syncLive()
+
+	for _, c := range []struct {
+		name string
+		pos  int64
+		want bool
+	}{
+		{"playhead at the loop start, note still ahead", 0, false},
+		{"playhead one tick short of the note", 959, false},
+		{"playhead on the note", 960, true},
+		{"playhead past the note", 2000, true},
+	} {
+		v, ok := a.verdictAt(960, 6, c.pos)
+		if ok != c.want {
+			t.Errorf("%s: verdictAt painted = %v, want %v", c.name, ok, c.want)
+		}
+		if ok && v != practice.VerdictHit {
+			t.Errorf("%s: verdict = %v, want Hit", c.name, v)
+		}
+	}
+
+	// A note that was never judged stays unpainted wherever the playhead is.
+	if _, ok := a.verdictAt(1920, 6, 5000); ok {
+		t.Error("verdict painted for a note that was never judged")
+	}
+}
+
+// TestVerdictSurvivesLoopWrapUntilRejudged: wrapping to the top of a loop
+// must not paint the previous pass's verdicts on the notes ahead, but the
+// note the playhead has already passed keeps its verdict until this pass's
+// own result replaces it. Results arrive seconds late, so the previous
+// pass's verdicts are still landing after the wrap.
+func TestVerdictSurvivesLoopWrapUntilRejudged(t *testing.T) {
+	a := newApp(t, 2)
+	const first, second = int64(0), int64(3840) // bar 1 and bar 2 downbeats
+
+	// Pass 1 judges both notes.
+	a.OfferResults([]practice.NoteResult{
+		result(first, 6, practice.VerdictHit),
+		result(second, 6, practice.VerdictMiss),
+	})
+	a.syncLive()
+
+	// Pass 2 has wrapped and is sitting on the first note. The second
+	// note is ahead: its pass-1 miss must not show.
+	if _, ok := a.verdictAt(second, 6, first); ok {
+		t.Error("pass 1 verdict painted on a note pass 2 has not reached")
+	}
+	if v, ok := a.verdictAt(first, 6, first); !ok || v != practice.VerdictHit {
+		t.Errorf("verdict under the playhead = %v, %v; want Hit, true", v, ok)
+	}
+
+	// A late pass-1 result landing after the wrap is still gated.
+	a.OfferResults([]practice.NoteResult{result(second, 6, practice.VerdictMiss)})
+	a.syncLive()
+	if _, ok := a.verdictAt(second, 6, first); ok {
+		t.Error("late pass 1 verdict painted on a note ahead of the playhead")
+	}
+
+	// Once the playhead reaches it and this pass re-judges it, the new
+	// verdict shows.
+	a.OfferResults([]practice.NoteResult{result(second, 6, practice.VerdictHit)})
+	a.syncLive()
+	if v, ok := a.verdictAt(second, 6, second); !ok || v != practice.VerdictHit {
+		t.Errorf("re-judged verdict = %v, %v; want Hit, true", v, ok)
+	}
+}
+
 // TestTunerFeed: OfferTuner publishes latest-wins tuner state.
 func TestTunerFeed(t *testing.T) {
 	a := newApp(t, 1)

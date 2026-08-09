@@ -119,6 +119,54 @@ func newFixtureEngine(t *testing.T, opts Options) (*Engine, *stubVoice) {
 	return e, reg[0]
 }
 
+// TestDiscontinuityFrame: seeks and loop edits stamp the stream clock, and
+// a loop WRAP deliberately does not. The practice scorer abandons
+// expectations stamped before the frame this reports, so marking a wrap
+// would throw away the notes near the loop end that the player is still
+// answering — the wrap is the practice loop working, not a jump under the
+// player.
+func TestDiscontinuityFrame(t *testing.T) {
+	e, _ := newFixtureEngine(t, Options{})
+	if d := e.DiscontinuityFrame(); d != 0 {
+		t.Fatalf("DiscontinuityFrame before any jump = %d, want 0", d)
+	}
+
+	e.Play()
+	renderN(e, 4800, 480)
+	at := e.TotalFrames()
+
+	e.SeekTick(3840)
+	seekAt := e.DiscontinuityFrame()
+	if seekAt != at {
+		t.Fatalf("DiscontinuityFrame after a seek = %d, want the stream clock %d", seekAt, at)
+	}
+
+	// A loop edit moves the goalposts the same way.
+	renderN(e, 4800, 480)
+	e.SetLoop(3840, 7680)
+	loopAt := e.DiscontinuityFrame()
+	if loopAt <= seekAt {
+		t.Fatalf("DiscontinuityFrame after SetLoop = %d, want > the seek's %d", loopAt, seekAt)
+	}
+
+	// Now run the loop round at least once. The wrap must not stamp.
+	e.SeekTick(3840)
+	afterSeek := e.DiscontinuityFrame()
+	before := e.PassCount()
+	renderN(e, 8*48000, 480)
+	if e.PassCount() <= before {
+		t.Fatalf("PassCount = %d, want a completed pass to exercise the wrap", e.PassCount())
+	}
+	if d := e.DiscontinuityFrame(); d != afterSeek {
+		t.Errorf("DiscontinuityFrame moved to %d across a loop wrap, want it to stay %d", d, afterSeek)
+	}
+
+	e.ClearLoop()
+	if d := e.DiscontinuityFrame(); d <= afterSeek {
+		t.Errorf("DiscontinuityFrame after ClearLoop = %d, want > %d", d, afterSeek)
+	}
+}
+
 // renderN drives the engine through frames total frames in blocks.
 func renderN(e *Engine, frames, block int) {
 	l := make([]float32, block)

@@ -292,8 +292,9 @@ func (a *App) drawTab(screen *ebiten.Image) {
 					label = "x"
 				}
 				// Sounding/inferred are the base; a verdict tints
-				// over them (latest wins — loops re-judge each
-				// pass); an active wait point pulses over all.
+				// over them once the playhead has reached the
+				// note (latest wins — loops re-judge each pass);
+				// an active wait point pulses over all.
 				col := colNote
 				if n.Inferred {
 					col = colInferred
@@ -301,7 +302,7 @@ func (a *App) drawTab(screen *ebiten.Image) {
 				if beat.Start <= pos && pos < beat.Start+beat.Dur {
 					col = colSounding
 				}
-				if v, ok := a.verdicts[noteKey{beat.Start, n.String}]; ok {
+				if v, ok := a.verdictAt(beat.Start, n.String, pos); ok {
 					col = verdictColor(v)
 				}
 				if waiting[noteKey{beat.Start, n.String}] {

@@ -230,8 +230,15 @@ func newOnNotes(eng *engine.Engine, app listenUI, scorer *practice.Scorer, gate 
 		offerBuf    = make([]pitch.Note, 0, 16)
 		confirmBuf  = make([]pitch.Note, 0, 16)
 		results     []practice.NoteResult
+		lastDiscont = eng.DiscontinuityFrame()
 	)
 	return func(closed []pitch.Note, current pitch.Note, sounding bool, consumed int64) {
+		// Before Advance, so a seek or loop edit abandons what it
+		// truncated instead of letting the deadline score it a Miss.
+		if d := eng.DiscontinuityFrame(); d != lastDiscont {
+			lastDiscont = d
+			scorer.AbandonBefore(d)
+		}
 		scorer.Detected(closed)
 		scorer.Advance(consumed - advanceLagFrames)
 		results = scorer.Results(results[:0])

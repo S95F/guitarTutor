@@ -135,6 +135,30 @@ func (a *App) syncLive() {
 	}
 }
 
+// verdictAt returns the verdict to paint on the tab note at (start, str)
+// with the playhead at pos.
+//
+// A verdict describes a note that has already sounded, so it only paints
+// once the playhead has reached the note. The gate is what keeps loop
+// passes honest: verdicts are keyed by tick and never cleared (results
+// carry no pass number), so without it the second pass paints the first
+// pass's hit or miss onto notes the player has not reached yet — an
+// upcoming note showing green. Clearing the map at the loop boundary
+// would not be enough on its own, because misses finalize seconds late
+// (see advanceLagFrames in cmd/guitartutor) and the previous pass's
+// results are still arriving well into the next one.
+//
+// Behind the playhead a stale verdict is the latest thing known about a
+// note that has now been played again, and it is replaced when this
+// pass's own result lands.
+func (a *App) verdictAt(start int64, str int, pos int64) (practice.Verdict, bool) {
+	if start > pos {
+		return 0, false
+	}
+	v, ok := a.verdicts[noteKey{start, str}]
+	return v, ok
+}
+
 // toggleWait (the W key, only with SetWaitControl(true)) flips engine
 // wait mode. Like the metronome, wait mode has no engine-side getter, so
 // the UI mirrors it for the HUD.

@@ -104,9 +104,34 @@ Live capture, and with it the cgo build event. This phase is where the two-clock
 - [ ] macOS and Linux ports (malgo's CoreAudio/ALSA/PulseAudio backends compile from the same vendored miniaudio — the cost is CI toolchains and testing, not code)
 - [ ] Advanced audio settings: WASAPI exclusive-mode toggle with automatic fallback (opt-in only — exclusive mode is driver-dependent and sometimes unstable)
 - [ ] Offline "transcribe this recording" import via `spotify/basic-pitch` ONNX (well-suited offline; unusable live — its CQT needs >1 s of context)
-- [ ] Practice history: per-piece, per-section accuracy and tempo progression over time
 - [ ] Export: text tab → MIDI; consider emitting/consuming [OpenSongChart](https://github.com/mikeoliphant/ChartPlayer) for OSS-community interop
 - [ ] Research spike (unscheduled): ASIO backend. Newly legally possible (Steinberg dual-licensed the SDK GPLv3 in late 2025) but no maintained Go path exists; only worth pursuing if real users hit drivers where WASAPI can't deliver — and then ideally as its own standalone library, since the whole Go ecosystem lacks one.
+
+## Phase 6 — Reading and returning
+
+Two features this roadmap previously ruled out, revisited with their objections answered rather than waived. See DECISIONS D7 for the argument; the non-goals table below is amended, not deleted.
+
+**Note highway** (`internal/ui/highway.go`, design in [docs/HIGHWAY.md](docs/HIGHWAY.md))
+
+- [ ] Perspective view: string lanes receding to a vanishing point, notes growing as they approach a hit line. An **opt-in second view** (`H`), never a replacement — the 2D tab stays the default, because reading it transfers to reading real tabs
+- [ ] **Depth is real seconds, not ticks** — approach velocity is constant at every BPM and every practice speed, so slowing down spreads notes apart instead of making the whole view crawl. `score.TempoMap.TimeAt` already does the integral
+- [ ] **Verdicts only ever render behind the hit line.** Misses finalize ~4 s late by construction (the tracker reports a note when it *closes*); an approaching note is therefore always neutral and nothing green ever appears in front of the player
+- [ ] Wait-mode rendering (nearly free — depth derives from `PosTick()`, which freezes), impact flashes, sustain trapezoids, per-lane tuning letters
+- [ ] Engine prerequisite: `readBlockFrames` is 2048, so `PosTick()` advances in ~43 ms steps on the playback-only path — subtle on the tab, visible judder on a highway
+
+**Practice history** (`internal/progress`, design in [docs/PROGRESS.md](docs/PROGRESS.md))
+
+- [ ] Per-piece, per-section accuracy and tempo progression over time *(moved here from Phase 5 — badges are meaningless without it, so it lands first)*
+- [ ] Versioned, atomically-written store beside `config.json`, with stricter durability rules than `appconfig`: never overwrite a newer schema, quarantine a corrupt file rather than replacing it
+- [ ] Piece identity by structural content hash — excluding string and fret, since MIDI fingerings come from a swappable heuristic — plus evidence-based re-linking when a piece is genuinely edited
+
+**Recognition**
+
+- [ ] Session score, combo, streak, and badges, all opt-out, all behind a credibility gate that withholds scoring when the session is uncalibrated, dropping samples, or below the input gate
+- [ ] **The never-punish invariants, as tested contract:** the streak never reads a verdict; no subtraction exists in the scoring path; chords and unjudgeable techniques are filtered before arithmetic; badges are set-only bits; a missed day consumes a freeze and the streak floors at 1, never 0
+- [ ] Badge catalog where **half the badges need no detection at all**, and the detection-dependent ones reward deliberate practice — slow clean passes, completed ramps, mastered sections — not grinding
+
+**Exit criteria:** a guitarist can read an unfamiliar piece off the highway without looking at the tab, and comes back the next day to a practice log that has never once told them they missed a note they actually played.
 
 ---
 
@@ -118,10 +143,10 @@ Live capture, and with it the cgo build event. This phase is where the two-clock
 | Bundled song catalog | Licensing kills these apps (Rocksmith delisting, Yousician's vanishing songs) |
 | Real-time blind polyphonic transcription | Not feasible (~>1 s context + ~120 ms model latency); expected-chord verification covers the actual need |
 | Dynamic difficulty | Community consensus: 100% difficulty + slow tempo beats auto-leveling |
-| 3D note highway | 2D scrolling tab is cheaper and transfers to reading real tabs |
+| Highway as the *primary* view | The 2D tab stays first-class and stays the default — reading it transfers to reading real tabs. A perspective highway ships in Phase 6 as an opt-in second view over the same score model; see D7 and [docs/HIGHWAY.md](docs/HIGHWAY.md) |
 | Amp/effect modeling | Use your amp sim of choice; the app wants your dry signal |
 | ABC / ASCII-tab import | Wrong abstraction / no rhythm information; ASCII tab may return as an *export* target |
-| Gamification meta (XP, streaks) | Practice tool, not a retention funnel |
+| Retention-funnel gamification: XP grind, loss-framing streaks, leaderboards | Practice tool, not a retention funnel — that judgment stands. What it over-rejected was the practice log Phase 5 already wanted, and recognition for deliberate practice; those arrive in Phase 6 with recognition that is additive only and a streak that never reads a verdict. See D7 and [docs/PROGRESS.md](docs/PROGRESS.md) |
 | Bass guitar (for now) | Detection windowing is sized for guitar range; bass low E is 41 Hz and needs different windows. Worth revisiting once guitar scoring is solid — file an issue if you want it |
 
 ## Known risks (tracked, not ignored)
@@ -131,4 +156,5 @@ Live capture, and with it the cgo build event. This phase is where the two-clock
 - **Split-device clock drift**: capture and playback devices that aren't the same physical interface run on independent sample clocks that drift apart over a practice session — enough to matter against a ±100–150 ms scoring window, and uncorrectable by a static offset. Mitigation: same-device steering by default; if split setups prove common, periodic re-correlation of the calibration click.
 - **Dormant dependencies**: `go-meltysynth` (last commit 2023) is vendored/forked from day one; `go-mp3` is unmaintained — MP3 import is best-effort, WAV/FLAC preferred.
 - **MIDI import lacks fingering**: fret-assignment heuristics can suggest unplayable fingerings; heuristic is swappable and inferred fingerings are marked in the UI. `.gp` import (Phase 3) is the real fix.
+- **Recognition amplifies every false negative** (Phase 6): a grey note on a tab is a shrug, but the same detection error costing a streak is a reason to close the app — and the detector has known, documented failure modes (monophonic chord handling, uncalibrated sessions, split-device drift). Mitigation: the streak is driven by practice time rather than verdicts, scoring is withheld entirely behind a credibility gate, and misses cannot subtract. All three are contract-tested, not conventions.
 - **Webview-vs-native spike** (Phase 0) is load-bearing: choosing alphaTab embedding would eliminate the GP importer and tab renderer from this roadmap but add a clock-domain sync problem and a webview dependency. Decided by prototype, not preference.

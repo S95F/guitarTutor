@@ -127,9 +127,14 @@ func (cfg Config) withDefaults() Config {
 }
 
 // An expectation is a tapped note awaiting a detection or its deadline.
+//
+// abandoned marks one whose answering window was cut short by a seek or a
+// loop change rather than by the player (see AbandonBefore): it can still
+// be matched, but its deadline drops it instead of scoring a Miss.
 type expectation struct {
-	ev       score.NoteEvent
-	outFrame int64
+	ev        score.NoteEvent
+	outFrame  int64
+	abandoned bool
 }
 
 // A preMatch records a wait-confirming detection observed before its
@@ -141,6 +146,7 @@ type preMatch struct {
 	start    int64 // score tick of the expected note
 	verdict  Verdict
 	errCents float64
+	born     int64 // output-clock frame the confirmation was recorded at
 	expire   int64 // output-clock frame after which the entry is stale
 }
 
@@ -308,16 +314,68 @@ func (s *Scorer) Advance(inFrame int64) {
 	keep := s.pending[:0]
 	for _, exp := range s.pending {
 		if exp.outFrame+off+win < inFrame {
-			s.finalize(NoteResult{
-				Event:    exp.ev,
-				OutFrame: exp.outFrame,
-				Verdict:  VerdictMiss,
-			})
+			// An abandoned expectation leaves no trace: the
+			// player never got their window, so neither a Miss
+			// nor a Hit is honest (AbandonBefore).
+			if !exp.abandoned {
+				s.finalize(NoteResult{
+					Event:    exp.ev,
+					OutFrame: exp.outFrame,
+					Verdict:  VerdictMiss,
+				})
+			}
 			continue
 		}
 		keep = append(keep, exp)
 	}
 	s.pending = keep
+}
+
+// AbandonBefore marks every expectation stamped before outFrame as
+// abandoned, and discards wait pre-matches recorded before it. Wiring
+// calls it with Engine.DiscontinuityFrame whenever that changes — a seek,
+// or a loop edit.
+//
+// A seek silences what is ringing and jumps the music out from under the
+// player. Anything the tap stamped before that moment was still inside
+// its ±150 ms answering window, and the player lost that window to a UI
+// action rather than to their playing. Advance would otherwise age those
+// expectations into Misses seconds later, which is the false "you missed"
+// D5 calls the #1 rage-quit cause in this category, and the planned
+// recognition layer would compound into a lost combo (docs/PROGRESS.md).
+//
+// Abandoning rather than dropping outright is the point. A detection
+// already in flight — the player did answer, and the tracker simply has
+// not closed the note yet — still matches and still scores a Hit, so a
+// seek costs no credit that was genuinely earned. Only the deadline path
+// changes: it drops the expectation silently instead of inventing a
+// failure. Erring toward no verdict is the direction D5 asks for.
+//
+// The frame bound is what keeps this from over-reaching. The tap keeps
+// running between the seek and the analysis goroutine observing it, so
+// notes sounded after the jump are already pending by the time this is
+// called; comparing against the discontinuity frame leaves those live and
+// fully scorable. Loop wraps never reach here — those notes were heard
+// and are still being answered.
+func (s *Scorer) AbandonBefore(outFrame int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.pending {
+		if s.pending[i].outFrame < outFrame {
+			s.pending[i].abandoned = true
+		}
+	}
+	// A pre-match is a wait confirmation awaiting its released event. A
+	// discontinuity abandons the wait, so the confirm must not fire on a
+	// later pass over the same tick — the case preMatchExpirySeconds
+	// could only approximate before this signal existed.
+	keep := s.preMatch[:0]
+	for _, p := range s.preMatch {
+		if p.born >= outFrame {
+			keep = append(keep, p)
+		}
+	}
+	s.preMatch = keep
 }
 
 // WaitConfirmed records the detections that confirmed a wait point; the
@@ -380,6 +438,7 @@ func (s *Scorer) WaitConfirmed(evs []score.NoteEvent, notes []pitch.Note) {
 			start:    ev.Start,
 			verdict:  v,
 			errCents: notes[best].Cents,
+			born:     s.clock,
 			expire:   s.clock + int64(preMatchExpirySeconds*s.cfg.SampleRate),
 		}
 		replaced := false

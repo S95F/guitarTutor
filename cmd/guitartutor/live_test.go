@@ -180,6 +180,55 @@ func (s *resultSink) OfferResults(rs []practice.NoteResult) {
 }
 func (s *resultSink) OfferTuner(pitch.Note, bool) {}
 
+// TestOnNotesSeekAbandonsPending drives the real -listen callback through
+// a seek: notes that sounded before it must not surface as misses.
+//
+// Scorer.Reset() was never wired to anything, so expectations queued by
+// the tap outlived the seek and Advance aged them into VerdictMiss four
+// seconds later — a false "you missed" for notes whose answering window a
+// keypress cut short (ROADMAP's guiding principles; D5).
+func TestOnNotesSeekAbandonsPending(t *testing.T) {
+	sc := waitFixtureScore(t)
+	eng := newEngine(sc, engine.Options{})
+
+	pcfg := practice.Config{SampleRate: sampleRate, Track: 0}
+	scorer := practice.NewScorer(pcfg)
+	gate := practice.NewWaitGate(pcfg)
+	eng.SetEventTap(scorer.ExpectNote)
+	sink := &resultSink{}
+	onNotes := newOnNotes(eng, sink, scorer, gate)
+
+	// Play far enough that the first notes have sounded and been tapped.
+	eng.Play()
+	l := make([]float32, 480)
+	r := make([]float32, 480)
+	for i := 0; i < 100; i++ { // 48000 frames = 1 s = two quarter notes
+		eng.RenderFrames(l, r)
+	}
+	consumed := int64(sampleRate)
+	onNotes(nil, pitch.Note{}, false, consumed)
+	if len(sink.results) != 0 {
+		t.Fatalf("results before anything expired: %+v", sink.results)
+	}
+
+	// The user jumps back to the top, answering nothing.
+	eng.SeekTick(0)
+
+	// Well past every pending deadline: the callback must abandon them
+	// rather than let Advance score them.
+	consumed += 10 * sampleRate
+	onNotes(nil, pitch.Note{}, false, consumed)
+
+	for _, r := range sink.results {
+		if r.Verdict == practice.VerdictMiss {
+			t.Errorf("seek produced a spurious miss: %+v", r)
+		}
+	}
+	if st := scorer.Stats(); st.Miss != 0 {
+		t.Errorf("stats after a seek = %+v, want no invented misses", st)
+	}
+}
+
 // TestMergeNote: a still-sounding note re-offered each batch must replace
 // its earlier snapshot, not pile up duplicates, so WaitConfirmed sees each
 // attack once with its latest cents.

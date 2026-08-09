@@ -156,6 +156,7 @@ type Engine struct {
 	aFrames  atomic.Int64
 	aWaiting atomic.Bool
 	aWaitGen atomic.Uint64
+	aDiscont atomic.Int64
 }
 
 // An activeNote is a sounding note awaiting its NoteOff at end.
@@ -254,6 +255,7 @@ func (e *Engine) SeekTick(tick int64) {
 	e.segValid = false
 	e.reindexFrom(tick)
 	e.clearWait()
+	e.markDiscontinuity()
 	e.publish()
 }
 
@@ -273,6 +275,7 @@ func (e *Engine) SetLoop(a, b int64) {
 		b = e.scoreEnd
 	}
 	e.clearWait()
+	e.markDiscontinuity()
 	if b <= a {
 		e.loopOn = false
 		e.segValid = false
@@ -293,8 +296,32 @@ func (e *Engine) ClearLoop() {
 	e.loopOn = false
 	e.segValid = false
 	e.clearWait()
+	e.markDiscontinuity()
 	e.publish()
 }
+
+// markDiscontinuity stamps the stream clock as the moment the position or
+// the loop bounds jumped under the player. Caller holds mu.
+func (e *Engine) markDiscontinuity() { e.aDiscont.Store(e.absFrame) }
+
+// DiscontinuityFrame returns the output-clock frame of the most recent
+// position discontinuity: a seek, or a loop change. It is 0 until one
+// happens.
+//
+// A loop WRAP is deliberately not one. Wrapping is the practice loop
+// working as intended — the notes near the loop end were heard and are
+// still being answered — whereas a seek or a loop edit truncates the
+// player's chance to answer whatever just sounded. Wiring that judges
+// timing uses this to tell those apart: the practice Scorer abandons
+// expectations stamped before this frame, so a UI action cannot age them
+// into misses (see Scorer.AbandonBefore). Comparing frames rather than
+// counting events makes the split exact — everything the tap stamped
+// before the jump is stale, everything after it is live — which a bare
+// counter cannot express, since the tap keeps running between the seek
+// and the analysis goroutine noticing it.
+//
+// Lock-free snapshot, safe from any goroutine.
+func (e *Engine) DiscontinuityFrame() int64 { return e.aDiscont.Load() }
 
 // Loop returns the loop points and whether looping is enabled.
 func (e *Engine) Loop() (a, b int64, on bool) {
