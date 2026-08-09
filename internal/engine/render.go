@@ -192,6 +192,9 @@ func (e *Engine) applyActionsAt(af int) {
 		if ev.Start >= e.boundary || e.frameOf(ev.Start) != af {
 			break
 		}
+		if e.tap != nil {
+			e.tap(*ev, e.absFrame)
+		}
 		if !e.muted[ev.Track] {
 			e.voices[ev.Track].NoteOn(ev.Key, ev.Velocity)
 			e.active = append(e.active, activeNote{track: ev.Track, key: ev.Key, end: ev.End})
@@ -276,15 +279,19 @@ func (e *Engine) countInFPB() int {
 	return fpb
 }
 
-// mix adds every track voice and the sounding clicks into left/right.
-// Muted tracks still render — they are silent because they receive no
-// NoteOns (and got AllNotesOff when muted) — so voice state stays warm
-// for an unmute mid-play.
+// mix adds every track voice and the sounding clicks into left/right, and
+// advances the absolute output-frame clock — every produced frame passes
+// through here (segments, count-ins, and stopped-transport tails alike),
+// so at any action point absFrame is exactly the output frame the action
+// sounds on. Muted tracks still render — they are silent because they
+// receive no NoteOns (and got AllNotesOff when muted) — so voice state
+// stays warm for an unmute mid-play.
 func (e *Engine) mix(left, right []float32) {
 	for _, v := range e.voices {
 		v.Render(left, right)
 	}
 	e.mixClicks(left, right)
+	e.absFrame += int64(len(left))
 }
 
 // allNotesOff silences every voice immediately and forgets pending
@@ -371,4 +378,5 @@ func (e *Engine) publish() {
 	e.aBPM.Store(math.Float64bits(60e6 / float64(usq) * e.scale))
 	e.aCiOn.Store(e.playing && e.ciBeatsLeft > 0)
 	e.aCiLeft.Store(int64(e.ciBeatsLeft))
+	e.aFrames.Store(e.absFrame)
 }

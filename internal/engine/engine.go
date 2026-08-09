@@ -100,6 +100,8 @@ type Engine struct {
 	// Scheduling state.
 	nextEvent int          // index into events of the next unfired event
 	active    []activeNote // sounding notes awaiting their NoteOff
+	absFrame  int64        // output frames produced since New (the stream clock)
+	tap       func(ev score.NoteEvent, outFrame int64)
 
 	// Segment state: one span of constant frames-per-tick, anchored at an
 	// exact tick so event frames are independent of block partitioning.
@@ -138,6 +140,7 @@ type Engine struct {
 	aBPM     atomic.Uint64
 	aCiOn    atomic.Bool
 	aCiLeft  atomic.Int64
+	aFrames  atomic.Int64
 }
 
 // An activeNote is a sounding note awaiting its NoteOff at end.
@@ -333,6 +336,26 @@ func (e *Engine) SetTrackMuted(track int, muted bool) {
 	}
 	e.muted[track] = muted
 }
+
+// SetEventTap registers fn to be called for every scheduled NoteOn as it
+// fires, with the exact output frame it sounds on. The tap is the seam the
+// Phase 2 scorer hangs off: expected notes arrive frame-stamped on the
+// same clock the duplex stream runs on, ready to match against detected
+// input notes (plus the calibrated latency offset).
+//
+// fn runs on the render goroutine with the engine lock held: it must not
+// call back into the engine, block, or allocate — copy the event into a
+// preallocated ring and get out. Events fire for muted tracks too (the tap
+// reports the musical schedule, not what is audible). Pass nil to remove.
+func (e *Engine) SetEventTap(fn func(ev score.NoteEvent, outFrame int64)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.tap = fn
+}
+
+// TotalFrames returns the output frames produced since New — the stream
+// clock, advancing even while paused (silence still fills the stream).
+func (e *Engine) TotalFrames() int64 { return e.aFrames.Load() }
 
 // TrackMuted reports a track's mute state.
 func (e *Engine) TrackMuted(track int) bool {

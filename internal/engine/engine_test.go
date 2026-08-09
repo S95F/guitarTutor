@@ -665,3 +665,43 @@ func TestReadMatchesRenderFrames(t *testing.T) {
 		}
 	}
 }
+
+// TestEventTapFramesAndMute checks that the event tap reports every
+// scheduled NoteOn on its exact output frame — including for muted tracks
+// (the tap is the musical schedule, not what is audible) — and that
+// TotalFrames tracks the output stream clock.
+func TestEventTapFramesAndMute(t *testing.T) {
+	e, _ := newFixtureEngine(t, Options{})
+	type tapRec struct {
+		key   int
+		frame int64
+	}
+	var got []tapRec
+	e.SetEventTap(func(ev score.NoteEvent, f int64) {
+		got = append(got, tapRec{ev.Key, f})
+	})
+	e.SetTrackMuted(0, true) // tap must still fire for muted tracks
+	e.Play()
+	renderN(e, 480000, 480)
+
+	want := []tapRec{
+		{40, 0}, {43, 12000}, {50, 24000}, {40, 36000},
+		{43, 48000}, {50, 60000}, {43, 72000}, {40, 84000},
+		{47, 96000}, {45, 120000}, {47, 144000},
+		{40, 192000}, {47, 192000}, {52, 192000},
+		{43, 264000},
+		{40, 288000},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("tap fired %d times, want %d: %v", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i].key != w.key || abs64(got[i].frame-w.frame) > 1 {
+			t.Errorf("tap %d = (frame %d, key %d), want (frame %d, key %d)",
+				i, got[i].frame, got[i].key, w.frame, w.key)
+		}
+	}
+	if tf := e.TotalFrames(); tf != 480000 {
+		t.Errorf("TotalFrames = %d, want 480000", tf)
+	}
+}
