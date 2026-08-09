@@ -3,9 +3,10 @@
 //
 // The engine owns a playback position in ticks and advances it by rendered
 // audio frames, converting frames to ticks through the score's tempo map
-// scaled by the practice tempo scale. All sounding sources — track voices
-// and the metronome click — are mixed here, scheduled by frame count. Wall
-// clock and time.Ticker are never consulted.
+// scaled by the practice tempo scale. All sounding sources — track voices,
+// the metronome click, and the optional backing track (see backing.go) —
+// are mixed here, scheduled by frame count. Wall clock and time.Ticker are
+// never consulted.
 //
 // Contract (the parts that are correctness features, not preferences):
 //
@@ -131,6 +132,15 @@ type Engine struct {
 	barLen    int64 // ticks per bar under the segment's meter
 	meterBase int64 // tick the segment's meter took effect
 
+	// Backing-track state (see backing.go): decoded stereo audio at the
+	// engine sample rate, pinned to score time. backBase is the fractional
+	// file sample position at the current segment's anchor; within a
+	// segment the file position advances by scale samples per frame.
+	backL, backR []float32
+	backOffset   float64 // seconds added to score time to get file time
+	backGain     float64
+	backBase     float64
+
 	// Count-in state. Active while ciBeatsLeft > 0; position frozen.
 	ciBeatsLeft int
 	ciFPB       int // frames per count-in beat
@@ -184,6 +194,7 @@ func New(sc *score.Score, opts Options) *Engine {
 		scoreEnd:         sc.End(),
 		metronome:        opts.Metronome,
 		scale:            1.0,
+		backGain:         1.0,
 	}
 	e.voices = make([]synth.Voice, len(sc.Tracks))
 	e.muted = make([]bool, len(sc.Tracks))

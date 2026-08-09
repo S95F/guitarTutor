@@ -17,8 +17,11 @@ import (
 
 	"github.com/ebitengine/oto/v3"
 
+	"github.com/S95F/guitarTutor/internal/audiofile"
 	"github.com/S95F/guitarTutor/internal/engine"
+	"github.com/S95F/guitarTutor/internal/gpimport"
 	"github.com/S95F/guitarTutor/internal/midiimport"
+	"github.com/S95F/guitarTutor/internal/mxlimport"
 	"github.com/S95F/guitarTutor/internal/score"
 	"github.com/S95F/guitarTutor/internal/score/textfmt"
 	"github.com/S95F/guitarTutor/internal/synth"
@@ -79,11 +82,14 @@ func usage() {
 	fmt.Fprint(os.Stderr, `guitartutor — practice companion for guitarists
 
 usage:
-  guitartutor play [flags] <file.gtab|file.mid>
-  guitartutor render [flags] <file.gtab|file.mid>
+  guitartutor play [flags] <file>
+  guitartutor render [flags] <file>
   guitartutor devices
   guitartutor calibrate [flags]
   guitartutor version
+
+pieces: .gtab (text tab), .mid (MIDI), .gp (Guitar Pro 7/8),
+        .musicxml / .mxl (MusicXML)
 
 play flags:
   -sf2 <path>     SoundFont for synthesis (default: built-in pluck)
@@ -94,10 +100,13 @@ play flags:
   -listen         hear your guitar: live pitch detection and scoring
   -in <id>        capture device for -listen (see devices; default system)
   -out <id>       playback device for -listen (default system)
+  -backing <path>         backing-track audio (wav/flac/mp3), pinned to score time
+  -backing-offset <sec>   file position at the piece's start (may be negative)
+  -backing-gain <f>       backing volume (default 1.0)
 
 render flags:
   -o <path>       output WAV (default out.wav)
-  -sf2, -scale, -met, -countin   as above
+  -sf2, -scale, -met, -countin, -backing*   as above
   -tail <sec>     silence after the last note (default 2.0)
 
 calibrate flags:
@@ -117,9 +126,27 @@ func load(path string) (*score.Score, []string, error) {
 		return sc, nil, err
 	case ".mid", ".midi", ".smf":
 		return midiimport.ImportFile(path)
+	case ".gp":
+		return gpimport.ImportFile(path)
+	case ".musicxml", ".mxl", ".xml":
+		return mxlimport.ImportFile(path)
 	default:
-		return nil, nil, fmt.Errorf("unsupported file type %q (want .gtab or .mid)", filepath.Ext(path))
+		return nil, nil, fmt.Errorf("unsupported file type %q (want .gtab, .mid, .gp, .musicxml, or .mxl)", filepath.Ext(path))
 	}
+}
+
+// loadBacking decodes a backing track and installs it on the engine.
+func loadBacking(eng *engine.Engine, path string, offsetSec, gain float64) error {
+	left, right, warns, err := audiofile.Load(path)
+	if err != nil {
+		return fmt.Errorf("backing track: %w", err)
+	}
+	for _, w := range warns {
+		fmt.Fprintln(os.Stderr, "warning:", w)
+	}
+	eng.SetBackingTrack(left, right, offsetSec)
+	eng.SetBackingGain(gain)
+	return nil
 }
 
 // makeFactory picks the synthesis path: SoundFont when supplied, otherwise
@@ -187,9 +214,12 @@ func runPlay(args []string) error {
 	listen := fs.Bool("listen", false, "live pitch detection and scoring")
 	inQ := fs.String("in", "", "capture device for -listen (name fragment)")
 	outQ := fs.String("out", "", "playback device for -listen (name fragment)")
+	backing := fs.String("backing", "", "backing-track audio file (wav/flac/mp3)")
+	backingOff := fs.Float64("backing-offset", 0, "backing start offset in seconds (positive skips into the file)")
+	backingGain := fs.Float64("backing-gain", 1.0, "backing track volume")
 	fs.Parse(args)
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: guitartutor play [flags] <file.gtab|file.mid>")
+		return fmt.Errorf("usage: guitartutor play [flags] <file>")
 	}
 	if err := validateScale(*scale); err != nil {
 		return err
@@ -201,6 +231,11 @@ func runPlay(args []string) error {
 	}
 	if err := ensureTracks(sc, "play"); err != nil {
 		return err
+	}
+	if *backing != "" {
+		if err := loadBacking(eng, *backing, *backingOff, *backingGain); err != nil {
+			return err
+		}
 	}
 
 	display := 0
@@ -256,9 +291,12 @@ func runRender(args []string) error {
 	met := fs.Bool("met", false, "metronome on")
 	countIn := fs.Int("countin", 0, "count-in beats")
 	tail := fs.Float64("tail", 2.0, "tail seconds")
+	backing := fs.String("backing", "", "backing-track audio file (wav/flac/mp3)")
+	backingOff := fs.Float64("backing-offset", 0, "backing start offset in seconds")
+	backingGain := fs.Float64("backing-gain", 1.0, "backing track volume")
 	fs.Parse(args)
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: guitartutor render [flags] <file.gtab|file.mid>")
+		return fmt.Errorf("usage: guitartutor render [flags] <file>")
 	}
 	if err := validateScale(*scale); err != nil {
 		return err
@@ -267,6 +305,11 @@ func runRender(args []string) error {
 	sc, eng, err := setup(fs.Arg(0), *sf2, *scale, *met, *countIn)
 	if err != nil {
 		return err
+	}
+	if *backing != "" {
+		if err := loadBacking(eng, *backing, *backingOff, *backingGain); err != nil {
+			return err
+		}
 	}
 	if err := ensureTracks(sc, "render"); err != nil {
 		return err

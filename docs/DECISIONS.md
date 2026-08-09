@@ -33,6 +33,8 @@ Lightweight decision records for guitarTutor. Each records what was chosen, what
 
 **Amendment (Phase 1 as built):** two deviations from the plan above. (1) beep was not needed: the engine renders synthesis and the metronome itself and hands frames straight to oto, so beep's streamer graph added nothing — it enters at Phase 3 with audio-file decoding, as planned decoders. (2) The *default* voice is a built-in Karplus-Strong plucked-string synth (`internal/synth`), which needs zero assets and sounds guitar-appropriate; go-meltysynth remains the SF2 path when the user supplies a SoundFont (`-sf2`). This sidesteps bundling/downloading a multi-megabyte GM SoundFont entirely. meltysynth is imported, not yet forked — fork at the first needed patch.
 
+**Amendment (Phase 3 as built):** beep stayed unnecessary at the point it was planned to enter. Backing-track decoding imports the underlying decoders directly (`internal/wavio` for WAV, `mewkiz/flac`, `hajimehoshi/go-mp3`) into `internal/audiofile`, because the engine mixes the decoded PCM itself — pinned to score time so seeks, loops, and tempo scaling stay exact — and beep's streamer abstraction would sit unused between the two. beep is now expected never to enter.
+
 ## D3 — Piece formats: MIDI + own text format first; Guitar Pro 7/8 next; MusicXML later
 
 **Decision:** Phase 1 imports Standard MIDI Files via [gomidi/midi v2](https://gitlab.com/gomidi/midi) and a small in-house text tab format (alphaTex-*inspired*, deliberately not alphaTex-compatible). Phase 3 adds a clean-room Guitar Pro 7/8 `.gp` importer, then a MusicXML subset.

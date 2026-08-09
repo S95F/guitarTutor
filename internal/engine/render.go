@@ -111,6 +111,17 @@ func (e *Engine) buildSegment() {
 		e.segEnd = 0
 	}
 
+	// Anchor the backing track: the file sample position at the segment
+	// anchor is score time at the anchor tick plus the alignment offset,
+	// in file samples. Computed from the tempo map at every segment build,
+	// so seeks and loop wraps land the file position exactly; within the
+	// segment (constant tempo) each output frame advances score time by
+	// scale/sampleRate seconds, i.e. the file position by scale samples.
+	if len(e.backL) > 0 {
+		sec := e.sc.Tempos.TimeAt(tick) + (pos-float64(tick))*float64(usq)/(1e6*score.PPQ) + e.backOffset
+		e.backBase = sec * float64(e.sampleRate)
+	}
+
 	m := e.sc.Meters.At(tick)
 	e.beatLen = m.BeatLen()
 	e.barLen = int64(m.Num) * e.beatLen
@@ -169,6 +180,10 @@ func (e *Engine) processFrames(left, right []float32) int {
 		}
 		if rel := af - base; rel > cur {
 			e.mix(left[cur:rel], right[cur:rel])
+			// The backing track sounds only here: processFrames is the one
+			// place the position advances, so a frozen position (paused,
+			// count-in, waiting, stopped) contributes backing silence.
+			e.mixBacking(left[cur:rel], right[cur:rel], base+cur)
 			cur = rel
 		}
 		if af >= base+n {

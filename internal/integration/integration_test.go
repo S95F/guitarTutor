@@ -10,7 +10,9 @@ import (
 	"testing"
 
 	"github.com/S95F/guitarTutor/internal/engine"
+	"github.com/S95F/guitarTutor/internal/gpimport"
 	"github.com/S95F/guitarTutor/internal/midiimport"
+	"github.com/S95F/guitarTutor/internal/mxlimport"
 	"github.com/S95F/guitarTutor/internal/score"
 	"github.com/S95F/guitarTutor/internal/score/textfmt"
 	"github.com/S95F/guitarTutor/internal/synth"
@@ -25,31 +27,59 @@ func testdata(t *testing.T, name string) string {
 	return p
 }
 
-// TestCrossFormatFixture asserts the corpus invariant: the canonical riff
-// parsed from .gtab and imported from .mid produce identical flattened
-// events (pitch and timing; fingering differs — MIDI's is inferred).
+// TestCrossFormatFixture asserts the corpus invariant (ROADMAP Phase 0,
+// completed by Phase 3): the canonical riff in every supported format
+// produces identical flattened events. Pitch and timing must agree
+// everywhere; fingering agrees for the formats that author it (.gtab,
+// .gp, .musicxml) while MIDI's is inferred.
 func TestCrossFormatFixture(t *testing.T) {
-	fromText, err := textfmt.ParseFile(testdata(t, "fixture_riff.gtab"))
+	ref, err := textfmt.ParseFile(testdata(t, "fixture_riff.gtab"))
 	if err != nil {
 		t.Fatalf("parse .gtab: %v", err)
 	}
-	fromMIDI, warns, err := midiimport.ImportFile(testdata(t, "fixture_riff.mid"))
-	if err != nil {
-		t.Fatalf("import .mid: %v", err)
+	re := ref.Events()
+
+	type imported struct {
+		name      string
+		events    []score.NoteEvent
+		warns     []string
+		fingering bool // format authors string/fret; must match .gtab exactly
 	}
-	if len(warns) != 0 {
-		t.Errorf("MIDI import warnings on the canonical fixture: %v", warns)
+	var all []imported
+	for _, c := range []struct {
+		file      string
+		fingering bool
+		load      func(string) (*score.Score, []string, error)
+	}{
+		{"fixture_riff.mid", false, midiimport.ImportFile},
+		{"fixture_riff.gp", true, gpimport.ImportFile},
+		{"fixture_riff.musicxml", true, mxlimport.ImportFile},
+		{"fixture_riff.mxl", true, mxlimport.ImportFile},
+	} {
+		sc, warns, err := c.load(testdata(t, c.file))
+		if err != nil {
+			t.Fatalf("import %s: %v", c.file, err)
+		}
+		all = append(all, imported{c.file, sc.Events(), warns, c.fingering})
 	}
 
-	te, me := fromText.Events(), fromMIDI.Events()
-	if len(te) != len(me) {
-		t.Fatalf("event count: .gtab %d, .mid %d", len(te), len(me))
-	}
-	for i := range te {
-		a, b := te[i], me[i]
-		if a.Start != b.Start || a.End != b.End || a.Key != b.Key {
-			t.Errorf("event %d: .gtab (start %d end %d key %d) != .mid (start %d end %d key %d)",
-				i, a.Start, a.End, a.Key, b.Start, b.End, b.Key)
+	for _, im := range all {
+		if len(im.warns) != 0 {
+			t.Errorf("%s: warnings on the canonical fixture: %v", im.name, im.warns)
+		}
+		if len(im.events) != len(re) {
+			t.Fatalf("%s: %d events, .gtab has %d", im.name, len(im.events), len(re))
+		}
+		for i := range re {
+			a, b := re[i], im.events[i]
+			if a.Start != b.Start || a.End != b.End || a.Key != b.Key {
+				t.Errorf("%s event %d: (start %d end %d key %d), .gtab has (start %d end %d key %d)",
+					im.name, i, b.Start, b.End, b.Key, a.Start, a.End, a.Key)
+			}
+			if im.fingering && (a.String != b.String || a.Fret != b.Fret) {
+				t.Errorf("%s event %d: fingering %d/%d, .gtab has %d/%d",
+					im.name, i, b.String, b.Fret, a.String, a.Fret)
+			}
 		}
 	}
 }

@@ -5,7 +5,7 @@ Plug in your electric guitar. Load a piece. Practice it properly.
 
 guitarTutor is an open-source guitar practice companion written in Go. You import a piece of music (or write one in a simple text format), and the app plays it back — synthesized from the score, with a metronome and scrolling tablature — while you play along on a real guitar plugged into your audio interface. Loop the hard bars, slow them down, and let the app ramp the tempo back up as you nail each pass. Later phases listen to your playing and tell you which notes you hit.
 
-> **Status: Phase 2 core works, pre-alpha.** The practice player (Phase 1) is functional, and the app can now hear you: plug your guitar into an audio interface and `play -listen` gives live pitch detection, hit/close/miss feedback on the tab, a tuner, and wait mode (playback pauses until you play the right note). Chord verification and detection-robustness work remain. See the [roadmap](ROADMAP.md) and technology [decisions](docs/DECISIONS.md).
+> **Status: Phases 1–3 core work, pre-alpha.** The practice player is functional; the app can hear you (`play -listen`: live pitch detection, hit/close/miss on the tab, a tuner, wait mode); and it now opens **Guitar Pro 7/8 `.gp`** and **MusicXML** files directly and plays **backing tracks** (WAV/FLAC/MP3) pinned to score time. The importers are built clean-room against the documented formats and validated on a self-authored corpus — real Guitar-Pro- and MuseScore-exported files are the remaining validation gap, so bug reports with real files are gold. Chord verification and detection robustness remain (Phase 4). See the [roadmap](ROADMAP.md) and [decisions](docs/DECISIONS.md).
 
 ## Why
 
@@ -38,11 +38,14 @@ guitarTutor aims to fill it with the practice loop every guitarist converges on:
 - "Wait mode": playback pauses until you play the right note
 - Tuner view, latency calibration wizard
 
-**Later (Phases 3–6)**
+**Phase 3 — real-world files (landed)**
 
-- Guitar Pro 7/8 (`.gp`) and MusicXML import
+- Guitar Pro 7/8 (`.gp`) and MusicXML (`.musicxml`/`.mxl`) import with authored fingerings
+- Backing-track audio (WAV/FLAC/MP3) pinned to score time
+
+**Later (Phases 4–6)**
+
 - Expected-chord verification (chord scoring against the score, not blind transcription)
-- Audio backing-track import (WAV/FLAC/MP3)
 - macOS and Linux ports
 - Optional ML pitch backend (SwiftF0 via ONNX) for noisy/distorted signals
 - An opt-in [note highway](docs/HIGHWAY.md) — notes approaching down string lanes, for when you want to read what's coming rather than read notation. The tab stays the default
@@ -99,7 +102,21 @@ Open the practice view on the bundled fixture riff:
 ./guitartutor play testdata/fixture_riff.gtab
 ```
 
-Or your own piece: `guitartutor play song.mid` (also `.gtab`). Useful flags: `-scale 0.7` start slowed down, `-countin 4`, `-met` metronome, `-sf2 your.sf2` SoundFont synthesis instead of the built-in pluck.
+Or your own piece: `guitartutor play song.gp` — also `.mid`, `.musicxml`/`.mxl`, and `.gtab`. Useful flags: `-scale 0.7` start slowed down, `-countin 4`, `-met` metronome, `-sf2 your.sf2` SoundFont synthesis instead of the built-in pluck.
+
+Play along with the original recording under the synth:
+
+```bash
+guitartutor play -backing song.flac -backing-offset 1.2 song.gp
+```
+
+The backing audio is pinned to score time, so looping and seeking stay aligned; slowing down pitch-shifts it (the synthesized parts stay pitch-true — no pure-Go time-stretch exists yet, a documented limitation). `-backing-offset` is the file position, in seconds, at the piece's first tick.
+
+Legacy Guitar Pro formats (`.gp3`–`.gp5`, `.gpx`) aren't parsed directly — convert them once with free [MuseScore](https://musescore.org):
+
+```bash
+MuseScore4.exe song.gp5 -o song.musicxml
+```
 
 In the practice view: **space** play/pause, **←/→** seek by bar, **↑/↓** tempo ±5%, **A/B** set loop points at the current bar, **L** clear loop, **M** metronome, **R** progressive speed ramp, **+/−** zoom, **1–9** mute tracks, **T** tuner, **W** wait mode (live), **Q** quit.
 

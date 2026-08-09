@@ -86,12 +86,13 @@ Live capture, and with it the cgo build event. This phase is where the two-clock
 
 **Exit criteria:** with a $100 interface on stock Windows drivers, single-note riffs score accurately enough that a wrong "miss" is rare, and wait-mode practice feels fair. *The loop is machine-verified — the engine's own output looped back through the real detector scores ≥ 80% with 12+ hits (`internal/integration`) — but the exit criteria proper need a human with a guitar.*
 
-## Phase 3 — Content: real-world files
+## Phase 3 — Content: real-world files — landed
 
-- [ ] **Guitar Pro 7/8 `.gp` importer**: the container is a zip holding `score.gpif` XML — `archive/zip` + `encoding/xml`, clean-room from public format documentation (the reference implementations are MPL/LGPL licensed; we don't port their code). Subset: tracks, tuning, capo, bars, voices, beats, notes, ties, tempo automations. This single importer unlocks the modern tab ecosystem.
-- [ ] MusicXML subset importer (`.musicxml` + zipped `.mxl`), MuseScore output as the compatibility target; validated against the fixture corpus with known-good MIDI renderings
-- [ ] Documented MuseScore CLI bridge for legacy formats (`.gp3`–`.gp5`, `.gpx` → MusicXML) instead of writing binary parsers for four dead formats
-- [ ] Audio backing-track import (WAV/FLAC, MP3 best-effort): time-aligned to the score by tap-tempo/offset; slowdown pitch-shifts (no mature pure-Go time-stretch exists — documented limitation, synth path remains primary)
+- [x] **Guitar Pro 7/8 `.gp` importer** (`internal/gpimport`): zip + `score.gpif` XML, clean-room from public format documentation (the reference implementations are MPL/LGPL; no code ported). Tracks, tuning, capo, first voice per bar, dots/tuplets, ties, tempo automations, authored string/fret. *Validation gap: the fixture corpus is self-authored — real Guitar-Pro-exported files are wanted as bug reports (`testdata/README-gp.txt`).*
+- [x] MusicXML subset importer (`internal/mxlimport`): `.musicxml` + zipped `.mxl` with proper container resolution, exact `backup`/`forward` cursor handling (the documented silent-corruption trap, pinned by exact-tick tests), divisions rescaling, staff-tuning/capo, authored or inferred fingering. MuseScore-flavored fixture; real MuseScore exports are the same validation gap.
+- [x] Documented MuseScore CLI bridge for legacy formats (`.gp3`–`.gp5`, `.gpx` → MusicXML) in the README, instead of binary parsers for four dead formats
+- [x] Audio backing-track import (`internal/audiofile` + `Engine.SetBackingTrack`): WAV/FLAC, MP3 best-effort; pinned to score time so seeks, loops, and tempo scaling stay aligned and frozen positions are silent; slowdown pitch-shifts (no mature pure-Go time-stretch exists — documented limitation, synth path remains primary). `-backing`/`-backing-offset`/`-backing-gain` on play and render.
+- [x] Cross-format fixture corpus complete: the canonical riff as `.gtab`, `.mid`, `.gp`, `.musicxml`, and `.mxl`, with an equality test over events **and authored fingerings** (`internal/integration`)
 
 ## Phase 4 — Chords and detection robustness
 
