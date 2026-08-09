@@ -100,13 +100,27 @@ Live capture, and with it the cgo build event. This phase is where the two-clock
 - [ ] Optional ML pitch backend: **SwiftF0** (MIT, ONNX, ~40× faster than CREPE on CPU) via `yalue/onnxruntime_go`, behind the same `PitchDetector` interface — build-tagged so the base app stays DLL-free. Buys robustness on noisy/distorted input.
 - [ ] Palm-mute-aware scoring rules; per-technique tolerance tuning against the WAV fixture corpus
 
-## Phase 5 — Platforms and polish
+## Phase 5 — The app grows a shell (and ports)
+
+Everything so far treats the command line as the front door: the practice *view* is real (scrolling tab, HUD, tuner, verdicts, wait banner), but there is no way to open a piece, pick a device, or change a setting without quitting and retyping a command. This phase collects the UI work deferred out of Phases 1 and 2 into one place and finishes the application around the view.
+
+**The shell** (`internal/ui`)
+
+- [ ] **Start screen / piece browser**: recently-played list from config, a folder view over the formats we import (`.gtab .mid .gp .musicxml .mxl`), and drag-and-drop onto the window (Ebitengine exposes dropped files). Launching with a file argument still goes straight to practice — the CLI never becomes second-class
+- [ ] **In-app settings**, replacing flags-only configuration: audio device pickers (capture and playback, with the same-interface steering the `devices` command prints today), SoundFont chooser, backing-track chooser with an offset nudge, count-in beats, and a calibration button that runs the existing `internal/latency` wizard in-window with a live meter
+- [ ] Deferred from Phase 1: fixed-BPM entry (not just relative scale), track **solo** alongside mute, in-app count-in toggle, loop points draggable on the tab rather than bar-quantized only
+- [ ] Deferred from Phase 2: split-device warning surfaced in the UI (not just docs), hot-unplug recovery with a clear banner instead of a dead stream, buffer-size selector
+- [ ] A pause/help overlay listing the key bindings — today they live in a HUD line and the README
+
+**Ports and polish**
 
 - [ ] macOS and Linux ports (malgo's CoreAudio/ALSA/PulseAudio backends compile from the same vendored miniaudio — the cost is CI toolchains and testing, not code)
 - [ ] Advanced audio settings: WASAPI exclusive-mode toggle with automatic fallback (opt-in only — exclusive mode is driver-dependent and sometimes unstable)
 - [ ] Offline "transcribe this recording" import via `spotify/basic-pitch` ONNX (well-suited offline; unusable live — its CQT needs >1 s of context)
 - [ ] Export: text tab → MIDI; consider emitting/consuming [OpenSongChart](https://github.com/mikeoliphant/ChartPlayer) for OSS-community interop
 - [ ] Research spike (unscheduled): ASIO backend. Newly legally possible (Steinberg dual-licensed the SDK GPLv3 in late 2025) but no maintained Go path exists; only worth pursuing if real users hit drivers where WASAPI can't deliver — and then ideally as its own standalone library, since the whole Go ecosystem lacks one.
+
+**Exit criteria:** a guitarist who has never opened a terminal can download the binary, double-click it, pick their interface, open a Guitar Pro file, and practice — with the command line remaining the fastest path for anyone who prefers it.
 
 ## Phase 6 — Reading and returning
 
