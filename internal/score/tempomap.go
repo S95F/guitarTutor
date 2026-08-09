@@ -110,6 +110,11 @@ func (s *Score) Validate() error {
 	if !sort.SliceIsSorted(s.Tempos, func(i, j int) bool { return s.Tempos[i].Tick < s.Tempos[j].Tick }) {
 		return fmt.Errorf("tempo map out of order")
 	}
+	for _, t := range s.Tempos {
+		if t.USPerQuarter <= 0 {
+			return fmt.Errorf("tempo at tick %d: non-positive microseconds per quarter (%d)", t.Tick, t.USPerQuarter)
+		}
+	}
 	if len(s.Meters) == 0 || s.Meters[0].Tick != 0 {
 		return fmt.Errorf("meter map must start at tick 0")
 	}
@@ -140,6 +145,9 @@ func (s *Score) Validate() error {
 					}
 					if n.Fret < 0 {
 						return fmt.Errorf("track %d bar %d: negative fret", ti, bi)
+					}
+					if k := tr.Pitch(n); k < 0 || k > 127 {
+						return fmt.Errorf("track %d bar %d: string %d fret %d sounds MIDI key %d, outside 0-127", ti, bi, n.String, n.Fret, k)
 					}
 				}
 				beatStart += beat.Dur

@@ -138,6 +138,56 @@ func TestEventsTieMerge(t *testing.T) {
 	}
 }
 
+func TestEventsTieMergesTechniques(t *testing.T) {
+	s := &Score{
+		Tempos: TempoMap{{Tick: 0, USPerQuarter: USPerQuarter(120)}},
+		Meters: MeterMap{{Tick: 0, Num: 4, Den: 4}},
+	}
+	tr := &Track{Tuning: StandardTuning}
+	s.Tracks = []*Track{tr}
+	b := tr.AppendBar(4, 4)
+	b.AddBeat(Half, Note{String: 5, Fret: 2})
+	// Vibrato written on the sustained (tied) half of the note.
+	b.AddBeat(Half, Note{String: 5, Fret: 2, Tied: true, Tech: TechVibrato})
+
+	evs := s.Events()
+	if len(evs) != 1 {
+		t.Fatalf("got %d events, want 1", len(evs))
+	}
+	if evs[0].Tech&TechVibrato == 0 {
+		t.Error("merged event lost the tied half's vibrato")
+	}
+}
+
+func TestValidateRejectsDegenerateTempoAndPitch(t *testing.T) {
+	base := func() *Score {
+		s := &Score{
+			Tempos: TempoMap{{Tick: 0, USPerQuarter: USPerQuarter(120)}},
+			Meters: MeterMap{{Tick: 0, Num: 4, Den: 4}},
+		}
+		tr := &Track{Tuning: StandardTuning}
+		s.Tracks = []*Track{tr}
+		tr.AppendBar(4, 4).AddBeat(Whole, Note{String: 6, Fret: 0})
+		return s
+	}
+
+	s := base()
+	s.Tempos[0].USPerQuarter = 0
+	if err := s.Validate(); err == nil {
+		t.Error("Validate accepted USPerQuarter 0")
+	}
+	s = base()
+	s.Tempos[0].USPerQuarter = -1
+	if err := s.Validate(); err == nil {
+		t.Error("Validate accepted negative USPerQuarter")
+	}
+	s = base()
+	s.Tracks[0].Bars[0].Beats[0].Notes[0].Fret = 90 // 40 + 90 = 130 > 127
+	if err := s.Validate(); err == nil {
+		t.Error("Validate accepted a note above MIDI key 127")
+	}
+}
+
 func TestEventsTieMismatchDegrades(t *testing.T) {
 	s := &Score{
 		Tempos: TempoMap{{Tick: 0, USPerQuarter: USPerQuarter(120)}},

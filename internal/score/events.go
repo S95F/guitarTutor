@@ -35,6 +35,10 @@ func (s *Score) Events() []NoteEvent {
 					if n.Tied {
 						if ei, ok := ringing[n.String]; ok && evs[ei].Fret == n.Fret && evs[ei].End == beat.Start {
 							evs[ei].End = beat.Start + beat.Dur
+							// Sustain-phase techniques (vibrato, bend)
+							// written on the tied half belong to the
+							// merged note.
+							evs[ei].Tech |= n.Tech
 							continue
 						}
 						// A tie with nothing to tie to (or a fret
