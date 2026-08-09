@@ -13,6 +13,14 @@ coverage.html
 /testdata/scratch/
 *.wav.tmp
 
+# The real-instrument corpus: recorded guitar, and score files exported by
+# Guitar Pro and MuseScore themselves. Deliberately NOT committed — the
+# audio datasets are hundreds of megabytes and carry their own licences,
+# and real-world tabs are copyrighted arrangements. Each developer fetches
+# or records their own; tests that need it skip when it is absent. See
+# docs/TESTDATA.md.
+/testdata/real/
+
 # User-supplied soundfonts and default render output
 *.sf2
 /out.wav
