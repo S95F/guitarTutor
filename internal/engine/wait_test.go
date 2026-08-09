@@ -387,6 +387,78 @@ func TestWaitMutedUserTrackStillWaits(t *testing.T) {
 	}
 }
 
+// TestWaitGenerationSeekRewaitSameTick is the W4 regression (seek half):
+// a seek during a wait clears it, and the position can re-wait at the very
+// same tick — indistinguishable through WaitingOn alone, so gate progress
+// from the abandoned wait would leak into the new one. WaitGeneration must
+// tell the two waits apart.
+func TestWaitGenerationSeekRewaitSameTick(t *testing.T) {
+	e, _ := newFixtureEngine(t, Options{})
+	if g := e.WaitGeneration(); g != 0 {
+		t.Fatalf("WaitGeneration before any wait = %d, want 0", g)
+	}
+	e.SetWaitMode(true)
+	e.Play()
+	renderN(e, 480, 480)
+	if !e.Waiting() {
+		t.Fatal("Waiting = false at the first note")
+	}
+	g1 := e.WaitGeneration()
+	if g1 != 1 {
+		t.Fatalf("WaitGeneration at the first wait = %d, want 1", g1)
+	}
+	e.SeekTick(0) // clears the wait; the position does not move
+	if e.Waiting() {
+		t.Fatal("Waiting = true after SeekTick, want cleared")
+	}
+	renderN(e, 480, 480) // re-waits at the same tick 0
+	if !e.Waiting() {
+		t.Fatal("Waiting = false after the seek, want a new wait at tick 0")
+	}
+	if evs, ok := e.WaitingOn(); !ok || len(evs) != 1 || evs[0].Start != 0 {
+		t.Fatalf("WaitingOn after seek = (%v, %v), want the same tick-0 event", evs, ok)
+	}
+	if g2 := e.WaitGeneration(); g2 != g1+1 {
+		t.Errorf("WaitGeneration after seek re-wait = %d, want %d (a distinct wait)", g2, g1+1)
+	}
+}
+
+// TestWaitGenerationLoopWrap is the W4 regression (loop half): each pass
+// waits again at the loop's first note — same tick, same events — and the
+// generation must increase on every engage, including across the wrap.
+func TestWaitGenerationLoopWrap(t *testing.T) {
+	e, _ := newFixtureEngine(t, Options{})
+	e.SetLoop(3840, 7680)
+	e.SeekTick(3840)
+	e.SetWaitMode(true)
+	e.Play()
+
+	renderN(e, 480, 480) // waiting at tick 3840
+	g1 := e.WaitGeneration()
+	if g1 != 1 {
+		t.Fatalf("WaitGeneration at the loop's first wait = %d, want 1", g1)
+	}
+	e.ConfirmWait()
+	renderN(e, 24480, 480) // waits at tick 4800
+	e.ConfirmWait()
+	renderN(e, 24480, 480) // waits at tick 5760
+	if g := e.WaitGeneration(); g != 3 {
+		t.Fatalf("WaitGeneration at the third wait = %d, want 3", g)
+	}
+	e.ConfirmWait()
+	renderN(e, 48000, 480) // half note runs out; the pass wraps
+	renderN(e, 480, 480)   // re-waits at tick 3840
+	if !e.Waiting() {
+		t.Fatal("Waiting = false after the wrap, want a new wait at the bar's first note")
+	}
+	if evs, ok := e.WaitingOn(); !ok || len(evs) != 1 || evs[0].Start != 3840 {
+		t.Fatalf("WaitingOn after wrap = (%v, %v), want the tick-3840 event again", evs, ok)
+	}
+	if g := e.WaitGeneration(); g != 4 {
+		t.Errorf("WaitGeneration after the wrap = %d, want 4 (the re-wait is a distinct wait)", g)
+	}
+}
+
 // TestWaitingRenderDoesNotAllocate holds the engine in a waiting steady
 // state (wait mode on, loop and metronome armed) and requires zero
 // allocations per RenderFrames — the same bar the playing path clears.

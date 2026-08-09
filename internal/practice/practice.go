@@ -9,9 +9,14 @@
 // see D4), a wrong verdict must never block practice, and everything is
 // tunable.
 //
-// Matching is greedy: each detection pairs with the nearest-in-time
-// unmatched expectation inside the timing window (exact key preferred over
-// a pitch-class/octave-off match), and each pairing is final — one
+// Matching is greedy: each detection pairs with the oldest unmatched
+// expectation (earliest scheduled frame) whose timing window contains it
+// — exact key preferred over a pitch-class/octave-off match, and the
+// oldest-deadline rule applies within each tier, so a detection sitting
+// in two same-key windows goes to the expectation about to expire rather
+// than the nearest one (nearest-in-time let an early detection steal a
+// later duplicate's expectation and starve the earlier one into a
+// spurious Miss). Each pairing is final — one
 // detection satisfies at most one expectation and vice versa. Chords are
 // scored one expectation per chord note; the pitch engine is monophonic
 // (D4), so a strummed chord typically yields one match and the remaining
@@ -127,18 +132,38 @@ type expectation struct {
 	outFrame int64
 }
 
+// A preMatch records a wait-confirming detection observed before its
+// expectation existed (see WaitConfirmed), keyed by the expected note's
+// Track+Key+Start tick.
+type preMatch struct {
+	track    int
+	key      int
+	start    int64 // score tick of the expected note
+	verdict  Verdict
+	errCents float64
+	expire   int64 // output-clock frame after which the entry is stale
+}
+
+// preMatchExpirySeconds bounds how long a recorded wait confirmation stays
+// valid awaiting its released expectation: a seek can abandon the confirm,
+// and the stale entry must not fire on a later pass over the same tick.
+const preMatchExpirySeconds = 5
+
 // A Scorer matches detections against expectations and emits results.
 //
 // Threading: ExpectNote is called from the engine's render goroutine (via
-// the event tap — keep it cheap), Detected and Advance from the analysis
-// goroutine, and Results/Stats from the UI goroutine. The scorer
-// synchronizes internally with short critical sections.
+// the event tap — keep it cheap), Detected, Advance, and WaitConfirmed
+// from the analysis/wiring goroutines, and Results/Stats from the UI
+// goroutine. The scorer synchronizes internally with short critical
+// sections.
 type Scorer struct {
-	mu      sync.Mutex
-	cfg     Config
-	pending []expectation
-	results []NoteResult
-	stats   Stats
+	mu       sync.Mutex
+	cfg      Config
+	pending  []expectation
+	results  []NoteResult
+	preMatch []preMatch // wait confirmations awaiting their released expectations
+	clock    int64      // latest output-clock frame seen from any feed (approximate; see WaitConfirmed)
+	stats    Stats
 }
 
 // NewScorer builds a scorer. Zero Config fields take the documented
@@ -149,18 +174,44 @@ func NewScorer(cfg Config) *Scorer {
 		// Preallocated so ExpectNote (render goroutine) does not
 		// allocate in steady state; growth beyond this is rare and
 		// amortized.
-		pending: make([]expectation, 0, 256),
-		results: make([]NoteResult, 0, 256),
+		pending:  make([]expectation, 0, 256),
+		results:  make([]NoteResult, 0, 256),
+		preMatch: make([]preMatch, 0, 8),
 	}
 }
 
 // ExpectNote feeds one scheduled note from the engine's event tap. Notes
 // from tracks other than Config.Track are ignored.
+//
+// An event pre-matched by WaitConfirmed finalizes immediately with the
+// recorded pitch-only verdict instead of joining the pending set; the
+// pre-match is consumed, so a repeat of the same tick (loop pass) is
+// judged normally.
 func (s *Scorer) ExpectNote(ev score.NoteEvent, outFrame int64) {
 	if ev.Track != s.cfg.Track {
 		return
 	}
 	s.mu.Lock()
+	if outFrame > s.clock {
+		s.clock = outFrame
+	}
+	for i := range s.preMatch {
+		p := &s.preMatch[i]
+		if p.track == ev.Track && p.key == ev.Key && p.start == ev.Start && s.clock <= p.expire {
+			s.finalize(NoteResult{
+				Event:    ev,
+				OutFrame: outFrame,
+				Verdict:  p.verdict,
+				Matched:  true,
+				ErrCents: p.errCents,
+			})
+			last := len(s.preMatch) - 1
+			s.preMatch[i] = s.preMatch[last]
+			s.preMatch = s.preMatch[:last]
+			s.mu.Unlock()
+			return
+		}
+	}
 	s.pending = append(s.pending, expectation{ev: ev, outFrame: outFrame})
 	s.mu.Unlock()
 }
@@ -169,12 +220,14 @@ func (s *Scorer) ExpectNote(ev score.NoteEvent, outFrame int64) {
 //
 // Each note's Start (input frames) is mapped to the output clock by
 // subtracting LatencyOffsetFrames, then matched greedily against the
-// pending expectations: nearest in time within TimingWindowFrames, exact
-// key preferred over a pitch-class-only (octave-off) match. A pairing
-// finalizes the expectation immediately — exact key within CentsTolerance
-// is a Hit, exact key with looser intonation or an octave-off pitch-class
-// match is a Close. Detections that match nothing are dropped (stray
-// noise, or the player noodling — never penalized, per D5).
+// pending expectations: among expectations whose TimingWindowFrames
+// window contains the detection, the earliest outFrame (oldest deadline)
+// wins, exact key preferred over a pitch-class-only (octave-off) match.
+// A pairing finalizes the expectation immediately — exact key within
+// CentsTolerance is a Hit, exact key with looser intonation or an
+// octave-off pitch-class match is a Close. Detections that match nothing
+// are dropped (stray noise, or the player noodling — never penalized,
+// per D5).
 func (s *Scorer) Detected(notes []pitch.Note) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -183,26 +236,25 @@ func (s *Scorer) Detected(notes []pitch.Note) {
 	for i := range notes {
 		n := &notes[i]
 		detOut := n.Start - off
+		if detOut > s.clock {
+			s.clock = detOut
+		}
 		bestExact, bestClass := -1, -1
-		var bestExactAbs, bestClassAbs int64
+		var bestExactOut, bestClassOut int64
 		for j := range s.pending {
 			exp := &s.pending[j]
 			dt := detOut - exp.outFrame
-			adt := dt
-			if adt < 0 {
-				adt = -adt
-			}
-			if adt > win {
+			if dt < -win || dt > win {
 				continue
 			}
 			switch {
 			case exp.ev.Key == n.Key:
-				if bestExact < 0 || adt < bestExactAbs {
-					bestExact, bestExactAbs = j, adt
+				if bestExact < 0 || exp.outFrame < bestExactOut {
+					bestExact, bestExactOut = j, exp.outFrame
 				}
 			case ((exp.ev.Key-n.Key)%12+12)%12 == 0:
-				if bestClass < 0 || adt < bestClassAbs {
-					bestClass, bestClassAbs = j, adt
+				if bestClass < 0 || exp.outFrame < bestClassOut {
+					bestClass, bestClassOut = j, exp.outFrame
 				}
 			}
 		}
@@ -243,6 +295,16 @@ func (s *Scorer) Advance(inFrame int64) {
 	defer s.mu.Unlock()
 	win := int64(s.cfg.TimingWindowFrames)
 	off := int64(s.cfg.LatencyOffsetFrames)
+	if out := inFrame - off; out > s.clock {
+		s.clock = out
+	}
+	keepPM := s.preMatch[:0]
+	for _, p := range s.preMatch {
+		if s.clock <= p.expire {
+			keepPM = append(keepPM, p)
+		}
+	}
+	s.preMatch = keepPM
 	keep := s.pending[:0]
 	for _, exp := range s.pending {
 		if exp.outFrame+off+win < inFrame {
@@ -256,6 +318,83 @@ func (s *Scorer) Advance(inFrame int64) {
 		keep = append(keep, exp)
 	}
 	s.pending = keep
+}
+
+// WaitConfirmed records the detections that confirmed a wait point; the
+// wiring calls it with the wait's events (Engine.WaitingOn) and the
+// confirming notes right BEFORE Engine.ConfirmWait.
+//
+// At a wait point the player's notes are heard before the engine fires
+// the expected events — the release frame is causally downstream of the
+// playing — so a staccato confirmation reaches Detected while no
+// expectation exists yet (consumed, matching nothing), and even a
+// sustained one would be timing-judged against dt = -(latency offset +
+// confirmation latency), an error that is the machinery's, not the
+// player's. WaitConfirmed fixes both: for each expected event
+// (Config.Track only) the best-cents matching note is recorded as a
+// pre-match keyed by Track+Key+Start tick, and when ExpectNote later
+// receives a pre-matched event it finalizes immediately with a pitch-only
+// verdict — Hit if |cents| <= CentsTolerance, else Close (an octave-off
+// pitch-class match is Close) — Matched true, ErrFrames 0. Each pre-match
+// is consumed at most once.
+//
+// Pre-matches expire after ~5 s so a seek that abandons the confirm
+// cannot leak a stale entry into a later pass over the same tick. Expiry
+// runs on the scorer's approximate output clock: the latest frame seen
+// from any feed (tap outFrames directly; detections and Advance mapped
+// through LatencyOffsetFrames). Input and output clocks differ by the
+// round-trip latency, which is noise at a 5 s horizon.
+func (s *Scorer) WaitConfirmed(evs []score.NoteEvent, notes []pitch.Note) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, ev := range evs {
+		if ev.Track != s.cfg.Track {
+			continue
+		}
+		best, bestExact := -1, false
+		var bestAbs float64
+		for i := range notes {
+			n := &notes[i]
+			exact := n.Key == ev.Key
+			if !exact && ((ev.Key-n.Key)%12+12)%12 != 0 {
+				continue
+			}
+			abs := math.Abs(n.Cents)
+			switch {
+			case best < 0, exact && !bestExact:
+				best, bestExact, bestAbs = i, exact, abs
+			case exact == bestExact && abs < bestAbs:
+				best, bestAbs = i, abs
+			}
+		}
+		if best < 0 {
+			continue
+		}
+		v := VerdictClose
+		if bestExact && bestAbs <= s.cfg.CentsTolerance {
+			v = VerdictHit
+		}
+		pm := preMatch{
+			track:    ev.Track,
+			key:      ev.Key,
+			start:    ev.Start,
+			verdict:  v,
+			errCents: notes[best].Cents,
+			expire:   s.clock + int64(preMatchExpirySeconds*s.cfg.SampleRate),
+		}
+		replaced := false
+		for i := range s.preMatch {
+			p := &s.preMatch[i]
+			if p.track == pm.track && p.key == pm.key && p.start == pm.start {
+				*p = pm
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			s.preMatch = append(s.preMatch, pm)
+		}
+	}
 }
 
 // finalize records one judgement. Caller holds mu.
@@ -294,6 +433,7 @@ func (s *Scorer) Reset() {
 	defer s.mu.Unlock()
 	s.pending = s.pending[:0]
 	s.results = s.results[:0]
+	s.preMatch = s.preMatch[:0]
 	s.stats = Stats{}
 }
 
@@ -303,17 +443,22 @@ func (s *Scorer) Reset() {
 // match within the cents tolerance).
 //
 // Wiring (cmd, Phase 2): the caller polls Engine.WaitingOn; when a wait
-// point appears it Arms the gate with the returned events, Offers each
-// batch of tracker detections (Tracker.Current works too — the gate only
-// reads Key and Cents), and calls Engine.ConfirmWait when Offer reports
-// true; it re-Arms at the next wait point. Timing is irrelevant while
-// waiting — the position is frozen — so the gate ignores frame stamps.
+// point appears it Arms the gate with the returned events and the current
+// capture frame, Offers each batch of tracker detections (Tracker.Current
+// works too — the gate only reads Key, Cents, and Start), and calls
+// Engine.ConfirmWait when Offer reports true; it re-Arms at the next wait
+// point. Rhythm is not judged while waiting — the position is frozen —
+// but the ATTACK must be new: Offer ignores notes whose Start precedes
+// the frame the gate was armed at, so a note still ringing from before
+// the wait cannot auto-confirm a same-key wait point. Intonation stays
+// lenient (CloseCents).
 type WaitGate struct {
 	mu         sync.Mutex
 	closeCents float64
 	events     []score.NoteEvent
 	done       []bool
 	nDone      int
+	minStart   int64
 }
 
 // NewWaitGate builds a gate sharing the scorer's tolerances.
@@ -321,15 +466,18 @@ func NewWaitGate(cfg Config) *WaitGate {
 	return &WaitGate{closeCents: cfg.withDefaults().CloseCents}
 }
 
-// Arm sets the events the engine is waiting on (from Engine.WaitingOn).
-// The events are copied; any previous armed set and its progress are
-// discarded.
-func (g *WaitGate) Arm(events []score.NoteEvent) {
+// Arm sets the events the engine is waiting on (from Engine.WaitingOn)
+// and the earliest input-stream frame a confirming attack may start at —
+// typically the capture position when the wait engaged. Offer ignores
+// notes whose Start precedes minStart. The events are copied; any
+// previous armed set and its progress are discarded.
+func (g *WaitGate) Arm(events []score.NoteEvent, minStart int64) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.events = append(g.events[:0], events...)
 	g.done = append(g.done[:0], make([]bool, len(events))...)
 	g.nDone = 0
+	g.minStart = minStart
 }
 
 // Offer feeds detections; it returns true when the armed set is fully
@@ -337,11 +485,13 @@ func (g *WaitGate) Arm(events []score.NoteEvent) {
 // next wait point).
 //
 // A detection satisfies one unsatisfied armed event on an octave-EXACT
-// key match with |Cents| <= CloseCents (waiting is lenient about
-// intonation, strict about octave — playing the wrong octave should not
-// release the wait). A chord is satisfied by playing every note, in any
-// order, across any number of Offer calls. With nothing armed, Offer
-// reports false.
+// key match with |Cents| <= CloseCents when its attack is fresh (Start at
+// or after the armed minStart) — waiting is lenient about intonation,
+// strict about octave and about the attack: playing the wrong octave
+// should not release the wait, and neither should a note that was already
+// ringing when the wait engaged. A chord is satisfied by playing every
+// note, in any order, across any number of Offer calls. With nothing
+// armed, Offer reports false.
 func (g *WaitGate) Offer(notes []pitch.Note) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -350,6 +500,9 @@ func (g *WaitGate) Offer(notes []pitch.Note) bool {
 	}
 	for i := range notes {
 		n := &notes[i]
+		if n.Start < g.minStart {
+			continue
+		}
 		if math.Abs(n.Cents) > g.closeCents {
 			continue
 		}

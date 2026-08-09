@@ -135,6 +135,58 @@ func TestTrackerRepickSplitsNotes(t *testing.T) {
 	}
 }
 
+// TestTrackerKeyChangeSurvivesUnvoicedFlicker is the regression test for
+// the hysteresis dead-end: an unvoiced hop used to reset the key-change
+// (jump) candidacy while every voiced hop reset the unvoiced-run counter,
+// so a re-fretted note flickering around the voicing threshold — voiced
+// hops on the NEW key alternating with unvoiced dropouts — left the OLD
+// note open forever and the new key was never recognized. An unvoiced hop
+// carries no contradicting pitch evidence, so it must not cancel the
+// jump; the new key has to win.
+func TestTrackerKeyChangeSurvivesUnvoicedFlicker(t *testing.T) {
+	cfg := DefaultConfig(testSR)
+	tr := NewTracker(cfg)
+
+	stamp := int64(cfg.Window / 2)
+	next := func(f0, clarity float64) Frame {
+		f := Frame{Frame: stamp, F0: f0, Clarity: clarity, RMS: 0.1}
+		stamp += int64(cfg.Hop)
+		return f
+	}
+
+	var closed []Note
+	feed := func(f Frame) {
+		closed = append(closed, tr.Feed([]Frame{f})...)
+	}
+
+	const oldKey, newKey = 57, 64 // A3 -> E4
+	// Sustain the old key long enough to open it and fill the median
+	// filter.
+	for i := 0; i < 10; i++ {
+		feed(next(keyToFreq(oldKey), 0.95))
+	}
+	if cur, ok := tr.Current(); !ok || cur.Key != oldKey {
+		t.Fatalf("Current = %+v, %v; want open note on key %d", cur, ok, oldKey)
+	}
+	// Re-fret to the new key, but weakly: every voiced hop on the new
+	// key is followed by an unvoiced dropout.
+	for i := 0; i < 12; i++ {
+		feed(next(keyToFreq(newKey), 0.9))
+		feed(next(0, 0))
+	}
+
+	if len(closed) != 1 || closed[0].Key != oldKey {
+		t.Fatalf("closed notes = %+v, want exactly one on key %d (the old note must close)", closed, oldKey)
+	}
+	if n := closed[0]; n.End <= n.Start {
+		t.Errorf("old note End %d not after Start %d", n.End, n.Start)
+	}
+	cur, ok := tr.Current()
+	if !ok || cur.Key != newKey {
+		t.Fatalf("Current = %+v, %v; want open note on key %d (the new key must be recognized)", cur, ok, newKey)
+	}
+}
+
 // TestTrackerClosesOnSilence: a note followed by silence closes on the
 // unvoiced run without needing Flush, stamped inside the sounding region.
 func TestTrackerClosesOnSilence(t *testing.T) {

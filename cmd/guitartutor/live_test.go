@@ -1,0 +1,346 @@
+package main
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/S95F/guitarTutor/internal/appconfig"
+	"github.com/S95F/guitarTutor/internal/audio"
+	"github.com/S95F/guitarTutor/internal/engine"
+	"github.com/S95F/guitarTutor/internal/latency"
+	"github.com/S95F/guitarTutor/internal/pitch"
+	"github.com/S95F/guitarTutor/internal/practice"
+	"github.com/S95F/guitarTutor/internal/score"
+)
+
+// Fake device lists for the resolution tests. The capture default and the
+// playback default carry distinct IDs so a test that resolves the wrong
+// list fails loudly.
+var (
+	testCapture = []audio.DeviceInfo{
+		{ID: "cap-usb", Name: "USB Audio Interface"},
+		{ID: "cap-mic", Name: "Laptop Microphone", Default: true},
+	}
+	testPlayback = []audio.DeviceInfo{
+		{ID: "pb-usb", Name: "USB Audio Interface"},
+		{ID: "pb-spk", Name: "Speakers", Default: true},
+	}
+)
+
+// TestResolveDeviceDefault is the regression test for finding C3: an empty
+// query must resolve to the CONCRETE default device's ID (it used to
+// resolve to "", making offsets follow whatever the system default
+// happened to be), falling back to "" only when no default is marked.
+func TestResolveDeviceDefault(t *testing.T) {
+	id, err := resolveDevice(testCapture, "capture", "")
+	if err != nil {
+		t.Fatalf("resolveDevice(default): %v", err)
+	}
+	if id != "cap-mic" {
+		t.Errorf("empty query resolved to %q, want the concrete default cap-mic", id)
+	}
+
+	noDefault := []audio.DeviceInfo{{ID: "a", Name: "A"}, {ID: "b", Name: "B"}}
+	id, err = resolveDevice(noDefault, "capture", "")
+	if err != nil {
+		t.Fatalf("resolveDevice(no default marked): %v", err)
+	}
+	if id != "" {
+		t.Errorf("empty query with no marked default resolved to %q, want \"\"", id)
+	}
+}
+
+// TestFillDeviceIDs is the regression test for finding C2: calibrate and
+// play used to resolve devices asymmetrically (play filled empty flags
+// from the config, calibrate took system defaults), so the offset was
+// stored under one key and looked up under another. Both paths now share
+// fillDeviceIDs: flags win, the config fills gaps, and an empty result
+// falls back to the concrete default.
+func TestFillDeviceIDs(t *testing.T) {
+	remembered := appconfig.Config{CaptureDeviceID: "cap-usb", PlaybackDeviceID: "pb-usb"}
+	cases := []struct {
+		name        string
+		cfg         appconfig.Config
+		inQ, outQ   string
+		wantIn      string
+		wantOut     string
+		wantErrPart string
+	}{
+		{
+			name:    "flags win over config",
+			cfg:     appconfig.Config{CaptureDeviceID: "cap-mic", PlaybackDeviceID: "pb-spk"},
+			inQ:     "usb",
+			outQ:    "usb",
+			wantIn:  "cap-usb",
+			wantOut: "pb-usb",
+		},
+		{
+			name:    "config fills empty flags",
+			cfg:     remembered,
+			wantIn:  "cap-usb",
+			wantOut: "pb-usb",
+		},
+		{
+			name:    "no flags, no config: concrete defaults",
+			wantIn:  "cap-mic",
+			wantOut: "pb-spk",
+		},
+		{
+			name:    "mixed: flag for capture, config for playback",
+			cfg:     remembered,
+			inQ:     "microphone",
+			wantIn:  "cap-mic",
+			wantOut: "pb-usb",
+		},
+		{
+			name:        "no match errors",
+			inQ:         "scarlett",
+			wantErrPart: "no capture device matches",
+		},
+		{
+			name:        "ambiguous fragment errors",
+			outQ:        "s",
+			wantErrPart: "be more specific",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			in, out, err := fillDeviceIDs(testCapture, testPlayback, c.cfg, c.inQ, c.outQ)
+			if c.wantErrPart != "" {
+				if err == nil || !strings.Contains(err.Error(), c.wantErrPart) {
+					t.Fatalf("err = %v, want one containing %q", err, c.wantErrPart)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("fillDeviceIDs: %v", err)
+			}
+			if in != c.wantIn || out != c.wantOut {
+				t.Errorf("resolved (%q, %q), want (%q, %q)", in, out, c.wantIn, c.wantOut)
+			}
+		})
+	}
+}
+
+// TestCalibratedOffsetLegacyKey is the other half of finding C3: a legacy
+// ""|"" config entry (calibrated back when empty queries stayed empty) is
+// ambiguous about which physical devices it measured and must read as
+// uncalibrated, so the warning path fires and a recalibration stores a
+// concrete key.
+func TestCalibratedOffsetLegacyKey(t *testing.T) {
+	var cfg appconfig.Config
+	cfg.SetOffset("", "", 1234, 0.95)
+	if off, ok := calibratedOffset(cfg, "", ""); ok {
+		t.Errorf("legacy \"\"|\"\" entry read as calibrated (offset %d), want uncalibrated", off)
+	}
+
+	cfg.SetOffset("cap-usb", "pb-usb", 777, 0.95)
+	off, ok := calibratedOffset(cfg, "cap-usb", "pb-usb")
+	if !ok || off != 777 {
+		t.Errorf("concrete pair = (%d, %v), want (777, true)", off, ok)
+	}
+	if _, ok := calibratedOffset(cfg, "cap-usb", "pb-spk"); ok {
+		t.Error("uncalibrated concrete pair read as calibrated")
+	}
+}
+
+// TestCalibrationSpacingHeadroom is the regression test for finding C4:
+// the old half-second click spacing had zero headroom over the 500 ms
+// search window, so large-but-sane round trips sat at the alias point. A
+// realistic worst case (450 ms) must be recovered exactly with the cmd
+// constants, and the spacing must keep the full search window clear of
+// the next click.
+func TestCalibrationSpacingHeadroom(t *testing.T) {
+	if calSpacing < sampleRate {
+		t.Fatalf("calSpacing = %d frames, want >= 1 s (%d) of alias headroom", calSpacing, sampleRate)
+	}
+	const delay = 45 * sampleRate / 100 // 450 ms
+	train := latency.ClickTrain(sampleRate, calClicks, calSpacing)
+	captured := make([]float32, len(train)+sampleRate)
+	copy(captured[delay:], train)
+	off, conf, err := latency.Estimate(sampleRate, train, captured, calSpacing, calClicks)
+	if err != nil {
+		t.Fatalf("Estimate(450 ms delay): %v", err)
+	}
+	if off < delay-2 || off > delay+2 {
+		t.Errorf("estimated offset %d, want %d +/- 2", off, delay)
+	}
+	if conf < 0.9 {
+		t.Errorf("confidence %.2f on a clean loopback, want >= 0.9", conf)
+	}
+}
+
+// resultSink is the test's listenUI: it records offered results.
+type resultSink struct {
+	results []practice.NoteResult
+}
+
+func (s *resultSink) OfferResults(rs []practice.NoteResult) {
+	s.results = append(s.results, rs...)
+}
+func (s *resultSink) OfferTuner(pitch.Note, bool) {}
+
+// TestMergeNote: a still-sounding note re-offered each batch must replace
+// its earlier snapshot, not pile up duplicates, so WaitConfirmed sees each
+// attack once with its latest cents.
+func TestMergeNote(t *testing.T) {
+	var buf []pitch.Note
+	buf = mergeNote(buf, pitch.Note{Start: 100, Key: 40, Cents: 10})
+	buf = mergeNote(buf, pitch.Note{Start: 100, Key: 40, Cents: 4}) // same attack, refined
+	buf = mergeNote(buf, pitch.Note{Start: 900, Key: 40, Cents: 1}) // new attack, same key
+	if len(buf) != 2 {
+		t.Fatalf("buffer holds %d notes, want 2 (snapshot not merged)", len(buf))
+	}
+	if buf[0].Cents != 4 {
+		t.Errorf("first attack cents = %v, want the refined 4", buf[0].Cents)
+	}
+}
+
+// waitFixtureScore builds the wait-mode fixture: two consecutive quarter
+// notes on the SAME key (low E — the auto-confirm finding's exact shape)
+// followed by a half note on A.
+func waitFixtureScore(t *testing.T) *score.Score {
+	t.Helper()
+	sc := &score.Score{
+		Tempos: score.TempoMap{{Tick: 0, USPerQuarter: 500000}},
+		Meters: score.MeterMap{{Tick: 0, Num: 4, Den: 4}},
+	}
+	tr := &score.Track{Name: "guitar", Tuning: score.StandardTuning}
+	sc.Tracks = append(sc.Tracks, tr)
+	b := tr.AppendBar(4, 4)
+	b.AddBeat(score.Quarter, score.Note{String: 6, Fret: 0}) // E2, key 40
+	b.AddBeat(score.Quarter, score.Note{String: 6, Fret: 0}) // E2 again
+	b.AddBeat(score.Half, score.Note{String: 5, Fret: 0})    // A2, key 45
+	if err := sc.Validate(); err != nil {
+		t.Fatalf("fixture score does not validate: %v", err)
+	}
+	return sc
+}
+
+// renderUntilWait renders until the engine is waiting at generation gen.
+func renderUntilWait(t *testing.T, eng *engine.Engine, gen uint64) {
+	t.Helper()
+	l := make([]float32, 480)
+	r := make([]float32, 480)
+	for i := 0; i < 2000; i++ {
+		if eng.Waiting() && eng.WaitGeneration() == gen {
+			return
+		}
+		eng.RenderFrames(l, r)
+	}
+	t.Fatalf("engine never reached wait generation %d (waiting=%v gen=%d)",
+		gen, eng.Waiting(), eng.WaitGeneration())
+}
+
+// TestOnNotesWaitWiring is the regression test for finding C1, driving the
+// exact -listen analysis callback against a real waiting engine:
+//
+//	(b) a note still ringing from before a wait (same key!) must not
+//	    auto-confirm it — only a fresh attack releases;
+//	(a) a seek that re-waits at the SAME tick re-arms (generation
+//	    tracking): a stale attack from the abandoned wait cannot confirm
+//	    the new one;
+//	(c) wait-confirmed notes score pitch-only — Hit, Matched, ErrFrames
+//	    0 — never timing-judged against the machinery's release latency.
+func TestOnNotesWaitWiring(t *testing.T) {
+	sc := waitFixtureScore(t)
+	eng := newEngine(sc, engine.Options{})
+	eng.SetWaitMode(true)
+
+	pcfg := practice.Config{SampleRate: sampleRate, Track: 0}
+	scorer := practice.NewScorer(pcfg)
+	gate := practice.NewWaitGate(pcfg)
+	eng.SetEventTap(scorer.ExpectNote)
+	sink := &resultSink{}
+	onNotes := newOnNotes(eng, sink, scorer, gate)
+
+	eng.Play()
+	renderUntilWait(t, eng, 1) // wait 1: first E2, tick 0
+
+	// (b) A ringing note from long before the wait must not confirm it.
+	consumed := int64(sampleRate)
+	ringing := pitch.Note{Start: 0, Key: 40, Cents: 2, Clarity: 0.9}
+	onNotes(nil, ringing, true, consumed)
+	if !eng.Waiting() {
+		t.Fatal("wait 1 auto-confirmed by a note ringing from before the wait")
+	}
+
+	// A fresh attack — allowed to start a hair before the arm (grace) —
+	// confirms.
+	fresh := pitch.Note{Start: consumed - 1000, End: consumed + 400, Key: 40, Cents: 3, Clarity: 0.9}
+	onNotes([]pitch.Note{fresh}, pitch.Note{}, false, consumed+480)
+	if eng.Waiting() {
+		t.Fatal("fresh attack did not confirm wait 1")
+	}
+
+	renderUntilWait(t, eng, 2) // wait 2: second E2, same key, tick PPQ
+
+	// (c) The released first note must have scored pitch-only.
+	consumed = 2 * sampleRate
+	onNotes(nil, pitch.Note{}, false, consumed) // drains results, arms wait 2
+	if len(sink.results) != 1 {
+		t.Fatalf("after wait 1 released: %d results, want 1", len(sink.results))
+	}
+	r := sink.results[0]
+	if r.Event.Key != 40 || r.Verdict != practice.VerdictHit || !r.Matched || r.ErrFrames != 0 {
+		t.Fatalf("wait-confirmed note scored %+v, want pitch-only Hit (Matched, ErrFrames 0)", r)
+	}
+
+	// (b) THE finding: the first E2 is still ringing while the engine
+	// waits on the second E2. Same key, old attack — must not release.
+	stillRinging := pitch.Note{Start: consumed - sampleRate, Key: 40, Cents: 2, Clarity: 0.9}
+	onNotes(nil, stillRinging, true, consumed+480)
+	if !eng.Waiting() {
+		t.Fatal("wait 2 auto-released from the previous note still ringing (same key)")
+	}
+
+	// (a) Seek to the same tick: the wait clears and re-engages at the
+	// SAME tick with a new generation. An attack from the abandoned wait
+	// is stale for the new one and must not confirm it (the old
+	// tick-keyed wiring would not have re-armed).
+	staleStart := consumed + 480 // fresh for wait 2, stale after the seek
+	eng.SeekTick(score.PPQ)
+	renderUntilWait(t, eng, 3)
+	consumed = 4 * sampleRate
+	onNotes(nil, pitch.Note{Start: staleStart, Key: 40, Cents: 1, Clarity: 0.9}, true, consumed)
+	if !eng.Waiting() {
+		t.Fatal("re-wait after seek confirmed by a stale attack (gate not re-armed)")
+	}
+
+	// A genuinely fresh attack releases the re-armed wait.
+	onNotes([]pitch.Note{{Start: consumed + 100, End: consumed + 600, Key: 40, Cents: -4, Clarity: 0.9}},
+		pitch.Note{}, false, consumed+960)
+	if eng.Waiting() {
+		t.Fatal("fresh attack did not confirm the re-armed wait")
+	}
+
+	renderUntilWait(t, eng, 4) // wait 4: the A2 half note
+
+	consumed = 6 * sampleRate
+	onNotes([]pitch.Note{{Start: consumed + 100, End: consumed + 600, Key: 45, Cents: 6, Clarity: 0.9}},
+		pitch.Note{}, false, consumed+960)
+	if eng.Waiting() {
+		t.Fatal("fresh attack did not confirm the final wait")
+	}
+
+	// Render out the rest of the piece and drain.
+	l := make([]float32, 4800)
+	r2 := make([]float32, 4800)
+	for i := 0; i < 40 && eng.Playing(); i++ {
+		eng.RenderFrames(l, r2)
+	}
+	onNotes(nil, pitch.Note{}, false, 8*sampleRate)
+
+	stats := scorer.Stats()
+	if stats.Miss != 0 {
+		t.Errorf("stats %+v: wait-confirmed practice produced misses, want 0", stats)
+	}
+	if stats.Hit != 3 {
+		t.Errorf("stats %+v: want 3 pitch-only hits (one per wait-confirmed note)", stats)
+	}
+	for _, res := range sink.results {
+		if !res.Matched || res.ErrFrames != 0 {
+			t.Errorf("result %+v: wait-confirmed note carries a timing error", res)
+		}
+	}
+}

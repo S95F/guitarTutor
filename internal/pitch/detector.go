@@ -121,8 +121,16 @@ func NewDetector(cfg Config) *Detector {
 	if d.tauMax > w-2 {
 		d.tauMax = w - 2
 	}
-	if d.tauMax < d.tauMin {
-		d.tauMax = d.tauMin
+	if d.tauMax < 2 {
+		d.tauMax = 2
+	}
+	// A window too short for the range shrinks the range, never the
+	// other way: raising tauMax back above w-2 here would index past the
+	// analysis buffers on the first analyze (it used to, before
+	// withDefaults grew tiny windows). Clamp tauMin down instead; the
+	// tauMax floor above keeps the >= 2 floor intact.
+	if d.tauMin > d.tauMax {
+		d.tauMin = d.tauMax
 	}
 	d.msum = make([]float64, d.tauMax+2)
 	d.nsdf = make([]float64, d.tauMax+2)
@@ -232,9 +240,12 @@ func (d *Detector) analyze() Frame {
 	}
 
 	// Key maxima: the largest NSDF value between each pair of positive
-	// zero crossings, after skipping the zero-lag lobe.
+	// zero crossings, after skipping the zero-lag lobe. Maxima below
+	// tauMin can never be candidates, but the strongest one is kept as
+	// the alias guard's evidence of a tone above MaxHz.
 	d.candLag = d.candLag[:0]
 	d.candVal = d.candVal[:0]
+	subLag, subVal := 0.0, 0.0
 	tau := 1
 	for tau <= d.tauMax && d.nsdf[tau] > 0 {
 		tau++
@@ -257,6 +268,8 @@ func (d *Detector) analyze() Frame {
 			lag, val := parabolicExtremum(d.nsdf[:tauLim+1], best)
 			d.candLag = append(d.candLag, lag)
 			d.candVal = append(d.candVal, val)
+		} else if lag, val := parabolicExtremum(d.nsdf[:tauLim+1], best); val > subVal {
+			subLag, subVal = lag, val
 		}
 	}
 	if len(d.candVal) == 0 {
@@ -309,6 +322,23 @@ func (d *Detector) analyze() Frame {
 		clarity = 1
 	} else if clarity < 0 {
 		clarity = 0
+	}
+
+	// Sub-range alias guard: a below-tauMin key maximum that rivals the
+	// chosen peak is the true period of a tone above MaxHz, whose NSDF
+	// also peaks at every multiple of that lag — so the chosen in-range
+	// peak is a confident-looking subharmonic (f/2, f/3, ...). The YIN
+	// cross-check cannot veto this: it folds disagreements to the
+	// nearest octave. When the chosen lag sits near an integer multiple
+	// of the sub-range lag, treat the frame like a confident
+	// disagreement and cap clarity below the threshold. A legitimate
+	// in-range tone never trips this — its NSDF has no near-unity
+	// maximum below its own period (r there is fundamental-negative).
+	if subLag > 0 && subVal >= d.candVal[chosen]-octaveWithinDelta {
+		mult := math.Round(d.candLag[chosen] / subLag)
+		if mult >= 2 && math.Abs(d.candLag[chosen]-mult*subLag) <= octaveLagTol*d.candLag[chosen] {
+			clarity = math.Min(clarity, d.cfg.ClarityThreshold*0.5)
+		}
 	}
 
 	// YIN-FFT cross-check, nearly free given r and m': the difference

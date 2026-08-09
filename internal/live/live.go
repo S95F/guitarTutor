@@ -35,7 +35,9 @@ type Config struct {
 	// note after each analysis batch, plus the total capture frames
 	// consumed so far (the input-stream clock — what Scorer.Advance
 	// wants, minus a lag; see internal/practice.Advance's doc).
-	// Called on the analysis goroutine.
+	// Capture lost to ring overflow is counted too — the gap is fed
+	// through as silence — so consumed never drifts from the device
+	// clock. Called on the analysis goroutine.
 	OnNotes func(closed []pitch.Note, current pitch.Note, sounding bool, consumed int64)
 }
 
@@ -107,30 +109,118 @@ func Start(cfg Config) (*Session, error) {
 // analyze drains the ring through the detector/tracker until Stop.
 func (s *Session) analyze(cfg pitch.Config, kick <-chan struct{}, onNotes func([]pitch.Note, pitch.Note, bool, int64)) {
 	defer close(s.done)
-	det := pitch.NewDetector(cfg)
-	trk := pitch.NewTracker(cfg)
-	chunk := make([]float32, 4096)
-	var consumed int64
+	a := newAnalyzer(s, cfg, onNotes)
 	for {
 		select {
 		case <-s.stop:
 			return
 		case <-kick:
 		}
-		for {
-			n, _ := s.ringBuf.read(chunk)
-			if n == 0 {
-				break
-			}
-			consumed += int64(n)
-			s.publishLevel(chunk[:n])
-			frames := det.Process(chunk[:n])
-			closed := trk.Feed(frames)
-			if onNotes != nil {
-				cur, ok := trk.Current()
-				onNotes(closed, cur, ok, consumed)
-			}
+		a.drain()
+	}
+}
+
+// gapRec marks a stretch of capture the ring overflowed away: n samples
+// were lost at accepted-stream position at (between accepted sample at-1
+// and accepted sample at).
+type gapRec struct{ at, n int64 }
+
+// analyzer is the drain-loop state behind Session.analyze, split out so
+// tests can drive it synchronously against a hand-fed ring.
+type analyzer struct {
+	s       *Session
+	det     *pitch.Detector
+	trk     *pitch.Tracker
+	onNotes func([]pitch.Note, pitch.Note, bool, int64)
+
+	chunk []float32
+	zeros []float32
+	// consumed is the device-clock position of the capture stream:
+	// every sample fed to the detector, with overflow gaps (fed as
+	// zeros) counted like any other stretch.
+	consumed    int64
+	lastDropped int64
+	gaps        []gapRec // pending overflow gaps, in stream order
+}
+
+func newAnalyzer(s *Session, cfg pitch.Config, onNotes func([]pitch.Note, pitch.Note, bool, int64)) *analyzer {
+	return &analyzer{
+		s:       s,
+		det:     pitch.NewDetector(cfg),
+		trk:     pitch.NewTracker(cfg),
+		onNotes: onNotes,
+		chunk:   make([]float32, 4096),
+		zeros:   make([]float32, 4096),
+	}
+}
+
+// drain empties the ring through the detector/tracker, splicing a zeroed
+// stretch into the stream wherever the ring overflowed. Without the
+// splice a drop would advance the device clock but not the detector's,
+// and every detection after a stall would be stamped early by the
+// cumulative loss — silently mis-scored until restart. Zeros keep the
+// two clocks locked, and the tracker's unvoiced hysteresis closes
+// whatever was sounding when the overflow cut in.
+func (a *analyzer) drain() {
+	for {
+		// Check for overflow BEFORE reading: drops happen only while
+		// the ring is full and only a read makes space again, so at
+		// this instant every buffered sample predates the loss and
+		// the accepted count is exactly where the gap belongs.
+		if d := a.s.ringBuf.Dropped(); d != a.lastDropped {
+			a.gaps = append(a.gaps, gapRec{at: a.s.ringBuf.accepted(), n: d - a.lastDropped})
+			a.lastDropped = d
 		}
+		n, start := a.s.ringBuf.read(a.chunk)
+		if n == 0 {
+			return
+		}
+		buf := a.chunk[:n]
+		// Reads walk the accepted stream contiguously, so a pending
+		// gap always lies at or past buf's start; splice it in the
+		// moment the cursor reaches it.
+		for len(a.gaps) > 0 && a.gaps[0].at <= start+int64(len(buf)) {
+			g := a.gaps[0]
+			a.gaps = a.gaps[1:]
+			a.process(buf[:g.at-start], false)
+			buf = buf[g.at-start:]
+			start = g.at
+			a.feedGap(g.n)
+		}
+		a.process(buf, false)
+	}
+}
+
+// process feeds one contiguous stretch to the detector and tracker and
+// reports the results. synthetic marks overflow-gap filler, which never
+// reaches the level meter (the meter shows what the device captured, not
+// what the ring lost).
+func (a *analyzer) process(buf []float32, synthetic bool) {
+	if len(buf) == 0 {
+		return
+	}
+	a.consumed += int64(len(buf))
+	if !synthetic {
+		a.s.publishLevel(buf)
+	}
+	frames := a.det.Process(buf)
+	closed := a.trk.Feed(frames)
+	if a.onNotes != nil {
+		cur, ok := a.trk.Current()
+		a.onNotes(closed, cur, ok, a.consumed)
+	}
+}
+
+// feedGap runs n zeroed samples through the pipeline in chunk-sized
+// slices, standing in for capture the ring overflowed away.
+func (a *analyzer) feedGap(n int64) {
+	for n > 0 {
+		m := int64(len(a.zeros))
+		if m > n {
+			m = n
+		}
+		a.process(a.zeros[:m], true)
+		n -= m
 	}
 }
 

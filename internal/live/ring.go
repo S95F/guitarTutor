@@ -38,15 +38,25 @@ func (g *ring) write(samples []float32) {
 	w := g.w.Load()
 	r := g.r.Load()
 	n := int64(len(g.buf)) - (w - r) // free space
+	drop := int64(0)
 	if need := int64(len(samples)); need <= n {
 		n = need
 	} else {
-		g.dropped.Add(need - n)
+		drop = need - n
 	}
 	for i := int64(0); i < n; i++ {
 		g.buf[(w+i)&g.mask] = samples[i]
 	}
 	g.w.Store(w + n)
+	if drop > 0 {
+		// Counted only after publishing w: a consumer that observes
+		// the new dropped count therefore also sees the w the ring
+		// filled up at, which is exactly where the lost stretch
+		// belongs in the accepted stream (Session's analyzer splices
+		// a zeroed gap there to keep the detector on the device
+		// clock).
+		g.dropped.Add(drop)
+	}
 }
 
 // read copies up to len(dst) available samples into dst and returns the
@@ -71,6 +81,11 @@ func (g *ring) read(dst []float32) (n int, start int64) {
 
 // Dropped reports samples lost to overflow since construction.
 func (g *ring) Dropped() int64 { return g.dropped.Load() }
+
+// accepted reports the total samples ever accepted into the ring (the
+// write cursor). accepted() + Dropped() is the device-clock position of
+// the capture stream.
+func (g *ring) accepted() int64 { return g.w.Load() }
 
 // buffered reports the samples currently waiting to be read.
 func (g *ring) buffered() int64 { return g.w.Load() - g.r.Load() }

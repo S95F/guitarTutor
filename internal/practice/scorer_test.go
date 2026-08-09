@@ -254,6 +254,178 @@ func TestScorerIgnoresOtherTracks(t *testing.T) {
 	}
 }
 
+// TestScorerEarliestDeadlineNotNearest is the W5 regression: two same-key
+// expectations, two detections, both matchable. The first detection lies
+// in both windows but nearer the LATER expectation; nearest-in-time
+// matching gave it away and starved the earlier expectation into a
+// spurious Miss even though a two-Hit assignment exists. Oldest-deadline
+// matching yields two Hits.
+func TestScorerEarliestDeadlineNotNearest(t *testing.T) {
+	s := NewScorer(testConfig()) // window 7200
+	s.ExpectNote(ev(40), 24000)
+	s.ExpectNote(ev(40), 33600)
+	// 30000 is 6000 from the first, 3600 from the second (both in
+	// window); 36000 is in the second's window only.
+	s.Detected([]pitch.Note{det(30000, 40, 0), det(36000, 40, 0)})
+	rs := drain(s)
+	if len(rs) != 2 {
+		t.Fatalf("got %d results, want 2", len(rs))
+	}
+	for i, r := range rs {
+		if r.Verdict != VerdictHit {
+			t.Errorf("result %d (out %d): verdict %v, want Hit", i, r.OutFrame, r.Verdict)
+		}
+	}
+	if rs[0].OutFrame != 24000 || rs[0].ErrFrames != 6000 {
+		t.Errorf("first pairing = (out %d, ErrFrames %d), want the older expectation (24000, +6000)",
+			rs[0].OutFrame, rs[0].ErrFrames)
+	}
+	if rs[1].OutFrame != 33600 || rs[1].ErrFrames != 2400 {
+		t.Errorf("second pairing = (out %d, ErrFrames %d), want (33600, +2400)",
+			rs[1].OutFrame, rs[1].ErrFrames)
+	}
+}
+
+// wev builds a track-0 wait-point expectation at a nonzero tick.
+func wev(key int, start int64) score.NoteEvent {
+	return score.NoteEvent{Track: 0, Key: key, Start: start}
+}
+
+// TestScorerWaitConfirmedStaccato is the W1 regression: at a wait point a
+// staccato confirmation CLOSES (and reaches Detected) before the engine
+// releases the held expectation, so the detection matched nothing and was
+// dropped — the note then scored Miss. WaitConfirmed must record the
+// pre-match so the released expectation finalizes Hit.
+func TestScorerWaitConfirmedStaccato(t *testing.T) {
+	s := NewScorer(testConfig())
+	e := wev(40, 960)
+	n := det(1000, 40, 5)
+	s.Detected([]pitch.Note{n}) // expectation-free: consumed, matches nothing
+	s.WaitConfirmed([]score.NoteEvent{e}, []pitch.Note{n})
+	s.ExpectNote(e, 2000) // the release frame, downstream of the playing
+	rs := drain(s)
+	if len(rs) != 1 {
+		t.Fatalf("got %d results, want 1", len(rs))
+	}
+	r := rs[0]
+	if r.Verdict != VerdictHit || !r.Matched {
+		t.Errorf("got verdict %v matched %v, want Hit and matched", r.Verdict, r.Matched)
+	}
+	if r.ErrFrames != 0 {
+		t.Errorf("ErrFrames %d, want 0 (timing is not the player's error at a wait point)", r.ErrFrames)
+	}
+	if r.ErrCents != 5 {
+		t.Errorf("ErrCents %v, want 5 (carried from the confirming note)", r.ErrCents)
+	}
+}
+
+// TestScorerWaitConfirmedWithLatencyOffset is the W2 regression: at a wait
+// point dt is structurally -(latency offset + confirmation latency), so a
+// calibrated 4800-frame offset pushed every correctly-played wait note out
+// of the window and into Miss. The pre-match verdict is pitch-only: Hit,
+// ErrFrames 0.
+func TestScorerWaitConfirmedWithLatencyOffset(t *testing.T) {
+	s := NewScorer(Config{SampleRate: 48000, Track: 0, LatencyOffsetFrames: 4800})
+	e := wev(40, 1920)
+	n := det(10000, 40, 3) // input clock; confirmed the wait
+	s.Detected([]pitch.Note{n})
+	s.WaitConfirmed([]score.NoteEvent{e}, []pitch.Note{n})
+	// Release frame AFTER the confirming attack: mapped dt would be
+	// (10000-4800) - 14000 = -8800, outside the +/-7200 window.
+	s.ExpectNote(e, 14000)
+	rs := drain(s)
+	if len(rs) != 1 {
+		t.Fatalf("got %d results, want 1", len(rs))
+	}
+	if rs[0].Verdict != VerdictHit || rs[0].ErrFrames != 0 {
+		t.Errorf("got verdict %v ErrFrames %d, want Hit with ErrFrames 0", rs[0].Verdict, rs[0].ErrFrames)
+	}
+}
+
+// TestScorerWaitConfirmedVerdicts checks the pitch-only verdict ladder and
+// best-cents selection of WaitConfirmed.
+func TestScorerWaitConfirmedVerdicts(t *testing.T) {
+	tests := []struct {
+		name  string
+		notes []pitch.Note
+		want  Verdict
+		cents float64
+	}{
+		{"in tolerance", []pitch.Note{det(1000, 40, 20)}, VerdictHit, 20},
+		{"loose intonation", []pitch.Note{det(1000, 40, 60)}, VerdictClose, 60},
+		{"octave off", []pitch.Note{det(1000, 52, 0)}, VerdictClose, 0},
+		{"best cents wins", []pitch.Note{det(1000, 40, 60), det(1200, 40, -4)}, VerdictHit, -4},
+		{"exact beats octave", []pitch.Note{det(1000, 52, 0), det(1200, 40, 50)}, VerdictClose, 50},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewScorer(testConfig())
+			e := wev(40, 960)
+			s.WaitConfirmed([]score.NoteEvent{e}, tt.notes)
+			s.ExpectNote(e, 2000)
+			rs := drain(s)
+			if len(rs) != 1 {
+				t.Fatalf("got %d results, want 1", len(rs))
+			}
+			if rs[0].Verdict != tt.want || rs[0].ErrCents != tt.cents {
+				t.Errorf("got (%v, %v cents), want (%v, %v cents)",
+					rs[0].Verdict, rs[0].ErrCents, tt.want, tt.cents)
+			}
+		})
+	}
+}
+
+// TestScorerWaitPreMatchConsumedOnce: a pre-match satisfies exactly one
+// expectation; a repeat of the same tick (loop pass) is judged normally,
+// never double-credited.
+func TestScorerWaitPreMatchConsumedOnce(t *testing.T) {
+	s := NewScorer(testConfig())
+	e := wev(40, 960)
+	s.WaitConfirmed([]score.NoteEvent{e}, []pitch.Note{det(1000, 40, 0)})
+	s.ExpectNote(e, 2000)  // consumes the pre-match
+	s.ExpectNote(e, 50000) // same tick again: pre-match is gone
+	rs := drain(s)
+	if len(rs) != 2 {
+		t.Fatalf("got %d results, want 2", len(rs))
+	}
+	st := s.Stats()
+	if st.Hit != 1 || st.Miss != 1 {
+		t.Errorf("stats %+v, want exactly 1 Hit and 1 Miss (pre-match consumed once)", st)
+	}
+}
+
+// TestScorerWaitPreMatchExpires: a seek can abandon a confirm; when the
+// position returns to the same tick seconds later the stale pre-match
+// must not fire.
+func TestScorerWaitPreMatchExpires(t *testing.T) {
+	s := NewScorer(testConfig())
+	e := wev(40, 960)
+	s.WaitConfirmed([]score.NoteEvent{e}, []pitch.Note{det(1000, 40, 0)})
+	s.Advance(6 * 48000) // > 5 s of clock: the pre-match expires
+	s.ExpectNote(e, 6*48000+2000)
+	rs := drain(s)
+	if len(rs) != 1 {
+		t.Fatalf("got %d results, want 1", len(rs))
+	}
+	if rs[0].Verdict != VerdictMiss {
+		t.Errorf("verdict %v, want Miss (stale pre-match must not credit a later pass)", rs[0].Verdict)
+	}
+}
+
+// TestScorerWaitConfirmedIgnoresOtherTracks mirrors ExpectNote's track
+// filter.
+func TestScorerWaitConfirmedIgnoresOtherTracks(t *testing.T) {
+	s := NewScorer(testConfig())
+	e := score.NoteEvent{Track: 1, Key: 40, Start: 960}
+	s.WaitConfirmed([]score.NoteEvent{e}, []pitch.Note{det(1000, 40, 0)})
+	// The track-0 twin of the event must NOT be pre-matched.
+	s.ExpectNote(wev(40, 960), 2000)
+	rs := drain(s)
+	if len(rs) != 1 || rs[0].Verdict != VerdictMiss {
+		t.Errorf("got %+v, want one Miss (track-1 confirmation must not pre-match track 0)", rs)
+	}
+}
+
 // TestScorerConcurrencySmoke hammers the scorer from three goroutines in
 // the production roles (tap, analysis, UI) and checks the totals are
 // logically consistent afterward. Written race-clean for -race in CI.

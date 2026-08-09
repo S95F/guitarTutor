@@ -44,6 +44,16 @@ func (e *Engine) SetWaitMode(on bool) {
 // other state queries it is a lock-free snapshot, safe from any goroutine.
 func (e *Engine) Waiting() bool { return e.aWaiting.Load() }
 
+// WaitGeneration returns a counter that increments every time a wait
+// engages. Two distinct waits can share a tick — a seek clears a wait and
+// the position re-waits at the same spot, or a loop wrap returns to the
+// same first note — and WaitingOn alone cannot tell them apart. Wiring
+// that accumulates per-wait progress (the practice WaitGate) snapshots the
+// generation when it arms and re-arms whenever it changes, so no stale
+// progress leaks across waits. Lock-free snapshot, safe from any
+// goroutine.
+func (e *Engine) WaitGeneration() uint64 { return e.aWaitGen.Load() }
+
 // WaitingOn returns the wait point's events — every user-track NoteEvent
 // at the tick being waited on (one note, or all notes of a chord) — and
 // true, or nil and false when not waiting. The slice is a fresh copy owned
@@ -110,9 +120,11 @@ func (e *Engine) waitPointAt(af int) bool {
 
 // beginWait enters the waiting state at segment frame af, recording the
 // wait point's tick (the first pending user event on that frame) for
-// WaitingOn. Caller holds mu and has established waitPointAt(af).
+// WaitingOn, and bumps the wait generation (see WaitGeneration). Caller
+// holds mu and has established waitPointAt(af).
 func (e *Engine) beginWait(af int) {
 	e.waiting = true
+	e.aWaitGen.Add(1)
 	for i := e.nextEvent; i < len(e.events); i++ {
 		ev := &e.events[i]
 		if ev.Start >= e.boundary || e.frameOf(ev.Start) != af {

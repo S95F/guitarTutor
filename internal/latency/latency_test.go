@@ -3,6 +3,7 @@ package latency
 import (
 	"math"
 	"math/rand/v2"
+	"strings"
 	"testing"
 )
 
@@ -130,6 +131,41 @@ func TestEstimateRejectsGarbage(t *testing.T) {
 				t.Errorf("confidence = %.3f, want < %.2f", conf, minConfidence)
 			}
 		})
+	}
+}
+
+func TestEstimateRejectsAliasedDelay(t *testing.T) {
+	const n, spacing = 6, 9600 // 200 ms spacing
+	train := ClickTrain(sr, n, spacing)
+	noise := math.Pow(10, -30.0/20)
+
+	// True delay one spacing plus 10 ms: each click's search window
+	// holds only the PREVIOUS click's arrival, so clicks 1..n-1 cluster
+	// tightly at the aliased lag while click 0 matches nothing. This
+	// used to return the aliased 480-frame offset with high confidence
+	// (the unmatched first click cost only 1/n).
+	delay := spacing + 480
+	captured := loopback(train, delay, 0.5, noise, 0, clickLen(sr), 4)
+	off, conf, err := Estimate(sr, train, captured, spacing, n)
+	if err == nil {
+		t.Fatalf("Estimate = (%d, %.3f, nil) for a %d-frame delay beyond the %d-frame spacing; want an error", off, conf, delay, spacing)
+	}
+	if !strings.Contains(err.Error(), "spacing") {
+		t.Errorf("error %q does not point at the click spacing", err)
+	}
+
+	// A delay just inside the spacing still estimates normally.
+	delay = spacing - 100
+	captured = loopback(train, delay, 0.5, noise, 0, clickLen(sr), 5)
+	off, conf, err = Estimate(sr, train, captured, spacing, n)
+	if err != nil {
+		t.Fatalf("Estimate: %v (confidence %.3f)", err, conf)
+	}
+	if d := off - delay; d < -1 || d > 1 {
+		t.Errorf("offset = %d, want %d +/- 1", off, delay)
+	}
+	if conf < 0.8 {
+		t.Errorf("confidence = %.3f, want >= 0.8", conf)
 	}
 }
 

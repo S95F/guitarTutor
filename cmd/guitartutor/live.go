@@ -15,6 +15,7 @@ import (
 	"github.com/S95F/guitarTutor/internal/live"
 	"github.com/S95F/guitarTutor/internal/pitch"
 	"github.com/S95F/guitarTutor/internal/practice"
+	"github.com/S95F/guitarTutor/internal/score"
 	"github.com/S95F/guitarTutor/internal/ui"
 )
 
@@ -66,11 +67,15 @@ devices run on separate clocks that drift apart over a session.`)
 	return nil
 }
 
-// resolveDevice turns a user-supplied device query (empty = default, else a
-// case-insensitive name fragment, or a full backend ID) into a device ID.
+// resolveDevice turns a user-supplied device query (empty = the system
+// default, else a case-insensitive name fragment, or a full backend ID)
+// into a device ID. An empty query resolves to the CONCRETE default
+// device's ID when the backend marks one: offsets stored under the
+// ambiguous ""|"" key silently followed whatever the system default
+// happened to be on the day.
 func resolveDevice(devs []audio.DeviceInfo, kind, query string) (string, error) {
 	if query == "" {
-		return "", nil
+		return defaultDeviceID(devs), nil
 	}
 	var matches []audio.DeviceInfo
 	q := strings.ToLower(query)
@@ -96,26 +101,91 @@ func resolveDevice(devs []audio.DeviceInfo, kind, query string) (string, error) 
 	}
 }
 
-// resolveDevices resolves the -in/-out flag values against the backend.
-func resolveDevices(b audio.Backend, inQ, outQ string) (inID, outID string, err error) {
-	capture, playback, err := b.Devices()
-	if err != nil {
-		return "", "", fmt.Errorf("enumerating devices: %w", err)
+// defaultDeviceID returns the ID of the device the backend marks as the
+// system default, or "" when none is marked.
+func defaultDeviceID(devs []audio.DeviceInfo) string {
+	for _, d := range devs {
+		if d.Default {
+			return d.ID
+		}
 	}
-	if inID, err = resolveDevice(capture, "capture", inQ); err != nil {
+	return ""
+}
+
+// deviceLabel names a device ID for humans: the enumerated device's name,
+// "system default" for an empty ID, or the raw ID for a device that is not
+// currently enumerated (unplugged since it was remembered).
+func deviceLabel(devs []audio.DeviceInfo, id string) string {
+	if id == "" {
+		return "system default"
+	}
+	for _, d := range devs {
+		if d.ID == id {
+			return d.Name
+		}
+	}
+	return id
+}
+
+// fillDeviceID resolves one endpoint: an explicit flag query wins, the
+// config's remembered device fills an empty flag, and with neither the
+// concrete system default is chosen.
+func fillDeviceID(devs []audio.DeviceInfo, kind, query, remembered string) (string, error) {
+	if query == "" && remembered != "" {
+		return remembered, nil
+	}
+	return resolveDevice(devs, kind, query)
+}
+
+// fillDeviceIDs applies fillDeviceID to both endpoints. Both the listen and
+// calibrate paths resolve through here, so an offset is stored and looked
+// up under the same key. Pure — the seam the tests drive with fake device
+// lists and configs.
+func fillDeviceIDs(capture, playback []audio.DeviceInfo, cfg appconfig.Config, inQ, outQ string) (inID, outID string, err error) {
+	if inID, err = fillDeviceID(capture, "capture", inQ, cfg.CaptureDeviceID); err != nil {
 		return "", "", err
 	}
-	if outID, err = resolveDevice(playback, "playback", outQ); err != nil {
+	if outID, err = fillDeviceID(playback, "playback", outQ, cfg.PlaybackDeviceID); err != nil {
 		return "", "", err
 	}
 	return inID, outID, nil
 }
 
-// Calibration parameters: 8 clicks half a second apart bounds the
-// detectable round trip at ~500 ms, far above any sane setup.
+// resolveDevices enumerates the backend's devices and resolves the -in/-out
+// flag values with the config's remembered devices filling the gaps (flags
+// win). The device lists are returned for labeling.
+func resolveDevices(b audio.Backend, cfg appconfig.Config, inQ, outQ string) (inID, outID string, capture, playback []audio.DeviceInfo, err error) {
+	capture, playback, err = b.Devices()
+	if err != nil {
+		return "", "", nil, nil, fmt.Errorf("enumerating devices: %w", err)
+	}
+	inID, outID, err = fillDeviceIDs(capture, playback, cfg, inQ, outQ)
+	if err != nil {
+		return "", "", nil, nil, err
+	}
+	return inID, outID, capture, playback, nil
+}
+
+// calibratedOffset looks up the stored latency offset for a device pair.
+// A legacy ""|"" entry (both IDs empty) predates concrete default-device
+// resolution and followed whatever the system default happened to be when
+// it was measured, so it is treated as uncalibrated: the warning fires and
+// the next calibration stores the offset under real device IDs.
+func calibratedOffset(cfg appconfig.Config, inID, outID string) (int, bool) {
+	if inID == "" && outID == "" {
+		return 0, false
+	}
+	return cfg.OffsetFor(inID, outID)
+}
+
+// Calibration parameters: 8 clicks one second apart. Estimate searches up
+// to 500 ms of delay per click, and a delay approaching the spacing is
+// indistinguishable from the next click arriving — a full second of
+// spacing keeps every sane round trip far below the alias point
+// (internal/latency refuses the alias signature outright).
 const (
 	calClicks  = 8
-	calSpacing = sampleRate / 2
+	calSpacing = sampleRate
 )
 
 // advanceLagFrames delays miss finalization behind the capture clock: the
@@ -126,6 +196,94 @@ const (
 // the tab ~4 s after the fact.
 const advanceLagFrames = 4 * sampleRate
 
+// waitArmGraceFrames is how far before the gate arms a confirming attack
+// may have started (~150 ms): a player anticipating the wait point by a
+// hair still confirms, but a note ringing from before the wait cannot
+// auto-release a same-key wait point.
+const waitArmGraceFrames = 15 * sampleRate / 100
+
+// listenUI is the slice of the UI the analysis callback feeds; *ui.App
+// implements it, tests substitute a recorder.
+type listenUI interface {
+	OfferResults([]practice.NoteResult)
+	OfferTuner(pitch.Note, bool)
+}
+
+// newOnNotes builds the analysis callback: detections feed the scorer and
+// tuner, and while the engine waits the gate decides when to release.
+//
+// The wait is tracked by Engine.WaitGeneration, which increments per
+// engaged wait: unlike the wait tick it distinguishes a seek's re-wait or
+// a loop wrap at the same tick, with no confirm-time reset to get wrong.
+// The gate arms with minStart = consumed - waitArmGraceFrames so only a
+// fresh attack confirms. On satisfaction the confirming detections are
+// recorded with Scorer.WaitConfirmed BEFORE ConfirmWait, so the released
+// events get a pitch-only verdict instead of being timing-judged against
+// the machinery's own latency.
+func newOnNotes(eng *engine.Engine, app listenUI, scorer *practice.Scorer, gate *practice.WaitGate) func(closed []pitch.Note, current pitch.Note, sounding bool, consumed int64) {
+	// State below is owned by the analysis goroutine (OnNotes is
+	// single-threaded).
+	var (
+		armedGen    uint64
+		armedMin    int64
+		armedEvents []score.NoteEvent
+		offerBuf    = make([]pitch.Note, 0, 16)
+		confirmBuf  = make([]pitch.Note, 0, 16)
+		results     []practice.NoteResult
+	)
+	return func(closed []pitch.Note, current pitch.Note, sounding bool, consumed int64) {
+		scorer.Detected(closed)
+		scorer.Advance(consumed - advanceLagFrames)
+		results = scorer.Results(results[:0])
+		if len(results) > 0 {
+			app.OfferResults(results)
+		}
+		app.OfferTuner(current, sounding)
+
+		evs, waiting := eng.WaitingOn()
+		if !waiting {
+			return
+		}
+		if gen := eng.WaitGeneration(); gen != armedGen {
+			armedGen = gen
+			armedMin = consumed - waitArmGraceFrames
+			armedEvents = append(armedEvents[:0], evs...)
+			confirmBuf = confirmBuf[:0]
+			gate.Arm(evs, armedMin)
+		}
+		offerBuf = append(offerBuf[:0], closed...)
+		if sounding {
+			offerBuf = append(offerBuf, current)
+		}
+		// Collect every fresh attack heard during this wait: a chord
+		// confirms across batches, and WaitConfirmed wants all of the
+		// confirming detections, not just the batch that completed
+		// the set.
+		for _, n := range offerBuf {
+			if n.Start >= armedMin {
+				confirmBuf = mergeNote(confirmBuf, n)
+			}
+		}
+		if len(offerBuf) > 0 && gate.Offer(offerBuf) {
+			scorer.WaitConfirmed(armedEvents, confirmBuf)
+			eng.ConfirmWait()
+		}
+	}
+}
+
+// mergeNote appends n to buf, replacing an earlier snapshot of the same
+// attack (same Start and Key): a still-sounding note is re-offered every
+// batch, and its closed form supersedes the running snapshots.
+func mergeNote(buf []pitch.Note, n pitch.Note) []pitch.Note {
+	for i := range buf {
+		if buf[i].Start == n.Start && buf[i].Key == n.Key {
+			buf[i] = n
+			return buf
+		}
+	}
+	return append(buf, n)
+}
+
 // setupListen wires the live practice loop: duplex stream -> engine
 // playback + pitch analysis -> scorer and wait gate -> UI feeds.
 func setupListen(eng *engine.Engine, app *ui.App, track int, inQ, outQ string) (*live.Session, error) {
@@ -133,22 +291,15 @@ func setupListen(eng *engine.Engine, app *ui.App, track int, inQ, outQ string) (
 	if err != nil {
 		return nil, err
 	}
-	inID, outID, err := resolveDevices(b, inQ, outQ)
-	if err != nil {
-		return nil, err
-	}
 	cfg, cfgErr := appconfig.Load()
 	if cfgErr != nil {
 		fmt.Fprintln(os.Stderr, "warning: existing config unreadable, ignoring it:", cfgErr)
 	}
-	// Flags win; the config's remembered devices fill the gaps.
-	if inQ == "" && cfg.CaptureDeviceID != "" {
-		inID = cfg.CaptureDeviceID
+	inID, outID, _, _, err := resolveDevices(b, cfg, inQ, outQ)
+	if err != nil {
+		return nil, err
 	}
-	if outQ == "" && cfg.PlaybackDeviceID != "" {
-		outID = cfg.PlaybackDeviceID
-	}
-	offset, calibrated := cfg.OffsetFor(inID, outID)
+	offset, calibrated := calibratedOffset(cfg, inID, outID)
 	if !calibrated {
 		fmt.Fprintln(os.Stderr, "warning: no latency calibration for these devices — run 'guitartutor calibrate'.")
 		fmt.Fprintln(os.Stderr, "Scoring works, but timing verdicts are skewed by the unmeasured round trip.")
@@ -163,41 +314,6 @@ func setupListen(eng *engine.Engine, app *ui.App, track int, inQ, outQ string) (
 	gate := practice.NewWaitGate(pcfg)
 	eng.SetEventTap(scorer.ExpectNote)
 
-	// State owned by the analysis goroutine (OnNotes is single-threaded).
-	armedTick := int64(-1)
-	offerBuf := make([]pitch.Note, 0, 16)
-	var results []practice.NoteResult
-
-	onNotes := func(closed []pitch.Note, current pitch.Note, sounding bool, consumed int64) {
-		scorer.Detected(closed)
-		scorer.Advance(consumed - advanceLagFrames)
-		results = scorer.Results(results[:0])
-		if len(results) > 0 {
-			app.OfferResults(results)
-		}
-		app.OfferTuner(current, sounding)
-
-		if evs, waiting := eng.WaitingOn(); waiting {
-			// Re-arm on each new wait point. ConfirmWait resets
-			// armedTick, so a loop wrap waiting on the same tick
-			// re-arms too.
-			if len(evs) > 0 && evs[0].Start != armedTick {
-				gate.Arm(evs)
-				armedTick = evs[0].Start
-			}
-			offerBuf = append(offerBuf[:0], closed...)
-			if sounding {
-				offerBuf = append(offerBuf, current)
-			}
-			if len(offerBuf) > 0 && gate.Offer(offerBuf) {
-				eng.ConfirmWait()
-				armedTick = -1
-			}
-		} else {
-			armedTick = -1
-		}
-	}
-
 	session, err := live.Start(live.Config{
 		Backend: b,
 		Engine:  eng,
@@ -206,7 +322,7 @@ func setupListen(eng *engine.Engine, app *ui.App, track int, inQ, outQ string) (
 			CaptureDevice:  inID,
 			PlaybackDevice: outID,
 		},
-		OnNotes: onNotes,
+		OnNotes: newOnNotes(eng, app, scorer, gate),
 	})
 	if err != nil {
 		return nil, err
@@ -232,10 +348,18 @@ func runCalibrate(args []string) error {
 	if err != nil {
 		return err
 	}
-	inID, outID, err := resolveDevices(b, *inQ, *outQ)
+	cfg, cfgErr := appconfig.Load()
+	if cfgErr != nil {
+		fmt.Fprintln(os.Stderr, "warning: existing config unreadable, starting fresh:", cfgErr)
+	}
+	// Same resolution as -listen (flags win, remembered devices fill the
+	// gaps), so the offset is stored under the key playback will look up.
+	inID, outID, capture, playback, err := resolveDevices(b, cfg, *inQ, *outQ)
 	if err != nil {
 		return err
 	}
+	fmt.Printf("measuring playback [%s] -> capture [%s]\n",
+		deviceLabel(playback, outID), deviceLabel(capture, inID))
 
 	train := latency.ClickTrain(sampleRate, calClicks, calSpacing)
 	// Record for the train plus a second of slack so a large delay still
@@ -283,9 +407,11 @@ func runCalibrate(args []string) error {
 		stream.Close()
 		return fmt.Errorf("starting stream: %w", err)
 	}
+	// The run captures ~9 s of audio (8 clicks a second apart plus slack);
+	// well past that with no completion, no audio is flowing.
 	select {
 	case <-done:
-	case <-time.After(15 * time.Second):
+	case <-time.After(20 * time.Second):
 		stream.Stop()
 		stream.Close()
 		return fmt.Errorf("calibration timed out — no audio flowed (check the devices with 'guitartutor devices')")
@@ -300,10 +426,6 @@ func runCalibrate(args []string) error {
 	fmt.Printf("round-trip latency: %d frames (%.1f ms), confidence %.2f\n",
 		off, float64(off)/sampleRate*1000, conf)
 
-	cfg, cfgErr := appconfig.Load()
-	if cfgErr != nil {
-		fmt.Fprintln(os.Stderr, "warning: existing config unreadable, starting fresh:", cfgErr)
-	}
 	cfg.SetOffset(inID, outID, off, conf)
 	cfg.CaptureDeviceID, cfg.PlaybackDeviceID = inID, outID
 	if err := cfg.Save(); err != nil {

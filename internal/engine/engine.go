@@ -155,6 +155,7 @@ type Engine struct {
 	aCiLeft  atomic.Int64
 	aFrames  atomic.Int64
 	aWaiting atomic.Bool
+	aWaitGen atomic.Uint64
 }
 
 // An activeNote is a sounding note awaiting its NoteOff at end.

@@ -93,7 +93,7 @@ func renderBurst(sampleRate int) []float32 {
 //
 // spacingFrames also bounds the delay Estimate can recover (see there);
 // the wizard should use a spacing comfortably above the largest expected
-// round trip — half a second is a good default. If spacingFrames is
+// round trip — a full second is a good default. If spacingFrames is
 // shorter than one burst (~6 ms), bursts are truncated to keep the
 // spacing exact. Returns nil if any argument is not positive.
 func ClickTrain(sampleRate, n, spacingFrames int) []float32 {
@@ -117,7 +117,10 @@ func ClickTrain(sampleRate, n, spacingFrames int) []float32 {
 // searched on the positive side only, up to min(500 ms, spacingFrames-1)
 // per click. Delays at or beyond one spacing are indistinguishable from
 // the next click arriving, so the wizard must choose spacingFrames above
-// the largest delay it wants to detect.
+// the largest delay it wants to detect. Estimate does refuse the usual
+// signature of that mistake — every click matching at a tight cluster
+// except the first, whose fully searched window held nothing — and
+// returns an error naming the spacing rather than the aliased offset.
 //
 // Per click, the captured signal around the expected position is scanned
 // with a normalized (Pearson) cross-correlation against the click
@@ -185,6 +188,12 @@ func Estimate(sampleRate int, played, captured []float32, spacingFrames, n int) 
 		lags      []int
 		peaks     []float64
 		evaluated int
+		// Click 0's fate feeds the aliasing check below: whether its
+		// full search window fit in the capture, and where (if
+		// anywhere) it was detected.
+		click0Full     bool
+		click0Detected bool
+		click0Lag      int
 	)
 	for i := 0; i < n; i++ {
 		base := i * spacingFrames
@@ -196,6 +205,9 @@ func Estimate(sampleRate int, played, captured []float32, spacingFrames, n int) 
 			continue // this click lies wholly beyond the capture
 		}
 		evaluated++
+		if i == 0 {
+			click0Full = limit == maxDelay
+		}
 		bestR, bestLag := math.Inf(-1), 0
 		for d := 0; d <= limit; d++ {
 			if r := normCorr(captured, base+d, tmpl, tmplEnergy, sum1, sum2); r > bestR {
@@ -205,6 +217,9 @@ func Estimate(sampleRate int, played, captured []float32, spacingFrames, n int) 
 		if bestR >= minPeakCorr {
 			lags = append(lags, bestLag)
 			peaks = append(peaks, bestR)
+			if i == 0 {
+				click0Detected, click0Lag = true, bestLag
+			}
 		}
 	}
 	if evaluated == 0 {
@@ -223,6 +238,23 @@ func Estimate(sampleRate int, played, captured []float32, spacingFrames, n int) 
 		}
 	}
 	confidence = medianPeak * float64(inliers) / float64(evaluated)
+
+	// Aliasing guard. When the true delay meets or exceeds the click
+	// spacing, every click's search window holds only the PREVIOUS
+	// click's arrival — a tight cluster at delay-minus-spacing — while
+	// click 0, with no predecessor, arrives nowhere in its window. That
+	// used to cost just 1/n confidence and return a confidently wrong
+	// offset. The signature is only trusted when click 0's full search
+	// window fit in the capture (so its absence is evidence, not
+	// truncation) and at least two later clicks agree unanimously.
+	// Inside the guard click 0 contributed no inlier, so inliers counts
+	// later clicks only.
+	click0Inlier := click0Detected &&
+		click0Lag-offset >= -inlierFrames && click0Lag-offset <= inlierFrames
+	if click0Full && !click0Inlier && evaluated-1 >= 2 && inliers == evaluated-1 {
+		return offset, confidence, fmt.Errorf("latency: the round-trip delay looks like it meets or exceeds the click spacing (%d frames, %.0f ms): every click after the first arrived at a consistent delay but the first never did, so each match is probably the previous click aliased one spacing late — increase the click spacing beyond the largest plausible delay, then run calibration again", spacingFrames, 1000*float64(spacingFrames)/float64(sampleRate))
+	}
+
 	if confidence < minConfidence {
 		return offset, confidence, fmt.Errorf("latency: calibration is unreliable (confidence %.2f): clicks were detected only faintly or at inconsistent delays — check the loopback connection and the input level, then run calibration again", confidence)
 	}

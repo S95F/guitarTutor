@@ -163,6 +163,67 @@ func TestDetectorOctaveGuard(t *testing.T) {
 	}
 }
 
+// TestDetectorTinyWindowDoesNotPanic is the regression test for the
+// tauMax-clamp undo: with Window < SampleRate/MaxHz + 2 the clamp of
+// tauMax to Window-2 was reversed by the tauMax >= tauMin fixup, and the
+// first analysis indexed past the window buffer. withDefaults now rounds
+// the window up to the minimum the MaxHz bound needs, and NewDetector
+// shrinks tauMin instead of growing tauMax.
+func TestDetectorTinyWindowDoesNotPanic(t *testing.T) {
+	cfg := DefaultConfig(testSR)
+	cfg.Window = 16 // far below SampleRate/MaxHz + 2 = 34: used to panic
+	d := NewDetector(cfg)
+
+	// withDefaults' guarantee: the window holds the whole search range.
+	minWindow := testSR/1500 + 2 // tauMin + 2 at the default MaxHz
+	if d.cfg.Window < minWindow {
+		t.Errorf("Window = %d, want >= %d (rounded up by withDefaults)", d.cfg.Window, minWindow)
+	}
+	if d.tauMin < 2 || d.tauMin > d.tauMax || d.tauMax > d.cfg.Window-2 {
+		t.Errorf("tau range [%d, %d] not inside 2..Window-2 (Window %d)", d.tauMin, d.tauMax, d.cfg.Window)
+	}
+
+	// The first analysis used to panic with index out of range.
+	frames := feedAll(d, sine(1000, 0.4, 0.05), 480)
+	if len(frames) == 0 {
+		t.Fatal("no frames emitted")
+	}
+}
+
+// TestDetectorAboveRangeToneUnvoiced is the regression test for the
+// subharmonic alias: a 2 kHz tone with the default MaxHz of 1500 has its
+// true NSDF peak below tauMin, so the first in-range peak is the f/2
+// alias at 1 kHz — reported with high clarity, because the YIN
+// cross-check folds octaves and cannot veto it. The sub-range alias guard
+// must mark such frames unvoiced instead.
+func TestDetectorAboveRangeToneUnvoiced(t *testing.T) {
+	d := NewDetector(DefaultConfig(testSR)) // MaxHz 1500
+	frames := feedAll(d, sine(2000, 0.4, 0.4), 480)
+	if len(frames) == 0 {
+		t.Fatal("no frames emitted")
+	}
+	for _, f := range frames {
+		if f.F0 > 0 {
+			t.Errorf("frame %d: voiced %.1f Hz (clarity %.3f) from a 2 kHz tone above MaxHz",
+				f.Frame, f.F0, f.Clarity)
+		}
+	}
+}
+
+// TestDetectorInRangeToneNearMaxHz pins the other side of the alias
+// guard: a legitimate tone just inside MaxHz must still be detected, at
+// full accuracy — its NSDF has no rival maximum below its own period, so
+// the guard stays idle.
+func TestDetectorInRangeToneNearMaxHz(t *testing.T) {
+	const freq = 1400.0
+	d := NewDetector(DefaultConfig(testSR))
+	frames := feedAll(d, sine(freq, 0.4, 0.4), 480)
+	got := medianF0Of(t, frames, 10)
+	if off := cents(freq, got); math.Abs(off) > 3 {
+		t.Errorf("f0 = %.3f Hz, %+.2f cents from %.3f Hz; want within ±3", got, off, freq)
+	}
+}
+
 // TestDetectorFrameStamps: frames are stamped at the window CENTER in
 // input-stream samples — first at Window - Window/2, then every Hop —
 // regardless of the chunk sizes Process is fed.

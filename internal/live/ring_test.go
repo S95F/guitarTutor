@@ -82,13 +82,18 @@ func TestRingConcurrentStream(t *testing.T) {
 		}
 	}()
 
-	// The consumer verifies every sample it sees is monotonically
-	// increasing (values are sequential at the producer, so any tear or
-	// duplication shows as a non-increase), and contiguous within one
-	// read. Gaps between reads are legal only as overflow drops.
+	// The consumer verifies every sample it sees is strictly increasing
+	// (values are sequential at the producer, so any tear, duplication,
+	// or reorder shows as a non-increase) and accounts for every value
+	// it does NOT see: skipped values are legal only as overflow drops,
+	// which the ring counts. A skip can surface anywhere, including
+	// inside a single read — the producer estimates free space against
+	// a possibly stale read cursor, so an overflowing write may drop
+	// without leaving the ring exactly full, unaligning drop boundaries
+	// from read boundaries.
 	dst := make([]float32, 1024)
-	var last float32 = -1
-	var readCount int64
+	next := float32(0) // the value expected were nothing dropped
+	var missing, readCount int64
 	for {
 		n, _ := g.read(dst)
 		if n == 0 {
@@ -101,22 +106,28 @@ func TestRingConcurrentStream(t *testing.T) {
 				continue
 			}
 		}
-		if dst[0] <= last {
-			t.Fatalf("stream went backwards: %v after %v", dst[0], last)
+		if dst[0] < next {
+			t.Fatalf("stream went backwards: %v after %v", dst[0], next-1)
 		}
+		missing += int64(dst[0] - next)
 		for i := 1; i < n; i++ {
-			if dst[i] != dst[i-1]+1 {
-				t.Fatalf("discontinuity inside a read at %d: %v -> %v", i, dst[i-1], dst[i])
+			if dst[i] <= dst[i-1] {
+				t.Fatalf("non-increase inside a read at %d: %v -> %v", i, dst[i-1], dst[i])
 			}
+			missing += int64(dst[i] - dst[i-1] - 1)
 		}
-		last = dst[n-1]
+		next = dst[n-1] + 1
 		readCount += int64(n)
 	}
 donereading:
 	wg.Wait()
+	missing += total - int64(next) // values after the last one seen
 	// Every produced sample was either delivered in order or counted as
 	// dropped — none duplicated, none torn.
 	if got := readCount + g.Dropped(); got != total {
 		t.Errorf("read %d + dropped %d = %d, want %d", readCount, g.Dropped(), got, int64(total))
+	}
+	if missing != g.Dropped() {
+		t.Errorf("values missing from the stream = %d, want the dropped count %d", missing, g.Dropped())
 	}
 }

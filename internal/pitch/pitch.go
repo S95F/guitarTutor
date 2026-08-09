@@ -45,7 +45,10 @@ func DefaultConfig(sampleRate int) Config {
 }
 
 // withDefaults fills zero fields with DefaultConfig values and clamps the
-// rest into a usable range.
+// rest into a usable range. In particular Window is rounded UP (rather
+// than erroring) to the minimum the MaxHz search bound needs — one lag
+// past tauMin ~= SampleRate/MaxHz — so the detector's analysis buffers can
+// always hold the search range.
 func (cfg Config) withDefaults() Config {
 	if cfg.SampleRate <= 0 {
 		cfg.SampleRate = 48000
@@ -68,6 +71,17 @@ func (cfg Config) withDefaults() Config {
 	}
 	if cfg.MaxHz < cfg.MinHz {
 		cfg.MaxHz = cfg.MinHz
+	}
+	// Minimum usable window: the shortest search lag (tauMin, with the
+	// detector's >= 2 floor) plus the one extra lag the analysis computes
+	// for interpolation. Anything smaller cannot represent even the top
+	// of the search range.
+	minTau := int(float64(cfg.SampleRate) / cfg.MaxHz)
+	if minTau < 2 {
+		minTau = 2
+	}
+	if cfg.Window < minTau+2 {
+		cfg.Window = minTau + 2
 	}
 	if cfg.ClarityThreshold <= 0 {
 		cfg.ClarityThreshold = def.ClarityThreshold

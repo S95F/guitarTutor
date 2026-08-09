@@ -18,8 +18,10 @@ const (
 	// consecutive unvoiced hops.
 	trackerCloseUnvoicedHops = 3
 	// trackerKeyChangeHops closes the open note (and opens the new one)
-	// after this many consecutive hops settled on a different key
-	// reached by a discontinuous jump.
+	// after this many voiced hops settled on a different key reached by
+	// a discontinuous jump. Unvoiced hops in between neither count nor
+	// cancel: they carry no pitch evidence, so only a voiced hop back on
+	// the old trajectory (or on yet another key) resets the candidacy.
 	trackerKeyChangeHops = 4
 	// trackerKeyCentsTol is how far (in cents) a hop may sit from a
 	// candidate key and still count toward opening it.
@@ -110,10 +112,22 @@ func (t *Tracker) feedOne(f *Frame) {
 
 	if f.F0 <= 0 {
 		t.unvoicedRun++
-		t.resetCand() // opening requires consecutive voiced hops
-		t.resetJump()
+		// Opening still requires consecutive voiced hops, so a quiet
+		// note flickering around the voicing threshold restarts its
+		// opening candidacy on every dropout — the analogous limitation
+		// to the jump-candidacy fix below, accepted for now because no
+		// note is being held hostage while nothing is open.
+		t.resetCand()
+		// An unvoiced hop carries no contradicting pitch evidence, so it
+		// must NOT destroy an in-progress key-change candidacy; only a
+		// voiced hop back on the old note's trajectory cancels the jump
+		// (handled in the voiced path). Resetting the jump here used to
+		// deadlock alternating new-key-voiced/unvoiced streams: the
+		// voiced hops kept resetting unvoicedRun, the unvoiced hops kept
+		// resetting the jump, and the old note stayed open forever.
 		if t.open && t.unvoicedRun >= trackerCloseUnvoicedHops {
 			t.closeNote(t.lastVoiced)
+			t.resetJump() // the note the jump was leaving is gone
 		}
 		return
 	}
