@@ -55,3 +55,19 @@ jobs:
       - name: Test (Windows)
         if: runner.os == 'Windows'
         run: go test ./... -count=1
+
+      # The optional ONNX pitch backend must keep compiling and its
+      # non-inference tests keep passing. This needs no ONNX runtime or
+      # model installed — the real-inference test skips without them —
+      # so it is cheap insurance against binding drift.
+      - name: Build and test the onnx-tagged backend
+        run: go test -tags onnx ./internal/pitchml/... -count=1
+
+      # The untagged binary must never link an ONNX runtime.
+      - name: Assert the default build stays ONNX-free
+        if: runner.os == 'Linux'
+        run: |
+          if go list -deps ./cmd/guitartutor | grep -q onnxruntime_go; then
+            echo "::error::the default build pulled in onnxruntime_go; the onnx build tag leaked"
+            exit 1
+          fi
