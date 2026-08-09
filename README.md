@@ -5,7 +5,7 @@ Plug in your electric guitar. Load a piece. Practice it properly.
 
 guitarTutor is an open-source guitar practice companion written in Go. You import a piece of music (or write one in a simple text format), and the app plays it back — synthesized from the score, with a metronome and scrolling tablature — while you play along on a real guitar plugged into your audio interface. Loop the hard bars, slow them down, and let the app ramp the tempo back up as you nail each pass. Later phases listen to your playing and tell you which notes you hit.
 
-> **Status: Phase 1 works, pre-alpha.** The pure-Go practice player is functional: import a MIDI file or write a `.gtab` text tab, then loop sections, slow down, and play along with synthesized playback, a metronome, and a scrolling tab view. Live listening (Phase 2) is not started. See the [roadmap](ROADMAP.md) and technology [decisions](docs/DECISIONS.md).
+> **Status: Phase 2 core works, pre-alpha.** The practice player (Phase 1) is functional, and the app can now hear you: plug your guitar into an audio interface and `play -listen` gives live pitch detection, hit/close/miss feedback on the tab, a tuner, and wait mode (playback pauses until you play the right note). Chord verification and detection-robustness work remain. See the [roadmap](ROADMAP.md) and technology [decisions](docs/DECISIONS.md).
 
 ## Why
 
@@ -99,7 +99,27 @@ Open the practice view on the bundled fixture riff:
 
 Or your own piece: `guitartutor play song.mid` (also `.gtab`). Useful flags: `-scale 0.7` start slowed down, `-countin 4`, `-met` metronome, `-sf2 your.sf2` SoundFont synthesis instead of the built-in pluck.
 
-In the practice view: **space** play/pause, **←/→** seek by bar, **↑/↓** tempo ±5%, **A/B** set loop points at the current bar, **L** clear loop, **M** metronome, **R** progressive speed ramp, **+/−** zoom, **1–9** mute tracks, **Q** quit.
+In the practice view: **space** play/pause, **←/→** seek by bar, **↑/↓** tempo ±5%, **A/B** set loop points at the current bar, **L** clear loop, **M** metronome, **R** progressive speed ramp, **+/−** zoom, **1–9** mute tracks, **T** tuner, **W** wait mode (live), **Q** quit.
+
+### Live mode — the guitar plugs in
+
+```bash
+guitartutor devices
+```
+
+lists your audio endpoints. Pick the interface your guitar is plugged into (a unique name fragment is enough), calibrate the round trip once, then practice with the app listening:
+
+```bash
+guitartutor calibrate -in scarlett -out scarlett
+```
+
+```bash
+guitartutor play -listen -in scarlett -out scarlett testdata/fixture_riff.gtab
+```
+
+Notes you play are matched against the score: green = hit, amber = close (loose intonation or wrong octave), red = miss. **T** opens the tuner; **W** enables wait mode, which holds playback at each note until you actually play it. Scoring is monophonic in this phase — strummed chords get partial credit by design until Phase 4's chord verification. Heavy distortion degrades detection; feed the clean DI signal.
+
+Live mode needs a cgo build (the default when a C compiler is present — on Windows install [mingw-w64](https://www.mingw-w64.org/) or build with [MSYS2](https://www.msys2.org/); if cgo builds misbehave in PowerShell, run the build from Git Bash). A `CGO_ENABLED=0` build still works fully as a playback-only practice player.
 
 There is also an offline renderer — useful for checking a piece without opening the UI:
 

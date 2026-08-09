@@ -71,3 +71,6 @@ func (g *ring) read(dst []float32) (n int, start int64) {
 
 // Dropped reports samples lost to overflow since construction.
 func (g *ring) Dropped() int64 { return g.dropped.Load() }
+
+// buffered reports the samples currently waiting to be read.
+func (g *ring) buffered() int64 { return g.w.Load() - g.r.Load() }

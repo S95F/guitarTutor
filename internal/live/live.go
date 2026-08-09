@@ -32,8 +32,11 @@ type Config struct {
 	// the negotiated sample rate.
 	Pitch pitch.Config
 	// OnNotes, when set, receives closed notes and the current sounding
-	// note after each analysis batch. Called on the analysis goroutine.
-	OnNotes func(closed []pitch.Note, current pitch.Note, sounding bool)
+	// note after each analysis batch, plus the total capture frames
+	// consumed so far (the input-stream clock — what Scorer.Advance
+	// wants, minus a lag; see internal/practice.Advance's doc).
+	// Called on the analysis goroutine.
+	OnNotes func(closed []pitch.Note, current pitch.Note, sounding bool, consumed int64)
 }
 
 // A Session is a running duplex practice session.
@@ -102,11 +105,12 @@ func Start(cfg Config) (*Session, error) {
 }
 
 // analyze drains the ring through the detector/tracker until Stop.
-func (s *Session) analyze(cfg pitch.Config, kick <-chan struct{}, onNotes func([]pitch.Note, pitch.Note, bool)) {
+func (s *Session) analyze(cfg pitch.Config, kick <-chan struct{}, onNotes func([]pitch.Note, pitch.Note, bool, int64)) {
 	defer close(s.done)
 	det := pitch.NewDetector(cfg)
 	trk := pitch.NewTracker(cfg)
 	chunk := make([]float32, 4096)
+	var consumed int64
 	for {
 		select {
 		case <-s.stop:
@@ -118,12 +122,13 @@ func (s *Session) analyze(cfg pitch.Config, kick <-chan struct{}, onNotes func([
 			if n == 0 {
 				break
 			}
+			consumed += int64(n)
 			s.publishLevel(chunk[:n])
 			frames := det.Process(chunk[:n])
 			closed := trk.Feed(frames)
 			if onNotes != nil {
 				cur, ok := trk.Current()
-				onNotes(closed, cur, ok)
+				onNotes(closed, cur, ok, consumed)
 			}
 		}
 	}
@@ -158,6 +163,10 @@ func (s *Session) InputLevel() float64 {
 
 // DroppedSamples reports capture samples lost to analysis backpressure.
 func (s *Session) DroppedSamples() int64 { return s.ringBuf.Dropped() }
+
+// Backlog reports capture samples buffered but not yet analyzed — a
+// backpressure signal (the ring drops new samples when it fills).
+func (s *Session) Backlog() int64 { return s.ringBuf.buffered() }
 
 // Config reports the stream's negotiated parameters.
 func (s *Session) Config() audio.StreamConfig { return s.stream.Config() }

@@ -184,6 +184,9 @@ func runPlay(args []string) error {
 	met := fs.Bool("met", false, "metronome on")
 	countIn := fs.Int("countin", 0, "count-in beats")
 	track := fs.Int("track", 0, "tab track to display (1-based)")
+	listen := fs.Bool("listen", false, "live pitch detection and scoring")
+	inQ := fs.String("in", "", "capture device for -listen (name fragment)")
+	outQ := fs.String("out", "", "playback device for -listen (name fragment)")
 	fs.Parse(args)
 	if fs.NArg() != 1 {
 		return fmt.Errorf("usage: guitartutor play [flags] <file.gtab|file.mid>")
@@ -215,6 +218,20 @@ func runPlay(args []string) error {
 		}
 	}
 
+	app := ui.New(eng, sc, display)
+	app.SetInitialMetronome(*met)
+
+	if *listen {
+		// Live mode: the duplex stream renders the engine inside its own
+		// callback — oto stays out of the picture entirely.
+		session, err := setupListen(eng, app, display, *inQ, *outQ)
+		if err != nil {
+			return err
+		}
+		defer session.Stop()
+		return app.Run()
+	}
+
 	ctx, ready, err := oto.NewContext(&oto.NewContextOptions{
 		SampleRate:   sampleRate,
 		ChannelCount: 2,
@@ -228,8 +245,6 @@ func runPlay(args []string) error {
 	player.Play()
 	defer player.Close()
 
-	app := ui.New(eng, sc, display)
-	app.SetInitialMetronome(*met)
 	return app.Run()
 }
 

@@ -53,38 +53,38 @@ Roughly "Guitar Pro 8's speed trainer minus the editor" — a product people pay
 
 **Exit criteria:** a guitarist can import a MIDI file or write a text tab, loop the hard four bars at 60% with a count-in, and ramp back to full speed — with looping that never stutters, drops the first note, or drifts. *Met, modulo the UI conveniences above; loop sample-accuracy is enforced by engine tests.*
 
-## Phase 2 — The guitar plugs in
+## Phase 2 — The guitar plugs in — core landed
 
 Live capture, and with it the cgo build event. This phase is where the two-clock trap is dodged for good.
 
 **Audio I/O migration**
 
-- [ ] Define `AudioBackend` interface (device enumeration, duplex stream open, timestamped frame delivery); port Phase 1 output onto it
-- [ ] `gen2brain/malgo` (miniaudio) backend: **one full-duplex WASAPI shared-mode stream** — guitar capture and playback in one callback. 48 kHz float32, periods of 256–480 frames (5–10 ms; expect the ~10 ms shared-mode capture floor in practice — see Known Risks). Comfortably sufficient for scoring; guitarists monitor through their interface, not the app.
-- [ ] Callback discipline: DataProc does a memcpy into a preallocated SPSC ring buffer, nothing else
-- [ ] Device picker + buffer-size setting; handle hot-unplug and default-device switches
-- [ ] Same-device steering: default playback to the same physical interface the guitar is plugged into (WASAPI has no native duplex device — capture and render are paired streams, and only same-device pairs share a clock). Warn on split-device setups; their clocks drift over a session, which a static calibration offset cannot fix.
-- [ ] CI grows mingw-w64 (or zig cc) for Windows cgo builds; document contributor toolchain setup
+- [x] `audio.Backend` interface (device enumeration, duplex stream open); Phase 1's oto path remains the playback-only fallback for `CGO_ENABLED=0` builds
+- [x] `gen2brain/malgo` (miniaudio) backend: **one full-duplex WASAPI shared-mode stream** — guitar capture and playback in one callback. 48 kHz float32, 480-frame periods negotiated on real hardware. (Found upstream: malgo v0.11.25's Backend enum omits `ma_backend_custom`, so its `BackendNull` requests the wrong backend — worked around locally; worth filing upstream.)
+- [x] Callback discipline: the callback renders the engine and memcpys capture into a race-free SPSC ring (drop-newest overflow, backpressure signal); analysis runs in an ordinary goroutine
+- [x] Device selection by name fragment (`guitartutor devices`, `-in`/`-out`), remembered in config — *in-app picker UI, buffer-size setting, and hot-unplug recovery still pending*
+- [x] Same-device steering: documented in `devices` output and README — *automatic split-device warning still pending*
+- [x] CI builds cgo on both platforms (runners ship gcc) plus a `CGO_ENABLED=0` fallback build check and a Linux `-race` leg; contributor toolchain documented in README
 
 **Pitch detection (`internal/pitch`)**
 
-- [ ] In-house port of **MPM** (McLeod pitch method, designed for guitar-like signals) with YIN-FFT as cross-check, on `gonum/dsp/fourier`. 2048-sample window / 256–512 hop at 48 kHz; 4096 window when tunings drop below ~70 Hz (drop C).
-- [ ] Onset/energy gate (spectral flux or RMS delta) in front of the tracker — without it, silence produces garbage pitch; with it, palm-muted notes can be credited on onset timing even when pitch confidence is low
-- [ ] Per-frame f0 + confidence → causal median filter → nearest-note quantization with cents tolerance (±35¢ to start)
-- [ ] Octave-error guard (distortion makes autocorrelation lock onto 2× f0); recommend clean/DI signal in docs
-- [ ] **WAV fixture regression harness before tuning any threshold**: recorded electric guitar per technique (open notes, fretted, bends, slides, palm mutes) per pickup type. Real guitar, not synthetic sines.
+- [x] In-house **MPM** (McLeod) with YIN-FFT cross-check on `gonum/dsp/fourier`: 2048-sample window / 480 hop at 48 kHz (4096 for tunings below ~70 Hz), NSDF peak picking with parabolic interpolation
+- [x] RMS onset/energy gate (−55 dBFS floor, 8 dB rising edge, 50 ms refractory) — spectral-flux upgrade deferred
+- [x] Per-frame f0 + clarity → causal 5-hop median → nearest-key quantization with cents; note tracker with hysteresis and bend-following
+- [x] Octave-error guard (verified load-bearing against strong-second-harmonic signals); clean/DI signal recommended in README
+- [ ] **WAV fixture regression harness with real recorded guitar** per technique and pickup — thresholds are tuned on synthesized signals only (KS plucks, sines) until real recordings exist
 
 **Scoring & feedback**
 
-- [ ] Tuner view: the pitch detector pointed at open strings — it doubles as the detector's debug/confidence UI, and the app warns when open-string tuning error would eat into the scoring tolerance (a guitar 20¢ flat halves the ±35¢ window)
-- [ ] Latency calibration wizard: play a click through the output, detect it in the input, cross-correlate; store per-device offset, plus a manual nudge slider
-- [ ] Score detected notes against expected score notes within timing windows (~±100–150 ms to start; total input-to-verdict latency budget is 40–80 ms, so feedback renders against the timeline, not "instantly")
-- [ ] Hit / close / miss feedback on the scrolling tab; per-section and per-pass accuracy
-- [ ] Bends scored as "reached target pitch within window" via the cents trajectory
-- [ ] **Wait mode**: playback holds until the correct note is played (the most-loved learning feature in comparable OSS tools)
-- [ ] Progressive speed trainer gates tempo ramp on accuracy, not just completed passes
+- [x] Tuner view (T in the practice view): note name + cents bar from the live detector
+- [x] Latency calibration (`guitartutor calibrate`): click train over the duplex stream, cross-correlated, per-device-pair offset stored with confidence — verified end-to-end through a VB-Cable software loopback (94.6 ms at 0.87 confidence). *Manual nudge slider pending.*
+- [x] Scoring against timing windows (±150 ms default) with the calibrated offset reconciling the input/output clocks; misses finalize behind a lag because the tracker reports notes only when they close
+- [x] Hit / close / miss feedback tinting the tab; running accuracy and input meter in the HUD — *per-section/per-pass accuracy breakdown pending*
+- [x] **Wait mode** (W): playback holds at each user note until the detector hears it (octave-exact, intonation-lenient)
+- [ ] Bend scoring via the cents trajectory (the tracker follows bends; the scorer does not yet judge "reached target")
+- [ ] Progressive speed trainer gating the ramp on accuracy (currently completion-gated)
 
-**Exit criteria:** with a $100 interface on stock Windows drivers, single-note riffs score accurately enough that a wrong "miss" is rare, and wait-mode practice feels fair.
+**Exit criteria:** with a $100 interface on stock Windows drivers, single-note riffs score accurately enough that a wrong "miss" is rare, and wait-mode practice feels fair. *The loop is machine-verified — the engine's own output looped back through the real detector scores ≥ 80% with 12+ hits (`internal/integration`) — but the exit criteria proper need a human with a guitar.*
 
 ## Phase 3 — Content: real-world files
 

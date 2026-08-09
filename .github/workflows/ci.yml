@@ -34,12 +34,19 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # The pure-Go playback-only fallback (README "Pure Go until it
+      # can't be") must keep compiling without a C toolchain.
+      - name: Build without cgo
+        if: runner.os == 'Linux'
+        run: CGO_ENABLED=0 go build ./...
+
       # Ebitengine initializes GLFW at package init, which needs a display;
       # the Linux runner is headless, so tests run under a virtual
-      # framebuffer (the same approach Ebitengine's own CI uses).
-      - name: Test (Linux, under xvfb)
+      # framebuffer (the same approach Ebitengine's own CI uses). The race
+      # detector runs here because it is broken on some Windows setups.
+      - name: Test (Linux, under xvfb, with race detector)
         if: runner.os == 'Linux'
-        run: xvfb-run -a go test ./... -count=1
+        run: xvfb-run -a go test ./... -count=1 -race
 
       - name: Test (Windows)
         if: runner.os == 'Windows'

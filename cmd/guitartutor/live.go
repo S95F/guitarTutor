@@ -10,7 +10,12 @@ import (
 
 	"github.com/S95F/guitarTutor/internal/appconfig"
 	"github.com/S95F/guitarTutor/internal/audio"
+	"github.com/S95F/guitarTutor/internal/engine"
 	"github.com/S95F/guitarTutor/internal/latency"
+	"github.com/S95F/guitarTutor/internal/live"
+	"github.com/S95F/guitarTutor/internal/pitch"
+	"github.com/S95F/guitarTutor/internal/practice"
+	"github.com/S95F/guitarTutor/internal/ui"
 )
 
 // liveBackend returns the duplex backend or a friendly explanation.
@@ -112,6 +117,107 @@ const (
 	calClicks  = 8
 	calSpacing = sampleRate / 2
 )
+
+// advanceLagFrames delays miss finalization behind the capture clock: the
+// tracker only reports a note when it CLOSES, so a sustained note's
+// detection arrives roughly its own duration late and must not be
+// pre-judged as a miss (see practice.Scorer.Advance). Four seconds covers
+// any note a practice piece holds; the cost is that a miss shows up on
+// the tab ~4 s after the fact.
+const advanceLagFrames = 4 * sampleRate
+
+// setupListen wires the live practice loop: duplex stream -> engine
+// playback + pitch analysis -> scorer and wait gate -> UI feeds.
+func setupListen(eng *engine.Engine, app *ui.App, track int, inQ, outQ string) (*live.Session, error) {
+	b, err := liveBackend()
+	if err != nil {
+		return nil, err
+	}
+	inID, outID, err := resolveDevices(b, inQ, outQ)
+	if err != nil {
+		return nil, err
+	}
+	cfg, cfgErr := appconfig.Load()
+	if cfgErr != nil {
+		fmt.Fprintln(os.Stderr, "warning: existing config unreadable, ignoring it:", cfgErr)
+	}
+	// Flags win; the config's remembered devices fill the gaps.
+	if inQ == "" && cfg.CaptureDeviceID != "" {
+		inID = cfg.CaptureDeviceID
+	}
+	if outQ == "" && cfg.PlaybackDeviceID != "" {
+		outID = cfg.PlaybackDeviceID
+	}
+	offset, calibrated := cfg.OffsetFor(inID, outID)
+	if !calibrated {
+		fmt.Fprintln(os.Stderr, "warning: no latency calibration for these devices — run 'guitartutor calibrate'.")
+		fmt.Fprintln(os.Stderr, "Scoring works, but timing verdicts are skewed by the unmeasured round trip.")
+	}
+
+	pcfg := practice.Config{
+		SampleRate:          sampleRate,
+		Track:               track,
+		LatencyOffsetFrames: offset,
+	}
+	scorer := practice.NewScorer(pcfg)
+	gate := practice.NewWaitGate(pcfg)
+	eng.SetEventTap(scorer.ExpectNote)
+
+	// State owned by the analysis goroutine (OnNotes is single-threaded).
+	armedTick := int64(-1)
+	offerBuf := make([]pitch.Note, 0, 16)
+	var results []practice.NoteResult
+
+	onNotes := func(closed []pitch.Note, current pitch.Note, sounding bool, consumed int64) {
+		scorer.Detected(closed)
+		scorer.Advance(consumed - advanceLagFrames)
+		results = scorer.Results(results[:0])
+		if len(results) > 0 {
+			app.OfferResults(results)
+		}
+		app.OfferTuner(current, sounding)
+
+		if evs, waiting := eng.WaitingOn(); waiting {
+			// Re-arm on each new wait point. ConfirmWait resets
+			// armedTick, so a loop wrap waiting on the same tick
+			// re-arms too.
+			if len(evs) > 0 && evs[0].Start != armedTick {
+				gate.Arm(evs)
+				armedTick = evs[0].Start
+			}
+			offerBuf = append(offerBuf[:0], closed...)
+			if sounding {
+				offerBuf = append(offerBuf, current)
+			}
+			if len(offerBuf) > 0 && gate.Offer(offerBuf) {
+				eng.ConfirmWait()
+				armedTick = -1
+			}
+		} else {
+			armedTick = -1
+		}
+	}
+
+	session, err := live.Start(live.Config{
+		Backend: b,
+		Engine:  eng,
+		Stream: audio.StreamConfig{
+			SampleRate:     sampleRate,
+			CaptureDevice:  inID,
+			PlaybackDevice: outID,
+		},
+		OnNotes: onNotes,
+	})
+	if err != nil {
+		return nil, err
+	}
+	app.SetLiveStatus(func() (float64, int64) {
+		return session.InputLevel(), session.DroppedSamples()
+	})
+	app.SetWaitControl(true)
+	fmt.Printf("listening on %s (offset %d frames, calibrated: %v)\n", b.Name(), offset, calibrated)
+	return session, nil
+}
 
 // runCalibrate measures the round-trip latency offset and stores it.
 func runCalibrate(args []string) error {
