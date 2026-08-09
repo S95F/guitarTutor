@@ -1,0 +1,24 @@
+# Binaries
+/guitartutor
+/guitartutor.exe
+/bin/
+/dist/
+
+# Test and profiling output
+*.test
+*.out
+coverage.html
+
+# Audio scratch files (recordings made during development)
+/testdata/scratch/
+*.wav.tmp
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Claude Code local session data
+.claude/
