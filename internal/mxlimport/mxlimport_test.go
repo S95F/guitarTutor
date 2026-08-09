@@ -154,7 +154,7 @@ func TestMXLMatchesMusicXML(t *testing.T) {
 	if f == nil {
 		t.Fatal(".mxl does not contain fixture_riff.musicxml")
 	}
-	got, err := readZipEntry(f)
+	got, err := readZipEntry(f, maxRootfileBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -629,6 +629,200 @@ func TestZipWithoutContainer(t *testing.T) {
 	}
 	if evs := s.Events(); len(evs) != 1 {
 		t.Errorf("got %d events, want 1", len(evs))
+	}
+}
+
+// TestHostileNoteDurationSkipped: a single absurd <duration> must not
+// blow up the bar layout (one barSpec per bar out to the score's end) —
+// the note is skipped with a warning and the rest imports normally.
+func TestHostileNoteDurationSkipped(t *testing.T) {
+	m := attrs44div480 +
+		note("E", 2, 480, 6, 0, "") +
+		note("E", 2, 9000000000000000000, -1, 0, "")
+	s, warns, err := Import(wrap(m))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	found := false
+	for _, w := range warns {
+		if strings.Contains(w, "score limit") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("warnings = %v, want one about the tick score limit", warns)
+	}
+	evs := s.Events()
+	if len(evs) != 1 || evs[0].Start != 0 || evs[0].End != 960 || evs[0].Key != 40 {
+		t.Fatalf("events = %v, want only the sane note at (0,960,key 40)", evs)
+	}
+}
+
+// TestHostileForwardPositionSkipped: a hostile <forward> pushes the
+// cursor to an absurd position; the note placed there is skipped with a
+// warning instead of stretching the score extent (or overflowing the
+// rescale).
+func TestHostileForwardPositionSkipped(t *testing.T) {
+	m := attrs44div480 +
+		note("E", 2, 480, 6, 0, "") +
+		`<forward><duration>9000000000000000000</duration></forward>` +
+		note("G", 2, 480, 6, 3, "")
+	s, warns, err := Import(wrap(m))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	found := false
+	for _, w := range warns {
+		if strings.Contains(w, "score limit") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("warnings = %v, want one about the tick score limit", warns)
+	}
+	if evs := s.Events(); len(evs) != 1 || evs[0].Key != 40 {
+		t.Fatalf("events = %v, want only the sane note", evs)
+	}
+}
+
+// TestHostileMeterScoreTooLong: a hostile <beats> value makes even one
+// measure exceed the score-extent limit; the import errors cleanly
+// ("score too long") instead of laying out millions of bars.
+func TestHostileMeterScoreTooLong(t *testing.T) {
+	m := `<attributes><divisions>480</divisions><time><beats>2000000</beats><beat-type>4</beat-type></time></attributes>` +
+		note("E", 2, 1920, 6, 0, "")
+	_, _, err := Import(wrap(m))
+	if err == nil || !strings.Contains(err.Error(), "score too long") {
+		t.Errorf("err = %v, want a score-too-long error", err)
+	}
+}
+
+// TestTinyBarsCapped: an extreme meter (1/3840 = one-tick bars) slices
+// a legal extent into an absurd number of bars; the bar-count cap
+// errors instead of allocating without bound.
+func TestTinyBarsCapped(t *testing.T) {
+	m := `<attributes><divisions>480</divisions><time><beats>1</beats><beat-type>3840</beat-type></time></attributes>` +
+		`<forward><duration>100000</duration></forward>` +
+		note("E", 2, 480, 6, 0, "")
+	_, _, err := Import(wrap(m))
+	if err == nil || !strings.Contains(err.Error(), "score too long") {
+		t.Errorf("err = %v, want a score-too-long error (bar-count cap)", err)
+	}
+}
+
+// TestZipBombRootfileRejected: a .mxl whose rootfile decompresses far
+// past the cap (a zip bomb) errors quickly with bounded memory instead
+// of inflating the whole payload.
+func TestZipBombRootfileRejected(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create("META-INF/container.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte(`<?xml version="1.0"?><container><rootfiles><rootfile full-path="music.xml"/></rootfiles></container>`)); err != nil {
+		t.Fatal(err)
+	}
+	w, err = zw.Create("music.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk := make([]byte, 1<<20)
+	for i := 0; i < 65; i++ { // 65 MiB of zeros: tiny compressed, over the 64 MiB cap
+		if _, err := w.Write(chunk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = Import(buf.Bytes())
+	if err == nil || !strings.Contains(err.Error(), "limit") {
+		t.Errorf("err = %v, want a decompressed-size-limit error", err)
+	}
+}
+
+// TestZipBombContainerRejected: META-INF/container.xml has its own,
+// much smaller cap.
+func TestZipBombContainerRejected(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create("META-INF/container.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(make([]byte, 2<<20)); err != nil { // 2 MiB, over the 1 MiB cap
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = Import(buf.Bytes())
+	if err == nil || !strings.Contains(err.Error(), "limit") {
+		t.Errorf("err = %v, want a decompressed-size-limit error", err)
+	}
+}
+
+// TestAbsurdTempoSkipped: tempos whose USPerQuarter degenerates (huge
+// BPM rounds to 0, tiny BPM overflows) degrade to a warning with the
+// tick-0 120 BPM default — never a hard Validate failure.
+func TestAbsurdTempoSkipped(t *testing.T) {
+	m := attrs44div480 +
+		`<direction><sound tempo="1e300"/></direction>` +
+		`<direction><sound tempo="1e-300"/></direction>` +
+		note("E", 2, 1920, 6, 0, "")
+	s, warns, err := Import(wrap(m))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	found := 0
+	for _, w := range warns {
+		if strings.Contains(w, "BPM") {
+			found++
+		}
+	}
+	if found != 2 {
+		t.Errorf("warnings = %v, want two skipped-tempo warnings", warns)
+	}
+	if len(s.Tempos) != 1 || s.Tempos[0] != (score.Tempo{Tick: 0, USPerQuarter: score.USPerQuarter(120)}) {
+		t.Errorf("Tempos = %v, want single default 120 BPM at tick 0", s.Tempos)
+	}
+}
+
+// TestFingeringBeyondMIDIRange: an authored <technical> fingering whose
+// derived pitch exceeds MIDI 127 (string 1 fret 90) falls into the
+// fretting fallback with a warning — the import must not hard-fail
+// Validate over it.
+func TestFingeringBeyondMIDIRange(t *testing.T) {
+	m := attrs44div480 + note("E", 2, 1920, 1, 90, "")
+	s, warns, err := Import(wrap(m))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	found := false
+	for _, w := range warns {
+		if strings.Contains(w, "string/fret") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("warnings = %v, want one about the out-of-range fingering", warns)
+	}
+	evs := s.Events()
+	if len(evs) != 1 || evs[0].Start != 0 || evs[0].End != 3840 || evs[0].Key != 40 {
+		t.Fatalf("events = %v, want one note at (0,3840,key 40)", evs)
+	}
+	if evs[0].String != 6 || evs[0].Fret != 0 {
+		t.Errorf("fingering = string %d fret %d, want the inferred 6/0", evs[0].String, evs[0].Fret)
+	}
+	for _, bar := range s.Tracks[0].Bars {
+		for _, beat := range bar.Beats {
+			for _, n := range beat.Notes {
+				if !n.Inferred {
+					t.Errorf("note at tick %d not marked Inferred after the fingering fallback", beat.Start)
+				}
+			}
+		}
 	}
 }
 

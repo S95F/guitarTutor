@@ -283,6 +283,68 @@ func TestFLACMonoResample(t *testing.T) {
 	}
 }
 
+// TestFLACForgedNSamplesBoundedAlloc is a regression test for hostile
+// input: a tiny valid FLAC patched so its STREAMINFO declares the
+// maximum 36-bit total-sample count (~68.7 billion samples, a ~275 GB
+// per-channel make() if trusted). Decoding must still succeed with the
+// real samples while treating the declared count as a clamped
+// preallocation hint.
+func TestFLACForgedNSamplesBoundedAlloc(t *testing.T) {
+	const n = 256
+	m := int16Sine(n, 440, SampleRate, 0.5)
+	path := writeFLAC(t, SampleRate, [][]int32{m})
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// FLAC layout: "fLaC" magic (4 bytes) and a metadata block header (4
+	// bytes) put the STREAMINFO body at offset 8. Within STREAMINFO the
+	// 36-bit total-sample count is the low nibble of byte 13 plus bytes
+	// 14-17; force every bit on.
+	data[8+13] |= 0x0F
+	for i := 14; i <= 17; i++ {
+		data[8+i] = 0xFF
+	}
+	forged := filepath.Join(t.TempDir(), "forged.flac")
+	if err := os.WriteFile(forged, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sanity-check the forgery itself, so the test cannot silently stop
+	// covering the hostile path if the encoder's layout ever changes.
+	fh, err := os.Open(forged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := flac.New(fh)
+	if err != nil {
+		fh.Close()
+		t.Fatalf("opening forged FLAC: %v", err)
+	}
+	if got := stream.Info.NSamples; got != 1<<36-1 {
+		fh.Close()
+		t.Fatalf("forged NSamples = %d, want 2^36-1 (the STREAMINFO patch missed its target)", got)
+	}
+	fh.Close()
+
+	gl, gr, _, err := Load(forged)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(gl) != n || len(gr) != n {
+		t.Fatalf("got %d/%d samples, want %d", len(gl), len(gr), n)
+	}
+	for i := range gl {
+		if want := float32(m[i]) / 32768; gl[i] != want {
+			t.Fatalf("sample %d = %v, want %v", i, gl[i], want)
+		}
+	}
+	if cap(gl) > maxPreallocSamples || cap(gr) > maxPreallocSamples {
+		t.Errorf("channel capacities = %d/%d samples, want at most %d (forged NSamples must be clamped as an allocation hint)",
+			cap(gl), cap(gr), maxPreallocSamples)
+	}
+}
+
 // silentMP3 constructs a minimal valid MP3 in memory: nframes MPEG-1
 // Layer III frames (44.1 kHz, 128 kbps, stereo, no CRC) whose side info
 // is all zeros — every granule has part2_3_length 0, so the decoder reads

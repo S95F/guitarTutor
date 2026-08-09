@@ -41,6 +41,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path"
 	"sort"
@@ -57,6 +58,14 @@ const DefaultProgram = 25
 
 // gpifEntry is the archive path of the musical payload.
 const gpifEntry = "Content/score.gpif"
+
+// maxGPIFBytes caps how far the score.gpif entry may decompress: real
+// GPIF documents are a few megabytes at most, so 64 MiB is comfortably
+// past any legitimate score while stopping zip bombs from ballooning a
+// small archive into gigabytes of memory. The io.LimitReader in readGPIF
+// is the authoritative bound — the zip header's size field is forgeable
+// and only serves as a fast-path reject.
+const maxGPIFBytes = 64 << 20
 
 // noteValues maps GPIF <NoteValue> names to base durations in ticks.
 var noteValues = map[string]int64{
@@ -118,14 +127,21 @@ func readGPIF(data []byte) (*gpif, error) {
 	if entry == nil {
 		return nil, fmt.Errorf("no %s entry in archive (not a Guitar Pro 7/8 .gp file?)", gpifEntry)
 	}
+	if entry.UncompressedSize64 > maxGPIFBytes {
+		return nil, fmt.Errorf("%s claims %d bytes uncompressed, over the %d MiB limit (possible zip bomb)",
+			entry.Name, entry.UncompressedSize64, maxGPIFBytes>>20)
+	}
 	rc, err := entry.Open()
 	if err != nil {
 		return nil, fmt.Errorf("opening %s: %w", entry.Name, err)
 	}
 	defer rc.Close()
-	raw, err := io.ReadAll(rc)
+	raw, err := io.ReadAll(io.LimitReader(rc, maxGPIFBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", entry.Name, err)
+	}
+	if len(raw) > maxGPIFBytes {
+		return nil, fmt.Errorf("%s decompresses past the %d MiB limit (possible zip bomb)", entry.Name, maxGPIFBytes>>20)
 	}
 	var doc gpif
 	if err := xml.Unmarshal(raw, &doc); err != nil {
@@ -411,7 +427,11 @@ func parseTime(s string) (num, den int, ok bool) {
 
 // tempos converts the master track's Tempo automations into the tempo
 // map. A tempo value is "BPM unitCode"; the position is a fraction of
-// the automation's bar. A missing tick-0 tempo gets the 120 BPM default.
+// the automation's bar, clamped into [0,1] with a warning when it is
+// NaN or out of range so a hostile position can never place a tempo
+// before tick 0 or overflow the tick math. A BPM so large that it
+// rounds to zero microseconds per quarter is skipped with a warning.
+// A missing tick-0 tempo gets the 120 BPM default.
 func (im *importer) tempos() score.TempoMap {
 	var tempos score.TempoMap
 	for _, a := range im.doc.MasterTrack.Automations {
@@ -443,9 +463,24 @@ func (im *importer) tempos() score.TempoMap {
 			im.warnf("tempo automation references bar %d, outside the piece; skipped", a.Bar+1)
 			continue
 		}
-		tick := im.barStarts[a.Bar] + int64(a.Position*float64(im.barLens[a.Bar])+0.5)
-		tempos = append(tempos, score.Tempo{Tick: tick, USPerQuarter: score.USPerQuarter(bpm * factor)})
+		usq := score.USPerQuarter(bpm * factor)
+		if usq <= 0 {
+			im.warnf("tempo automation at bar %d: absurd tempo %q; skipped", a.Bar+1, a.Value)
+			continue
+		}
+		pos := a.Position
+		if math.IsNaN(pos) {
+			im.warnf("tempo automation at bar %d: position is not a number; using the bar start", a.Bar+1)
+			pos = 0
+		} else if pos < 0 || pos > 1 {
+			im.warnf("tempo automation at bar %d: position %v outside [0,1]; clamped", a.Bar+1, pos)
+			pos = math.Min(math.Max(pos, 0), 1)
+		}
+		tick := im.barStarts[a.Bar] + int64(pos*float64(im.barLens[a.Bar])+0.5)
+		tempos = append(tempos, score.Tempo{Tick: tick, USPerQuarter: usq})
 	}
+	// Every tick above is non-negative (positions are clamped), so after
+	// this sort the tick-0 default insertion below keeps the map sorted.
 	sort.SliceStable(tempos, func(i, j int) bool { return tempos[i].Tick < tempos[j].Tick })
 	// Later automations at the same tick override earlier ones.
 	var deduped score.TempoMap
@@ -665,8 +700,16 @@ func (im *importer) rhythmDur(gbt *gpBeat) int64 {
 		dur = score.Quarter
 	}
 	if rh.Dot != nil {
+		// Real GP files never carry more than three augmentation dots;
+		// clamp hostile counts so the attribute cannot drive the loop,
+		// and stop once further dots would add nothing.
+		count := rh.Dot.Count
+		if count < 0 || count > 3 {
+			im.warnf("rhythm %d: implausible augmentation dot count %d; treating as 3", rh.ID, count)
+			count = 3
+		}
 		add := dur / 2
-		for i := 0; i < rh.Dot.Count; i++ {
+		for i := 0; i < count && add > 0; i++ {
 			dur += add
 			add /= 2
 		}

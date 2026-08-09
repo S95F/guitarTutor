@@ -59,6 +59,14 @@ const DefaultProgram = 25
 // every .mxl) starts with.
 var zipMagic = []byte("PK\x03\x04")
 
+// Decompressed-size caps for .mxl archive members — the zip-bomb guard.
+// The sizes claimed in the archive's headers are untrusted, so the caps
+// are enforced on the bytes actually inflated.
+const (
+	maxContainerBytes = 1 << 20  // META-INF/container.xml
+	maxRootfileBytes  = 64 << 20 // the root MusicXML document
+)
+
 // Import parses a MusicXML document into a Score, returning human-readable
 // warnings for everything the import changed, skipped, or inferred. The
 // container is sniffed from the bytes — a ZIP signature means .mxl,
@@ -114,7 +122,7 @@ func (im *importer) extractMXL(data []byte) ([]byte, error) {
 	}
 	rootPath := ""
 	if f := zipEntry(zr, "META-INF/container.xml"); f != nil {
-		b, err := readZipEntry(f)
+		b, err := readZipEntry(f, maxContainerBytes)
 		if err != nil {
 			return nil, fmt.Errorf("reading META-INF/container.xml: %w", err)
 		}
@@ -153,7 +161,7 @@ func (im *importer) extractMXL(data []byte) ([]byte, error) {
 	if f == nil {
 		return nil, fmt.Errorf(".mxl rootfile %q not found in the archive", rootPath)
 	}
-	return readZipEntry(f)
+	return readZipEntry(f, maxRootfileBytes)
 }
 
 // zipEntry finds one archive member by exact name.
@@ -166,14 +174,22 @@ func zipEntry(zr *zip.Reader, name string) *zip.File {
 	return nil
 }
 
-// readZipEntry reads one archive member fully.
-func readZipEntry(f *zip.File) ([]byte, error) {
+// readZipEntry reads one archive member, erroring as soon as the
+// decompressed data exceeds limit bytes.
+func readZipEntry(f *zip.File, limit int64) ([]byte, error) {
 	rc, err := f.Open()
 	if err != nil {
 		return nil, err
 	}
 	defer rc.Close()
-	return io.ReadAll(rc)
+	b, err := io.ReadAll(io.LimitReader(rc, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > limit {
+		return nil, fmt.Errorf(".mxl member %q decompresses past the %d MiB limit", f.Name, limit>>20)
+	}
+	return b, nil
 }
 
 // parseDoc unmarshals a score-partwise document, with a clearer error for

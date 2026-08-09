@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"math"
+	"runtime"
 	"testing"
 )
 
@@ -254,6 +255,103 @@ func TestReadSkipsExtraChunks(t *testing.T) {
 	}
 	if len(l) != 2 || l[0] != -0.5 || l[1] != 0.25 {
 		t.Errorf("left = %v, want [-0.5 0.25]", l)
+	}
+}
+
+// allocBytes reports the bytes allocated while fn runs (TotalAlloc is
+// cumulative, so garbage collection cannot lower the delta).
+func allocBytes(fn func()) uint64 {
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	fn()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+// forgeChunkSize overwrites the declared size of the first chunk with the
+// given four-byte id inside a built WAV file.
+func forgeChunkSize(t *testing.T, file []byte, id string, size uint32) {
+	t.Helper()
+	off := bytes.Index(file, []byte(id))
+	if off < 0 {
+		t.Fatalf("no %q chunk in fixture", id)
+	}
+	le.PutUint32(file[off+4:], size)
+}
+
+// TestReadHugeDeclaredDataChunk is a regression test for hostile input:
+// a tiny file whose data chunk declares ~4 GiB. Read must fail at the
+// real end of input without allocating anywhere near the declared size.
+func TestReadHugeDeclaredDataChunk(t *testing.T) {
+	file := wavFile(
+		chunk("fmt ", fmtChunk(1, 2, 48000, 16)),
+		chunk("data", pcm16Data(1, 2, 3, 4)), // 8 real bytes
+	)
+	// Multiple of the 4-byte stereo frame, so it passes alignment.
+	forgeChunkSize(t, file, "data", 0xFFFFF000)
+	var err error
+	alloc := allocBytes(func() {
+		_, _, _, err = Read(bytes.NewReader(file))
+	})
+	if err == nil {
+		t.Fatal("Read accepted a data chunk far larger than the file")
+	}
+	if alloc > 64<<20 {
+		t.Errorf("Read allocated %d bytes for a forged ~4 GiB data chunk, want a bounded amount", alloc)
+	}
+}
+
+// TestReadHugeDeclaredFmtChunk is a regression test for hostile input:
+// a fmt chunk declaring ~4 GiB while carrying only its real 16 bytes.
+// Read must fail without a declared-size allocation.
+func TestReadHugeDeclaredFmtChunk(t *testing.T) {
+	file := wavFile(
+		chunk("fmt ", fmtChunk(1, 1, 48000, 16)),
+		chunk("data", pcm16Data(0)),
+	)
+	forgeChunkSize(t, file, "fmt ", 0xFFFFFF00)
+	var err error
+	alloc := allocBytes(func() {
+		_, _, _, err = Read(bytes.NewReader(file))
+	})
+	if err == nil {
+		t.Fatal("Read accepted a fmt chunk far larger than the file")
+	}
+	if alloc > 1<<20 {
+		t.Errorf("Read allocated %d bytes for a forged ~4 GiB fmt chunk, want a bounded amount", alloc)
+	}
+}
+
+// TestReadDataAcrossScratchBuffers round-trips more data than the
+// incremental scratch buffer holds in one pass (a full pass plus a
+// partial tail), guarding the chunked data-reading loop.
+func TestReadDataAcrossScratchBuffers(t *testing.T) {
+	const n = 40000 // 80000 mono PCM bytes: one full 64 KiB pass plus a tail
+	if 2*n <= dataBufLen || (2*n)%dataBufLen == 0 {
+		t.Fatal("fixture must span multiple scratch buffers with a partial tail")
+	}
+	samples := ramp(n, 0.2)
+	var buf bytes.Buffer
+	if err := WriteMono(&buf, 48000, samples); err != nil {
+		t.Fatalf("WriteMono: %v", err)
+	}
+	rate, l, r, err := Read(&buf)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if rate != 48000 {
+		t.Errorf("sample rate = %d, want 48000", rate)
+	}
+	if len(l) != n || len(r) != n {
+		t.Fatalf("got %d/%d samples, want %d", len(l), len(r), n)
+	}
+	for i := range samples {
+		if math.Abs(float64(l[i]-samples[i])) > step {
+			t.Fatalf("left[%d] = %v, want %v within 1/32768", i, l[i], samples[i])
+		}
+		if l[i] != r[i] {
+			t.Fatalf("mono not duplicated at sample %d: left %v != right %v", i, l[i], r[i])
+		}
 	}
 }
 

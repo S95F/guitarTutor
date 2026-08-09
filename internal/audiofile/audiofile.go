@@ -31,6 +31,14 @@ import (
 // SampleRate is the output sample rate: the project-wide 48 kHz standard.
 const SampleRate = 48000
 
+// maxPreallocSamples caps the per-channel preallocation hint taken from
+// the FLAC STREAMINFO total-sample count. That 36-bit field is
+// attacker-controlled — a file of a few hundred bytes can declare 2^36
+// samples and would force a ~275 GB make() if trusted — so it is honored
+// only up to 4 M samples (16 MB per channel); longer streams grow by
+// append as frames actually decode.
+const maxPreallocSamples = 4 << 20
+
 // Load decodes the audio file at path into 48 kHz stereo float32.
 // The format is chosen by file extension: .wav, .flac, or .mp3
 // (case-insensitive). Mono files are duplicated into both channels, and
@@ -103,6 +111,9 @@ func loadFLAC(path string) (rate int, left, right []float32, warnings []string, 
 		warnings = append(warnings, fmt.Sprintf("FLAC has %d channels; using the first two (front left/right)", nch))
 	}
 	if n := info.NSamples; n > 0 {
+		if n > maxPreallocSamples {
+			n = maxPreallocSamples
+		}
 		left = make([]float32, 0, n)
 		right = make([]float32, 0, n)
 	}

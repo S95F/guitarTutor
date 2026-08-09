@@ -98,6 +98,14 @@ func quantize(s float32) int16 {
 // channels. Unrelated RIFF chunks (LIST, INFO, cue, ...) before the data
 // chunk are skipped. Samples are returned scaled to [-1, 1] (16-bit PCM
 // is divided by 32768; float data is returned as stored).
+//
+// Declared chunk sizes are treated as untrusted: chunk bodies are read
+// incrementally through a small scratch buffer and the output slices are
+// preallocated to at most maxPreallocFrames, growing with the bytes
+// actually read. A malformed header declaring a chunk larger than the
+// remaining input therefore fails with a read error at the real end of
+// input instead of forcing an allocation of the declared size, and Read
+// keeps working on plain non-seekable io.Readers.
 func Read(r io.Reader) (sampleRate int, left, right []float32, err error) {
 	var riff [12]byte
 	if _, err := io.ReadFull(r, riff[:]); err != nil {
@@ -131,8 +139,12 @@ func Read(r io.Reader) (sampleRate int, left, right []float32, err error) {
 			if size < 16 {
 				return 0, nil, nil, fmt.Errorf("wavio: fmt chunk is %d bytes, want at least 16", size)
 			}
-			body := make([]byte, size)
-			if _, err := io.ReadFull(r, body); err != nil {
+			// Only the first 16 bytes matter here, and the declared size
+			// is untrusted (a 44-byte file can claim a 4 GiB fmt chunk),
+			// so read those 16 and skip any extension bytes instead of
+			// buffering size bytes.
+			var body [16]byte
+			if _, err := io.ReadFull(r, body[:]); err != nil {
 				return 0, nil, nil, fmt.Errorf("wavio: reading fmt chunk: %w", err)
 			}
 			format = int(le.Uint16(body[0:2]))
@@ -152,6 +164,9 @@ func Read(r io.Reader) (sampleRate int, left, right []float32, err error) {
 				return 0, nil, nil, fmt.Errorf("wavio: sample rate must be positive, got %d", sampleRate)
 			}
 			haveFmt = true
+			if _, err := io.CopyN(io.Discard, r, size-16); err != nil {
+				return 0, nil, nil, fmt.Errorf("wavio: skipping fmt chunk extension: %w", err)
+			}
 			if err := skipPad(r, size); err != nil {
 				return 0, nil, nil, err
 			}
@@ -188,29 +203,59 @@ func skipPad(r io.Reader, size int64) error {
 	return nil
 }
 
+// Allocation bounds for the attacker-controlled data chunk size. A RIFF
+// header is just bytes — a 44-byte file can declare a 4 GiB data chunk —
+// so the declared size must never drive an allocation directly.
+const (
+	// dataBufLen is the scratch buffer for incremental data-chunk reads:
+	// a multiple of every possible frame length (2, 4, and 8 bytes).
+	dataBufLen = 64 << 10
+	// maxPreallocFrames caps the output preallocation hint taken from the
+	// declared size: 4 M frames is 32 MB across both float32 channels.
+	// Longer (real) data grows by append as bytes actually arrive.
+	maxPreallocFrames = 4 << 20
+)
+
 // readData decodes a data chunk of size bytes into per-channel samples.
+// The declared size is untrusted: bytes stream through a bounded scratch
+// buffer and the outputs grow by append, so a forged size larger than
+// the actual input fails with a read error instead of forcing a
+// size-driven allocation.
 func readData(r io.Reader, size int64, format, channels, bits int) (left, right []float32, err error) {
 	sampleLen := int64(bits / 8)
 	frameLen := sampleLen * int64(channels)
 	if size%frameLen != 0 {
 		return nil, nil, fmt.Errorf("wavio: data chunk size %d is not a multiple of the %d-byte frame", size, frameLen)
 	}
-	raw := make([]byte, size)
-	if _, err := io.ReadFull(r, raw); err != nil {
-		return nil, nil, fmt.Errorf("wavio: reading data chunk: %w", err)
+	hint := size / frameLen
+	if hint > maxPreallocFrames {
+		hint = maxPreallocFrames
 	}
-	frames := size / frameLen
-	left = make([]float32, frames)
-	right = make([]float32, frames)
-	for f := int64(0); f < frames; f++ {
-		off := f * frameLen
-		l := decodeSample(raw[off:], format)
-		rr := l // mono duplicates into both channels
-		if channels == 2 {
-			rr = decodeSample(raw[off+sampleLen:], format)
+	left = make([]float32, 0, hint)
+	right = make([]float32, 0, hint)
+	bufLen := int64(dataBufLen)
+	if bufLen > size {
+		bufLen = size
+	}
+	buf := make([]byte, bufLen)
+	for remaining := size; remaining > 0; {
+		n := int64(len(buf))
+		if n > remaining {
+			n = remaining
 		}
-		left[f] = l
-		right[f] = rr
+		if _, err := io.ReadFull(r, buf[:n]); err != nil {
+			return nil, nil, fmt.Errorf("wavio: reading data chunk: %w", err)
+		}
+		for off := int64(0); off < n; off += frameLen {
+			l := decodeSample(buf[off:], format)
+			rr := l // mono duplicates into both channels
+			if channels == 2 {
+				rr = decodeSample(buf[off+sampleLen:], format)
+			}
+			left = append(left, l)
+			right = append(right, rr)
+		}
+		remaining -= n
 	}
 	return left, right, nil
 }

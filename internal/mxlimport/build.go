@@ -17,12 +17,31 @@ type barSpec struct {
 	num, den int
 }
 
+// MaxTicks caps the score extent the import will accept — about 14
+// hours of 4/4 at 120 BPM. barSpecs allocates one barSpec per bar from
+// tick 0 to the score's end, so a single hostile <duration> (or time
+// signature) could otherwise turn the layout into an unbounded
+// allocation loop.
+const MaxTicks = 100_000_000
+
+// maxBars is the belt-and-braces cap on the bar count itself, for meter
+// maps whose tiny bars would slice even a legal extent into an absurd
+// number of specs (it also breaks any overflow-induced cycle in the
+// bar-advance arithmetic).
+const maxBars = 100_000
+
 // barSpecs lays out contiguous bars from tick 0 through end under the
 // meter map. Meter entries are recorded at measure starts during parsing,
 // so every entry falls on a barline by construction.
 func barSpecs(meters score.MeterMap, end int64) ([]barSpec, error) {
+	if end > MaxTicks {
+		return nil, fmt.Errorf("score too long: extends to tick %d, past the %d-tick limit", end, int64(MaxTicks))
+	}
 	var specs []barSpec
 	for start := int64(0); start < end; {
+		if len(specs) >= maxBars {
+			return nil, fmt.Errorf("score too long: more than %d bars", maxBars)
+		}
 		m := meters.At(start)
 		if m.Num <= 0 || m.Den <= 0 || (4*score.PPQ)%int64(m.Den) != 0 {
 			return nil, fmt.Errorf("unsupported time signature %d/%d", m.Num, m.Den)

@@ -2,11 +2,21 @@ package mxlimport
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 
 	"github.com/S95F/guitarTutor/internal/score"
 )
+
+// overLong reports whether v file ticks would rescale past MaxTicks
+// score ticks. The first clause keeps the rescale itself from
+// overflowing int64 (a hostile <duration> can be anything an int64
+// holds, and v*PPQ overflows long before that).
+func overLong(v, divisions int64) bool {
+	return v > (math.MaxInt64-divisions/2)/score.PPQ ||
+		(v*score.PPQ+divisions/2)/divisions > MaxTicks
+}
 
 // A rawNote is one sounding note in score ticks, before bar building.
 // Tied note chains are merged into a single rawNote spanning the chain.
@@ -52,7 +62,7 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart) (*partDat
 	var measureStart int64     // score tick of the current measure's start
 	open := map[int]*rawNote{} // key -> note whose tie start awaits its stop
 	// Aggregate warning counters, reported once per part.
-	var rounded, mismatched, otherVoice, otherStaff, grace, badTie, badFing int
+	var rounded, mismatched, otherVoice, otherStaff, grace, badTie, badFing, oversized int
 
 	for mi := range xp.Measures {
 		meas := &xp.Measures[mi]
@@ -193,6 +203,14 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart) (*partDat
 					im.warnf("%s measure %s: unrecognized pitch step %q; note skipped", label, mlabel, e.Pitch.Step)
 					continue
 				}
+				// A hostile <duration> here or on an earlier <forward>
+				// would blow the score extent past anything the bar
+				// layout can hold — or overflow the rescale outright.
+				// Skip the note; barSpecs backstops the global extent.
+				if overLong(dur, divisions) || overLong(base, divisions) || overLong(base+dur, divisions) {
+					oversized++
+					continue
+				}
 				if (base*score.PPQ)%divisions != 0 || ((base+dur)*score.PPQ)%divisions != 0 {
 					rounded++
 				}
@@ -214,7 +232,17 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart) (*partDat
 				}
 				n := &rawNote{start: start, end: end, key: key}
 				if s, f, ok := e.fingering(); ok {
-					if s >= 1 && s <= len(pd.tuning) && f >= 0 {
+					// The fingering is usable only if string and fret are
+					// in range AND the pitch it derives lands in MIDI
+					// 0-127 — Validate rejects the score otherwise, so an
+					// absurd authored fret falls back to inference.
+					usable := s >= 1 && s <= len(pd.tuning) && f >= 0
+					if usable {
+						if k := pd.tuning[s-1] + pd.capo + f; k < 0 || k > 127 {
+							usable = false
+						}
+					}
+					if usable {
 						n.str, n.fret, n.hasFing = s, f, true
 						if pd.tuning[s-1]+pd.capo+f != key {
 							mismatched++
@@ -268,6 +296,9 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart) (*partDat
 	if badFing > 0 {
 		im.warnf("%s: %d note(s) with out-of-range <technical> string/fret; fingering inferred instead", label, badFing)
 	}
+	if oversized > 0 {
+		im.warnf("%s: skipped %d note(s) whose duration or position rescales past the %d-tick score limit", label, oversized, int64(MaxTicks))
+	}
 	if mismatched > 0 {
 		im.warnf("%s: %d note(s) whose written pitch disagrees with tuning+capo+fret; the fingering wins (pitch is derived)", label, mismatched)
 	}
@@ -296,11 +327,30 @@ func (im *importer) recordDirectionTempo(d *xmlDirection, measureStart, cursor, 
 	}
 }
 
-// recordTempo appends a tempo entry at the cursor's score tick.
+// minBPM and maxBPM bound the tempos accepted from a file. The range is
+// deliberately generous — real scores live in roughly 20-400 — because
+// past it USPerQuarter degenerates (rounds to 0 or overflows) and
+// Validate would hard-fail the whole import over one absurd marking.
+const (
+	minBPM float64 = 1
+	maxBPM float64 = 4000
+)
+
+// recordTempo appends a tempo entry at the cursor's score tick. Absurd
+// tempos degrade to a warning and are skipped, mirroring the MIDI
+// importer; the tick-0 120 BPM default covers any gap.
 func (im *importer) recordTempo(measureStart, cursor, divisions int64, bpm float64) {
 	tick := measureStart
 	if divisions > 0 {
 		tick += (cursor*score.PPQ + divisions/2) / divisions
+	}
+	if usq := score.USPerQuarter(bpm); usq <= 0 || bpm < minBPM || bpm > maxBPM {
+		im.warnf("skipped tempo of %g BPM at tick %d (outside the supported %g-%g BPM range)", bpm, tick, minBPM, maxBPM)
+		return
+	}
+	if tick < 0 || tick > MaxTicks {
+		im.warnf("skipped tempo change at tick %d (past the %d-tick score limit)", tick, int64(MaxTicks))
+		return
 	}
 	im.tempos = append(im.tempos, score.Tempo{Tick: tick, USPerQuarter: score.USPerQuarter(bpm)})
 }

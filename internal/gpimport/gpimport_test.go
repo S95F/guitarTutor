@@ -3,8 +3,11 @@ package gpimport
 import (
 	"archive/zip"
 	"bytes"
+	"compress/flate"
+	"hash/crc32"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/S95F/guitarTutor/internal/score"
 )
@@ -394,6 +397,230 @@ func TestTempoUnitsAndPosition(t *testing.T) {
 		if s.Tempos[i] != want[i] {
 			t.Errorf("Tempos[%d] = %v, want %v", i, s.Tempos[i], want[i])
 		}
+	}
+}
+
+// TestHostileDotCount: the AugmentationDot count attribute is attacker
+// controlled — a huge count must not wedge the import (the old loop
+// iterated count times), and negative or implausibly large counts are
+// clamped to 3 with a warning. count=3 is the legitimate maximum and
+// imports without a dot warning.
+func TestHostileDotCount(t *testing.T) {
+	doc := gpifDoc(
+		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`+
+			`<MasterBar><Time>4/4</Time><Bars>1</Bars></MasterBar>`+
+			`<MasterBar><Time>4/4</Time><Bars>2</Bars></MasterBar>`,
+		`<Bar id="0"><Voices>0 -1 -1 -1</Voices></Bar>`+
+			`<Bar id="1"><Voices>1 -1 -1 -1</Voices></Bar>`+
+			`<Bar id="2"><Voices>2 -1 -1 -1</Voices></Bar>`,
+		`<Voice id="0"><Beats>0</Beats></Voice>`+
+			`<Voice id="1"><Beats>1</Beats></Voice>`+
+			`<Voice id="2"><Beats>2</Beats></Voice>`,
+		`<Beat id="0"><Rhythm ref="0" /><Notes>0</Notes></Beat>`+
+			`<Beat id="1"><Rhythm ref="1" /><Notes>1</Notes></Beat>`+
+			`<Beat id="2"><Rhythm ref="2" /><Notes>2</Notes></Beat>`,
+		noteXML(0, 0, 0, "")+noteXML(1, 0, 0, "")+noteXML(2, 0, 0, ""),
+		`<Rhythm id="0"><NoteValue>Quarter</NoteValue><AugmentationDot count="3" /></Rhythm>`+
+			`<Rhythm id="1"><NoteValue>Quarter</NoteValue><AugmentationDot count="-5" /></Rhythm>`+
+			`<Rhythm id="2"><NoteValue>Quarter</NoteValue><AugmentationDot count="9000000000000000000" /></Rhythm>`,
+	)
+	data := buildGP(t, [2]string{"Content/score.gpif", doc})
+
+	type result struct {
+		s     *score.Score
+		warns []string
+		err   error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		s, warns, err := Import(data)
+		ch <- result{s, warns, err}
+	}()
+	var res result
+	select {
+	case res = <-ch:
+	case <-time.After(time.Minute):
+		t.Fatal("Import did not finish within a minute; a hostile augmentation dot count wedged it")
+	}
+	if res.err != nil {
+		t.Fatalf("Import: %v", res.err)
+	}
+	if err := res.s.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !hasWarning(res.warns, "dot count -5") {
+		t.Errorf("warnings = %v, want a dot-count warning for -5", res.warns)
+	}
+	if !hasWarning(res.warns, "dot count 9000000000000000000") {
+		t.Errorf("warnings = %v, want a dot-count warning for 9000000000000000000", res.warns)
+	}
+	if hasWarning(res.warns, "dot count 3") {
+		t.Errorf("warnings = %v, count=3 is legitimate and must not warn", res.warns)
+	}
+	// A triple-dotted quarter is 960+480+240+120 = 1800 ticks; the
+	// hostile counts clamp to the same duration.
+	evs := res.s.Events()
+	want := []struct{ start, end int64 }{{0, 1800}, {3840, 5640}, {7680, 9480}}
+	if len(evs) != len(want) {
+		t.Fatalf("got %d events, want %d: %+v", len(evs), len(want), evs)
+	}
+	for i, wv := range want {
+		if evs[i].Start != wv.start || evs[i].End != wv.end {
+			t.Errorf("event %d = (%d,%d), want (%d,%d)", i, evs[i].Start, evs[i].End, wv.start, wv.end)
+		}
+	}
+}
+
+// bombGP zips the given deflate stream into a Content/score.gpif entry
+// whose header claims `claimed` uncompressed bytes. CreateRaw writes the
+// header fields verbatim, so claimed is free to lie about the stream.
+func bombGP(t *testing.T, compressed []byte, crc uint32, claimed uint64) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.CreateRaw(&zip.FileHeader{
+		Name:               "Content/score.gpif",
+		Method:             zip.Deflate,
+		CRC32:              crc,
+		CompressedSize64:   uint64(len(compressed)),
+		UncompressedSize64: claimed,
+	})
+	if err != nil {
+		t.Fatalf("CreateRaw: %v", err)
+	}
+	if _, err := w.Write(compressed); err != nil {
+		t.Fatalf("writing raw entry: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("closing zip: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// TestZipBombRejected: a small archive whose score.gpif inflates past
+// the 64 MiB cap errors out instead of ballooning memory, whether the
+// zip header admits the size or lies about it.
+func TestZipBombRejected(t *testing.T) {
+	// Deflate 65 MiB of zeros — just past the cap — into ~65 KB.
+	const bombSize = 65 << 20
+	chunk := make([]byte, 64<<10)
+	var comp bytes.Buffer
+	fw, err := flate.NewWriter(&comp, flate.BestCompression)
+	if err != nil {
+		t.Fatalf("flate.NewWriter: %v", err)
+	}
+	crc := crc32.NewIEEE()
+	for written := 0; written < bombSize; written += len(chunk) {
+		if _, err := fw.Write(chunk); err != nil {
+			t.Fatalf("compressing bomb: %v", err)
+		}
+		crc.Write(chunk)
+	}
+	if err := fw.Close(); err != nil {
+		t.Fatalf("closing flate writer: %v", err)
+	}
+	if comp.Len() > 1<<20 {
+		t.Fatalf("test bomb is %d bytes compressed, want under 1 MiB", comp.Len())
+	}
+
+	// Honest header: the declared size alone is over the cap, and the
+	// import must say so without decompressing anything.
+	start := time.Now()
+	_, _, err = Import(bombGP(t, comp.Bytes(), crc.Sum32(), bombSize))
+	if err == nil || !strings.Contains(err.Error(), "zip bomb") {
+		t.Errorf("honest 65 MiB bomb: err = %v, want a possible-zip-bomb error", err)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("honest bomb took %v to reject, want a fast failure", elapsed)
+	}
+
+	// Forged header: claims 1 KiB but the stream inflates to 65 MiB.
+	// The header must not be trusted alone — the read has to stay
+	// bounded and fail, whether the zip layer or the importer's
+	// LimitReader cap notices first.
+	_, _, err = Import(bombGP(t, comp.Bytes(), crc.Sum32(), 1024))
+	if err == nil {
+		t.Error("forged-header bomb: import succeeded, want an error")
+	}
+}
+
+// TestHostileTempoPosition: tempo automation positions of -1, NaN, and
+// 1e18 must warn and clamp — never produce a negative or overflowed
+// tick that unsorts the tempo map and fails the whole import.
+func TestHostileTempoPosition(t *testing.T) {
+	doc := gpifDoc(
+		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`+
+			`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`+
+			`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`,
+		`<Bar id="0"><Voices>0 -1 -1 -1</Voices></Bar>`,
+		`<Voice id="0"><Beats>0</Beats></Voice>`,
+		`<Beat id="0"><Rhythm ref="0" /><Notes>0</Notes></Beat>`,
+		noteXML(0, 0, 0, ""),
+		`<Rhythm id="0"><NoteValue>Whole</NoteValue></Rhythm>`,
+	)
+	doc = strings.Replace(doc, `</Automations>`,
+		`<Automation><Type>Tempo</Type><Bar>0</Bar><Position>-1</Position><Value>100 2</Value></Automation>`+
+			`<Automation><Type>Tempo</Type><Bar>1</Bar><Position>NaN</Position><Value>90 2</Value></Automation>`+
+			`<Automation><Type>Tempo</Type><Bar>2</Bar><Position>1e18</Position><Value>60 2</Value></Automation>`+
+			`</Automations>`, 1)
+	s, warns, err := importDoc(t, doc)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !hasWarning(warns, "outside [0,1]") {
+		t.Errorf("warnings = %v, want an out-of-range position warning", warns)
+	}
+	if !hasWarning(warns, "not a number") {
+		t.Errorf("warnings = %v, want a NaN position warning", warns)
+	}
+	// Position -1 clamps to the bar 1 start (tick 0, overriding the
+	// frame's 120 there), NaN to the bar 2 start, 1e18 to the bar 3 end.
+	want := score.TempoMap{
+		{Tick: 0, USPerQuarter: score.USPerQuarter(100)},
+		{Tick: 3840, USPerQuarter: score.USPerQuarter(90)},
+		{Tick: 11520, USPerQuarter: score.USPerQuarter(60)},
+	}
+	if len(s.Tempos) != len(want) {
+		t.Fatalf("Tempos = %v, want %v", s.Tempos, want)
+	}
+	for i := range want {
+		if s.Tempos[i] != want[i] {
+			t.Errorf("Tempos[%d] = %v, want %v", i, s.Tempos[i], want[i])
+		}
+	}
+}
+
+// TestAbsurdTempoSkipped: a BPM so large it rounds to zero microseconds
+// per quarter (and a NaN BPM) is skipped with a warning instead of
+// planting an invalid tempo that fails validation.
+func TestAbsurdTempoSkipped(t *testing.T) {
+	doc := gpifDoc(
+		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`,
+		`<Bar id="0"><Voices>0 -1 -1 -1</Voices></Bar>`,
+		`<Voice id="0"><Beats>0</Beats></Voice>`,
+		`<Beat id="0"><Rhythm ref="0" /><Notes>0</Notes></Beat>`,
+		noteXML(0, 0, 0, ""),
+		`<Rhythm id="0"><NoteValue>Whole</NoteValue></Rhythm>`,
+	)
+	doc = strings.Replace(doc, `</Automations>`,
+		`<Automation><Type>Tempo</Type><Bar>0</Bar><Position>0.5</Position><Value>1e18 2</Value></Automation>`+
+			`<Automation><Type>Tempo</Type><Bar>0</Bar><Position>0.5</Position><Value>NaN 2</Value></Automation>`+
+			`</Automations>`, 1)
+	s, warns, err := importDoc(t, doc)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !hasWarning(warns, "absurd tempo") {
+		t.Errorf("warnings = %v, want an absurd-tempo warning", warns)
+	}
+	if len(s.Tempos) != 1 || s.Tempos[0] != (score.Tempo{Tick: 0, USPerQuarter: score.USPerQuarter(120)}) {
+		t.Errorf("Tempos = %v, want only the frame's 120 BPM at tick 0", s.Tempos)
 	}
 }
 
