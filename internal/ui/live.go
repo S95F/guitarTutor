@@ -39,6 +39,7 @@ type feed struct {
 	tunerSounding bool
 	status        func() (levelDB float64, dropped int64)
 	waitCtl       bool
+	warning       string
 }
 
 // liveUI is the App's Phase 2 state: the mailbox plus the game-loop-owned
@@ -59,6 +60,14 @@ type liveUI struct {
 	tunerSounding bool
 	stats         practice.Stats
 	verdicts      map[noteKey]practice.Verdict
+
+	// Live warning banner. warnMsg is the game-loop copy of the message
+	// the app layer last set; warnShown goes false when the user
+	// dismisses it and true again only when the message itself changes,
+	// so a condition that keeps re-reporting the same text (a dead
+	// stream polled every frame) stays dismissed.
+	warnMsg   string
+	warnShown bool
 }
 
 // OfferResults queues verdicts for the next frame. Safe from any
@@ -101,6 +110,25 @@ func (a *App) SetWaitControl(enabled bool) {
 	a.feed.mu.Unlock()
 }
 
+// SetLiveWarning publishes a condition the user must see over the tab: a
+// capture and playback device that are not the same clock, a hot-unplugged
+// interface, a stream that died mid-session. The practice view only
+// displays it — the app layer decides what is worth warning about, and
+// clears the banner by setting "". A message different from the one
+// showing raises the banner again even if the previous one was dismissed;
+// re-setting the same text does not. Safe from any goroutine.
+func (a *App) SetLiveWarning(msg string) {
+	a.feed.mu.Lock()
+	a.feed.warning = msg
+	a.feed.mu.Unlock()
+}
+
+// warningVisible reports whether the banner should be drawn.
+func (a *App) warningVisible() bool { return a.warnShown && a.warnMsg != "" }
+
+// dismissWarning (the D key) hides the banner until the message changes.
+func (a *App) dismissWarning() { a.warnShown = false }
+
 // syncLive drains the mailbox into game-loop-owned state. Update calls it
 // every frame; tests call it directly so no window is ever needed. The
 // status callback runs outside the mailbox lock — it may take the live
@@ -112,7 +140,13 @@ func (a *App) syncLive() {
 	a.tunerNote, a.tunerSounding = a.feed.tunerNote, a.feed.tunerSounding
 	status := a.feed.status
 	a.waitCtl = a.feed.waitCtl
+	warn := a.feed.warning
 	a.feed.mu.Unlock()
+
+	// Only a change in the message re-raises a dismissed banner.
+	if warn != a.warnMsg {
+		a.warnMsg, a.warnShown = warn, warn != ""
+	}
 
 	if len(rs) > 0 && a.verdicts == nil {
 		a.verdicts = make(map[noteKey]practice.Verdict)
@@ -237,6 +271,29 @@ func (a *App) drawLiveHUD(screen *ebiten.Image) {
 		w := fmt.Sprintf("dropped %d samples", a.dropped)
 		drawText(screen, w, screenW-24-float64(7*len(w)), 54, colMiss)
 	}
+}
+
+// drawWarning paints the live-warning banner across the top of the tab —
+// deliberately in the way, because a split device pair or a dead stream
+// invalidates every verdict below it. The text is scaled up when it fits
+// and drawn plain when it does not, so a long message is never clipped.
+func (a *App) drawWarning(screen *ebiten.Image) {
+	const h = 56
+	x, y := float32(40), float32(tabTop-116)
+	w := float32(screenW - 80)
+	vector.DrawFilledRect(screen, x, y, w, h, colWarnBG, false)
+	vector.StrokeRect(screen, x, y, w, h, 2, colMiss, false)
+
+	msg := a.warnMsg
+	scale := 2.0
+	if float64(7*len(msg))*scale > float64(w)-32 {
+		scale = 1
+	}
+	tw := float64(7*len(msg)) * scale
+	drawTextScaled(screen, msg, float64(x)+(float64(w)-tw)/2, float64(y)+12, scale, colMiss)
+
+	const hint = "press D to dismiss"
+	drawText(screen, hint, float64(x)+(float64(w)-float64(7*len(hint)))/2, float64(y)+40, colHUD)
 }
 
 // drawLegend paints the verdict color legend above the help line.

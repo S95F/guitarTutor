@@ -49,7 +49,7 @@ Roughly "Guitar Pro 8's speed trainer minus the editor" — a product people pay
 **UI**
 
 - [x] Scrolling 2D tablature with playback cursor, loop region, bar numbers, inferred-fingering marking (native Ebitengine per the Phase 0 spike)
-- [ ] Piece browser (today: pass a file on the command line), fixed-BPM entry, track solo, in-app count-in toggle
+- [x] Piece browser, fixed-BPM entry, track solo, in-app count-in toggle — *delivered by the Phase 5 shell*
 
 **Exit criteria:** a guitarist can import a MIDI file or write a text tab, loop the hard four bars at 60% with a count-in, and ramp back to full speed — with looping that never stutters, drops the first note, or drifts. *Met, modulo the UI conveniences above; loop sample-accuracy is enforced by engine tests.*
 
@@ -62,8 +62,8 @@ Live capture, and with it the cgo build event. This phase is where the two-clock
 - [x] `audio.Backend` interface (device enumeration, duplex stream open); Phase 1's oto path remains the playback-only fallback for `CGO_ENABLED=0` builds
 - [x] `gen2brain/malgo` (miniaudio) backend: **one full-duplex WASAPI shared-mode stream** — guitar capture and playback in one callback. 48 kHz float32, 480-frame periods negotiated on real hardware. (Found upstream: malgo v0.11.25's Backend enum omits `ma_backend_custom`, so its `BackendNull` requests the wrong backend — worked around locally; worth filing upstream.)
 - [x] Callback discipline: the callback renders the engine and memcpys capture into a race-free SPSC ring (drop-newest overflow, backpressure signal); analysis runs in an ordinary goroutine
-- [x] Device selection by name fragment (`guitartutor devices`, `-in`/`-out`), remembered in config — *in-app picker UI, buffer-size setting, and hot-unplug recovery still pending*
-- [x] Same-device steering: documented in `devices` output and README — *automatic split-device warning still pending*
+- [x] Device selection by name fragment (`guitartutor devices`, `-in`/`-out`), remembered in config; in-app picker delivered by the Phase 5 settings screen — *buffer-size setting and hot-unplug recovery still pending*
+- [x] Same-device steering: documented in `devices` output and README, and the practice view now raises a split-device warning banner when capture and playback are on different interfaces
 - [x] CI builds cgo on both platforms (runners ship gcc) plus a `CGO_ENABLED=0` fallback build check and a Linux `-race` leg; contributor toolchain documented in README
 
 **Pitch detection (`internal/pitch`)**
@@ -116,7 +116,7 @@ Fixed, with the numbers measured rather than asserted:
 
 **Residual limits, asserted in tests rather than hidden.** One correctly played string in the corpus still hard-Misses (the G string of an Em on a 12 ms sweep, whose class lands second-quietest of twelve — below the chroma's own background, where no verdict policy can separate it from silence); a test bounds the damage and fails if a second appears. Am against an expected A still scores 4 Hit + 1 Close, because Am genuinely shares two of three classes with A — only the C♯ string is catchable, and a stricter rule punishes correct playing more than it catches wrong playing. In the worst-case ringing-chord scenario (a synth that sustains at 78% after 600 ms, harsher than a real damped change) 21 of 54 combinations still rank an unsounded class first. **Everything above is synthesis.** These thresholds stay provisional until the real-guitar corpus exists — that item, not the algorithm, is the binding constraint on Phase 4.
 
-## Phase 5 — The app grows a shell (and ports)
+## Phase 5 — The app grows a shell — landed (ports still open)
 
 Everything so far treats the command line as the front door: the practice *view* is real (scrolling tab, HUD, tuner, verdicts, wait banner), but there is no way to open a piece, pick a device, or change a setting without quitting and retyping a command. This phase collects the UI work deferred out of Phases 1 and 2 into one place and finishes the application around the view.
 

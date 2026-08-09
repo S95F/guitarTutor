@@ -1,6 +1,8 @@
 package appconfig
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -61,6 +63,217 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	want.Version = CurrentVersion // Save stamps a zero Version
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("round trip:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+func TestSaveLoadRoundTripShellFields(t *testing.T) {
+	t.Setenv(EnvConfigDir, t.TempDir())
+	browse := t.TempDir()
+	c := Config{
+		CountInBeats:  4,
+		LastBrowseDir: browse,
+		WindowWidth:   1600,
+		WindowHeight:  900,
+	}
+	c.AddRecent(filepath.Join(browse, "second.gp"))
+	c.AddRecent(filepath.Join(browse, "first.gp"))
+	if err := c.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := c
+	want.Version = CurrentVersion // Save stamps a zero Version
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round trip:\n got %+v\nwant %+v", got, want)
+	}
+	// Recency order survives the file, which is the whole point of the list.
+	if len(got.Recents) != 2 || got.Recents[0] != filepath.Join(browse, "first.gp") {
+		t.Errorf("Recents = %v, want most-recent-first", got.Recents)
+	}
+}
+
+// v1Config is a config file exactly as the previous schema wrote one:
+// devices, calibration and a SoundFont, and nothing this version added.
+const v1Config = `{
+  "version": 1,
+  "captureDeviceID": "wasapi-{cap-guid}",
+  "playbackDeviceID": "wasapi-{play-guid}",
+  "latencyOffsets": {
+    "wasapi-{cap-guid}|wasapi-{play-guid}": 517
+  },
+  "latencyConfidence": {
+    "wasapi-{cap-guid}|wasapi-{play-guid}": 0.93
+  },
+  "soundFontPath": "C:\\soundfonts\\gm.sf2"
+}
+`
+
+// writeConfigFile drops raw bytes at the configured config path, standing
+// in for a file written by another build.
+func writeConfigFile(t *testing.T, dir, contents string) string {
+	t.Helper()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
+	}
+	return path
+}
+
+func TestLoadMigratesPreviousSchemaVersion(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(EnvConfigDir, dir)
+	writeConfigFile(t, dir, v1Config)
+
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load of a version 1 file: %v", err)
+	}
+	// Every field the old build knew survives, unchanged in meaning.
+	want := Config{
+		Version:          CurrentVersion,
+		CaptureDeviceID:  "wasapi-{cap-guid}",
+		PlaybackDeviceID: "wasapi-{play-guid}",
+		LatencyOffsets:   map[string]int{"wasapi-{cap-guid}|wasapi-{play-guid}": 517},
+		LatencyConfidence: map[string]float64{
+			"wasapi-{cap-guid}|wasapi-{play-guid}": 0.93,
+		},
+		SoundFontPath: `C:\soundfonts\gm.sf2`,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("migrated config:\n got %+v\nwant %+v", got, want)
+	}
+	// Which is to say the new fields took their documented defaults.
+	if got.Recents != nil || got.CountInBeats != 0 || got.LastBrowseDir != "" ||
+		got.WindowWidth != 0 || got.WindowHeight != 0 {
+		t.Errorf("new fields not defaulted: %+v", got)
+	}
+	if off, ok := got.OffsetFor("wasapi-{cap-guid}", "wasapi-{play-guid}"); !ok || off != 517 {
+		t.Errorf("OffsetFor after migration = %d, %v, want 517, true", off, ok)
+	}
+
+	// Saving the migrated config stamps the new version and keeps the
+	// carried-over fields, so the upgrade is durable.
+	got.AddRecent(filepath.Join(dir, "new.gp"))
+	if err := got.Save(); err != nil {
+		t.Fatalf("Save after migration: %v", err)
+	}
+	back, err := Load()
+	if err != nil {
+		t.Fatalf("Load after migration save: %v", err)
+	}
+	if back.Version != CurrentVersion {
+		t.Errorf("saved Version = %d, want %d", back.Version, CurrentVersion)
+	}
+	if back.SoundFontPath != want.SoundFontPath || len(back.Recents) != 1 {
+		t.Errorf("after migration save got %+v", back)
+	}
+}
+
+func TestLoadTreatsUnstampedFileAsFirstVersion(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(EnvConfigDir, dir)
+	writeConfigFile(t, dir, `{"soundFontPath": "hand-written.sf2"}`)
+
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Version != CurrentVersion {
+		t.Errorf("Version = %d, want %d", got.Version, CurrentVersion)
+	}
+	if got.SoundFontPath != "hand-written.sf2" {
+		t.Errorf("SoundFontPath = %q, want it preserved", got.SoundFontPath)
+	}
+}
+
+func TestLoadRepairsRecentsFromDisk(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(EnvConfigDir, dir)
+	entries := make([]string, 0, MaxRecents+4)
+	entries = append(entries, `""`, `"/songs/a.gp"`, `"/songs/a.gp"`)
+	for i := 0; i < MaxRecents+1; i++ {
+		entries = append(entries, fmt.Sprintf(`"/songs/s%02d.gp"`, i))
+	}
+	writeConfigFile(t, dir, fmt.Sprintf(`{"version": %d, "recents": [%s]}`,
+		CurrentVersion, strings.Join(entries, ", ")))
+
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got.Recents) != MaxRecents {
+		t.Fatalf("len(Recents) = %d, want the cap %d", len(got.Recents), MaxRecents)
+	}
+	if got.Recents[0] != "/songs/a.gp" || got.Recents[1] != "/songs/s00.gp" {
+		t.Errorf("Recents starts %v, want the blank dropped and the duplicate collapsed", got.Recents[:2])
+	}
+}
+
+func TestLoadRefusesNewerVersion(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(EnvConfigDir, dir)
+	writeConfigFile(t, dir, fmt.Sprintf(`{"version": %d, "soundFontPath": "future.sf2"}`, CurrentVersion+1))
+
+	c, err := Load()
+	if err == nil {
+		t.Fatal("Load of a newer-version file: nil error, want ErrNewerVersion")
+	}
+	if !errors.Is(err, ErrNewerVersion) {
+		t.Errorf("Load error = %v, want one wrapping ErrNewerVersion", err)
+	}
+	if !reflect.DeepEqual(c, Config{}) {
+		t.Errorf("Load = %+v, want the zero Config so the caller runs on defaults", c)
+	}
+}
+
+func TestSaveRefusesToDowngradeNewerFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(EnvConfigDir, dir)
+	newer := fmt.Sprintf("{\n  \"version\": %d,\n  \"soundFontPath\": \"future.sf2\"\n}\n", CurrentVersion+1)
+	path := writeConfigFile(t, dir, newer)
+
+	err := (Config{SoundFontPath: "old.sf2"}).Save()
+	if err == nil {
+		t.Fatal("Save over a newer-version file: nil error, want ErrNewerVersion")
+	}
+	if !errors.Is(err, ErrNewerVersion) {
+		t.Errorf("Save error = %v, want one wrapping ErrNewerVersion", err)
+	}
+	// The newer build's settings are still there, byte for byte, and the
+	// refusal left no temp file behind.
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("ReadFile: %v", readErr)
+	}
+	if string(data) != newer {
+		t.Errorf("config file was rewritten:\n%s", data)
+	}
+	entries, readErr := os.ReadDir(dir)
+	if readErr != nil {
+		t.Fatalf("ReadDir: %v", readErr)
+	}
+	if len(entries) != 1 {
+		t.Errorf("config dir has %d entries after a refused save, want 1", len(entries))
+	}
+}
+
+func TestSaveOverwritesSameOrOlderVersion(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(EnvConfigDir, dir)
+	writeConfigFile(t, dir, v1Config)
+
+	if err := (Config{SoundFontPath: "new.sf2"}).Save(); err != nil {
+		t.Fatalf("Save over an older file: %v", err)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.SoundFontPath != "new.sf2" || got.Version != CurrentVersion {
+		t.Errorf("Load = %+v, want the new config at version %d", got, CurrentVersion)
 	}
 }
 

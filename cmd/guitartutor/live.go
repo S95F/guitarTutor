@@ -351,32 +351,14 @@ func setupListen(eng *engine.Engine, app *ui.App, track int, inQ, outQ string) (
 	return session, nil
 }
 
-// runCalibrate measures the round-trip latency offset and stores it.
-func runCalibrate(args []string) error {
-	fs := flag.NewFlagSet("calibrate", flag.ExitOnError)
-	inQ := fs.String("in", "", "capture device (name fragment)")
-	outQ := fs.String("out", "", "playback device (name fragment)")
-	fs.Parse(args)
-	if fs.NArg() != 0 {
-		return fmt.Errorf("usage: guitartutor calibrate [-in device] [-out device]")
-	}
-	b, err := liveBackend()
-	if err != nil {
-		return err
-	}
-	cfg, cfgErr := appconfig.Load()
-	if cfgErr != nil {
-		fmt.Fprintln(os.Stderr, "warning: existing config unreadable, starting fresh:", cfgErr)
-	}
-	// Same resolution as -listen (flags win, remembered devices fill the
-	// gaps), so the offset is stored under the key playback will look up.
-	inID, outID, capture, playback, err := resolveDevices(b, cfg, *inQ, *outQ)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("measuring playback [%s] -> capture [%s]\n",
-		deviceLabel(playback, outID), deviceLabel(capture, inID))
-
+// calibrationPass plays the click train over a duplex stream, records the
+// input, and recovers the round-trip offset. progress, when non-nil, is
+// called from the audio thread with the capture's completion in [0, 1] —
+// so it must not block; the settings screen posts to a mailbox.
+//
+// Shared by the `calibrate` subcommand and the in-app settings screen so
+// the two can never measure differently.
+func calibrationPass(b audio.Backend, inID, outID string, progress func(float64)) (int, float64, error) {
 	train := latency.ClickTrain(sampleRate, calClicks, calSpacing)
 	// Record for the train plus a second of slack so a large delay still
 	// lands inside the capture.
@@ -404,6 +386,9 @@ func runCalibrate(args []string) error {
 			}
 			captured = append(captured, in[:n]...)
 		}
+		if progress != nil {
+			progress(float64(len(captured)) / float64(capLen))
+		}
 		if pos >= capLen && len(captured) >= capLen {
 			once.Do(func() { close(done) })
 		}
@@ -415,13 +400,11 @@ func runCalibrate(args []string) error {
 		PlaybackDevice: outID,
 	}, handler)
 	if err != nil {
-		return fmt.Errorf("opening duplex stream: %w", err)
+		return 0, 0, fmt.Errorf("opening duplex stream: %w", err)
 	}
-	fmt.Println("playing calibration clicks — the input must be able to hear the")
-	fmt.Println("output (mic near the speakers, or a loopback cable)...")
 	if err := stream.Start(); err != nil {
 		stream.Close()
-		return fmt.Errorf("starting stream: %w", err)
+		return 0, 0, fmt.Errorf("starting stream: %w", err)
 	}
 	// The run captures ~9 s of audio (8 clicks a second apart plus slack);
 	// well past that with no completion, no audio is flowing.
@@ -430,14 +413,49 @@ func runCalibrate(args []string) error {
 	case <-time.After(20 * time.Second):
 		stream.Stop()
 		stream.Close()
-		return fmt.Errorf("calibration timed out — no audio flowed (check the devices with 'guitartutor devices')")
+		return 0, 0, fmt.Errorf("calibration timed out — no audio flowed (check the devices with 'guitartutor devices')")
 	}
 	stream.Stop()
 	stream.Close()
 
 	off, conf, err := latency.Estimate(sampleRate, train, captured, calSpacing, calClicks)
 	if err != nil {
-		return fmt.Errorf("could not measure the round trip: %w", err)
+		return off, conf, fmt.Errorf("could not measure the round trip: %w", err)
+	}
+	return off, conf, nil
+}
+
+// runCalibrate measures the round-trip latency offset and stores it.
+func runCalibrate(args []string) error {
+	fs := flag.NewFlagSet("calibrate", flag.ExitOnError)
+	inQ := fs.String("in", "", "capture device (name fragment)")
+	outQ := fs.String("out", "", "playback device (name fragment)")
+	fs.Parse(args)
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: guitartutor calibrate [-in device] [-out device]")
+	}
+	b, err := liveBackend()
+	if err != nil {
+		return err
+	}
+	cfg, cfgErr := appconfig.Load()
+	if cfgErr != nil {
+		fmt.Fprintln(os.Stderr, "warning: existing config unreadable, starting fresh:", cfgErr)
+	}
+	// Same resolution as -listen (flags win, remembered devices fill the
+	// gaps), so the offset is stored under the key playback will look up.
+	inID, outID, capture, playback, err := resolveDevices(b, cfg, *inQ, *outQ)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("measuring playback [%s] -> capture [%s]\n",
+		deviceLabel(playback, outID), deviceLabel(capture, inID))
+
+	fmt.Println("playing calibration clicks — the input must be able to hear the")
+	fmt.Println("output (mic near the speakers, or a loopback cable)...")
+	off, conf, err := calibrationPass(b, inID, outID, nil)
+	if err != nil {
+		return err
 	}
 	fmt.Printf("round-trip latency: %d frames (%.1f ms), confidence %.2f\n",
 		off, float64(off)/sampleRate*1000, conf)

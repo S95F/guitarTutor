@@ -47,9 +47,15 @@ const maxRenderFrames = 30 * 60 * sampleRate
 var version = "0.1.0-dev"
 
 func main() {
+	// No arguments is the double-clicked-binary case: open the windowed
+	// app with the start screen, where a piece can be chosen and settings
+	// changed without ever touching a terminal.
 	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
+		if err := runShell(); err != nil {
+			fmt.Fprintln(os.Stderr, "guitartutor:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	var err error
 	switch os.Args[1] {

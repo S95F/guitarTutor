@@ -49,9 +49,14 @@ guitarTutor aims to fill it with the practice loop every guitarist converges on:
 - Palm-muted and damped notes credited for their attack instead of failed for an unclear pitch
 - Optional SwiftF0 ONNX pitch backend behind a build tag (the default binary stays free of any runtime DLL)
 
-**Later (Phases 5–6)**
+**Phase 5 — the app shell (landed)**
 
-- The app shell: start screen, piece browser, in-app settings and device pickers, in-window calibration
+- Start screen with recent pieces, a file browser, and drag-and-drop
+- In-app settings: audio device pickers, latency calibration in-window, SoundFont, count-in
+- Fixed-BPM entry, track solo, a help overlay, and live warnings surfaced in the UI
+
+**Later (Phase 6 and beyond)**
+
 - macOS and Linux ports
 - An opt-in [note highway](docs/HIGHWAY.md) — notes approaching down string lanes, for when you want to read what's coming rather than read notation. The tab stays the default
 - A [practice log](docs/PROGRESS.md) with streaks and badges, built so a detection error can never cost you either
@@ -101,7 +106,13 @@ Requires Go 1.26+. Phase 1 is pure Go — no C toolchain, no assets to download.
 go build ./cmd/guitartutor
 ```
 
-Open the practice view on the bundled fixture riff:
+Run it with no arguments — or double-click the binary — and it opens the start screen: recent pieces, a file browser over the formats it imports, drag-and-drop, and settings (audio devices, latency calibration, SoundFont, count-in) without touching a terminal.
+
+```bash
+./guitartutor
+```
+
+Or go straight to a piece:
 
 ```bash
 ./guitartutor play testdata/fixture_riff.gtab
