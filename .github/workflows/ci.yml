@@ -26,7 +26,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev xorg-dev libasound2-dev pkg-config
+          sudo apt-get install -y libgl1-mesa-dev libglu1-mesa-dev xorg-dev libasound2-dev pkg-config xvfb
 
       - name: Build
         run: go build ./...
@@ -34,5 +34,13 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Test
+      # Ebitengine initializes GLFW at package init, which needs a display;
+      # the Linux runner is headless, so tests run under a virtual
+      # framebuffer (the same approach Ebitengine's own CI uses).
+      - name: Test (Linux, under xvfb)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a go test ./... -count=1
+
+      - name: Test (Windows)
+        if: runner.os == 'Windows'
         run: go test ./... -count=1
