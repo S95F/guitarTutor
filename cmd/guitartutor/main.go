@@ -58,6 +58,10 @@ func main() {
 		err = runPlay(os.Args[2:])
 	case "render":
 		err = runRender(os.Args[2:])
+	case "devices":
+		err = runDevices(os.Args[2:])
+	case "calibrate":
+		err = runCalibrate(os.Args[2:])
 	default:
 		if strings.HasPrefix(os.Args[1], "-") {
 			usage()
@@ -77,6 +81,8 @@ func usage() {
 usage:
   guitartutor play [flags] <file.gtab|file.mid>
   guitartutor render [flags] <file.gtab|file.mid>
+  guitartutor devices
+  guitartutor calibrate [flags]
   guitartutor version
 
 play flags:
@@ -85,11 +91,21 @@ play flags:
   -met            start with the metronome on
   -countin <n>    count-in beats before playback starts
   -track <n>      tab track to display, 1-based (default: first user track)
+  -listen         hear your guitar: live pitch detection and scoring
+  -in <id>        capture device for -listen (see devices; default system)
+  -out <id>       playback device for -listen (default system)
 
 render flags:
   -o <path>       output WAV (default out.wav)
   -sf2, -scale, -met, -countin   as above
   -tail <sec>     silence after the last note (default 2.0)
+
+calibrate flags:
+  -in / -out      devices, as above
+
+devices lists audio endpoints; calibrate measures the round-trip latency
+offset used to align scoring (make the output audible to the input first:
+point a mic at the speakers, or wire a loopback).
 `)
 }
 
