@@ -161,8 +161,11 @@ func TestStrumChordVersusSingleNote(t *testing.T) {
 	chord := singleStrum(t, append(silence(0.2), ksChord(0.6, 40, 47, 56)...))
 	single := singleStrum(t, append(silence(0.2), ksNote(40, 0.6)...))
 
-	// Measured: G# 1.00, B 0.92, E 0.78, then a 0.62 gap down to the
-	// strongest unsounded class (F#, the ninth harmonic of E).
+	// Measured: G# 1.00, B 0.88, E 0.81, then a 0.30 gap down to the
+	// strongest unsounded class (D#). The chord-shape corpus in
+	// chordshapes_test.go covers this property across every open shape
+	// and four strum spreads; this case stays because it is the fixture
+	// the clarity comparison below needs.
 	want := []int{4, 11, 8} // E, B, G#
 	top := chromaRank(chord.Chroma)[:3]
 	for _, class := range want {

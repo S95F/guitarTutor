@@ -56,18 +56,67 @@ jobs:
         if: runner.os == 'Windows'
         run: go test ./... -count=1
 
-      # The optional ONNX pitch backend must keep compiling and its
-      # non-inference tests keep passing. This needs no ONNX runtime or
-      # model installed — the real-inference test skips without them —
-      # so it is cheap insurance against binding drift.
-      - name: Build and test the onnx-tagged backend
-        run: go test -tags onnx ./internal/pitchml/... -count=1
+      # COMPILE-DRIFT INSURANCE ONLY — read the next paragraph before
+      # trusting this step. It keeps internal/pitchml compiling and linking
+      # against the current github.com/yalue/onnxruntime_go API.
+      #
+      # What it does NOT verify: the runner has neither an ONNX Runtime
+      # shared library nor a SwiftF0 model, so of the five tests in
+      # swiftf0_onnx_test.go, TestRealInference skips outright,
+      # TestAvailableIsTrueWithTheTag never calls New, and the remaining
+      # three return from resolve() before New reaches initRuntime.
+      # Not one ort.* call executes here, and no method of ortRunner —
+      # resize, probeOutputs, run, releaseSession — runs at all. A
+      # behavioural change in the binding or in ONNX Runtime itself
+      # (tensor lifetimes, output ordering, session semantics) passes this
+      # step green. Only a renamed type or a changed signature fails it.
+      # -v is on so the log shows the skip rather than a bare "ok".
+      #
+      # TODO: real coverage needs three things, two of them outside this
+      # file. (1) here: fetch an ONNX Runtime release behind actions/cache
+      # and export GUITARTUTOR_ONNXRUNTIME. (2) internal/pitchml/testdata:
+      # a committed synthetic .onnx graph — one float input, two float
+      # outputs, a few hundred bytes — which is enough to drive the
+      # session and tensor plumbing and is preferable to downloading
+      # SwiftF0 at CI time. (3) internal/pitchml: a new test asserting
+      # plumbing only (shapes, no-alloc steady state) against that graph.
+      # TestRealInference cannot be that test — it asserts SwiftF0-grade
+      # accuracy (220 Hz within 50 cents), which a stub graph fails rather
+      # than skips, so wiring a stub model into it would turn CI red.
+      - name: Build and test the onnx-tagged backend (compile drift only)
+        run: go test -tags onnx ./internal/pitchml/... -count=1 -v
 
-      # The untagged binary must never link an ONNX runtime.
+      # The untagged build must never link an ONNX runtime: the onnx tag
+      # gates the only file that imports the binding, and a stray import
+      # from an untagged file would put a dlopen'd shared library into the
+      # default single-binary build.
+      #
+      # Scoped to ./... deliberately. This check used to list the deps of
+      # ./cmd/guitartutor, which does not import internal/pitchml at all
+      # (measured: 0 of its 270 deps), so it could never observe the leak
+      # it exists to police.
+      #
+      # go list's output lands in a variable BEFORE it is tested. `set -e`
+      # does not apply to a command in an `if` condition, and a pipeline's
+      # status is its last command's, so `if go list ... | grep -q ...`
+      # exits 0 when go list itself fails — a broken check reporting
+      # success. The tagged lookup afterwards is a positive control: if
+      # the import path ever stops matching anything, a clean negative
+      # result above proves nothing.
       - name: Assert the default build stays ONNX-free
         if: runner.os == 'Linux'
+        shell: bash
         run: |
-          if go list -deps ./cmd/guitartutor | grep -q onnxruntime_go; then
-            echo "::error::the default build pulled in onnxruntime_go; the onnx build tag leaked"
+          set -euo pipefail
+          forbidden=github.com/yalue/onnxruntime_go
+          deps="$(go list -deps ./...)"
+          if printf '%s\n' "$deps" | grep -qxF "$forbidden"; then
+            echo "::error::the default build pulled in $forbidden; the onnx build tag leaked"
             exit 1
           fi
+          tagged="$(go list -deps -tags onnx ./internal/pitchml/...)"
+          if ! printf '%s\n' "$tagged" | grep -qxF "$forbidden"; then
+            echo "::error::the onnx-tagged build no longer depends on $forbidden, so the check above proves nothing; correct the import path in this step"
+            exit 1
+          fi
+          echo "checked $(printf '%s\n' "$deps" | wc -l) packages in the untagged build: no $forbidden"

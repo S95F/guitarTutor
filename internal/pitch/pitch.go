@@ -40,14 +40,21 @@ type Config struct {
 	NoiseFloorDB float64
 	// Strums enables chroma accumulation and Strum emission (Phase 4
 	// chord verification). Off by default: it costs a spectral fold on
-	// each hop of a strum span — and, with an Estimator that would
-	// otherwise skip it, the FFT those hops need — while callers that
-	// only track single notes never look at the result.
+	// every hop — not just the hops of a span, because the hop BEFORE an
+	// onset is the baseline the span subtracts, and which hop that is
+	// only becomes known once the onset fires — and, with an Estimator
+	// that would otherwise skip it, the FFT each of those folds needs.
+	// Callers that only track single notes never look at the result.
 	Strums bool
 	// StrumWindowHops is how many hops of chroma are folded into a
-	// Strum after its onset. 0 takes the default (4 hops ~ 40 ms at the
-	// default hop) — long enough for every string of a strum to speak,
-	// short enough not to swallow the next beat at practice tempos.
+	// Strum, once the span's lead-in (strumSkipHops) has elapsed. 0
+	// takes the default (8 hops ~ 80 ms at the default hop). Together
+	// with that lead-in it puts the Strum ~160 ms after the attack:
+	// long enough for every string of a downstroke to speak and for the
+	// pick transient to be well behind, short enough not to swallow the
+	// next beat at practice tempos. See strumSkipHops for the measured
+	// trade-off — shortening this is how you would trade chord-scoring
+	// accuracy back for latency.
 	StrumWindowHops int
 	// Estimator swaps the single-window pitch estimator. Nil selects the
 	// built-in MPM implementation; internal/pitchml provides an ONNX

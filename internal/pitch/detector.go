@@ -53,6 +53,105 @@ const (
 	onsetSmoothing = 0.7
 )
 
+// Onset flux tunables. The RMS trigger above is level-based, and level is
+// exactly what a chord change at practice tempo does NOT provide: strum a
+// new shape while the old one still rings and the broadband level barely
+// moves — worse, the smoothed level the jump is measured against was just
+// raised by the chord that is still sounding. No onset fires, no Strum is
+// emitted, and every note of the new chord scores a plain Miss, which
+// docs/DECISIONS.md D5 calls the worst outcome this project can produce.
+//
+// Half-wave-rectified spectral flux is the level-independent companion:
+// only bins that GAINED magnitude since the previous hop count, so a
+// decaying note (every bin falling) scores ~0 no matter how loud it is,
+// while new strings appearing score high no matter how quiet they are.
+// Normalizing by the hop's own total magnitude makes the trigger scale
+// free, so one threshold works from bedroom level to full output.
+const (
+	// onsetFluxThreshold is the fraction of a hop's (Hann-smoothed)
+	// magnitude that must be NEW — risen since the previous hop — to
+	// count as an attack on its own.
+	//
+	// Measured over the chord corpus: the smallest flux any chord change
+	// over a ringing chord produced is 0.245, the largest any SUSTAINING
+	// chord produced is 0.197, a single note's decay peaks at 0.003, a
+	// ±30-cent vibrato at 0.027 and a two-semitone bend at 0.007. The
+	// end-to-end sweep is flat from 0.20 to 0.24 (32/32 chord changes
+	// caught, 0 spurious onsets over 32 sustained chords plus the note,
+	// vibrato and bend signals); 0.20 is the low end of that plateau,
+	// chosen because it also catches the shortest gap tested — a new
+	// chord 300 ms after the last — 18/18 instead of 15/18.
+	onsetFluxThreshold = 0.20
+	// onsetFluxRatio additionally requires the hop to be this much
+	// fluxier than the running average. The absolute threshold above was
+	// measured on a synth whose strings beat against each other in a
+	// known way; a real instrument, room, or amp will sit at some other
+	// baseline, and this makes the trigger track it instead of assuming
+	// it. Kept mild (1.2) so it cannot veto a genuine change.
+	onsetFluxRatio = 1.20
+	// onsetFluxSmoothing is the one-pole coefficient of that running
+	// average (higher = slower). At the default hop its time constant is
+	// ~33 ms, long enough to average the texture and short enough that
+	// one attack's flux does not mask the next chord.
+	onsetFluxSmoothing = 0.7
+	// onsetFluxFloorMult keeps flux from arming on near-silence, where
+	// the normalization divides by almost nothing and noise looks like an
+	// attack: the hop must be at least this far above the noise floor.
+	// The level trigger already covers attacks out of silence.
+	onsetFluxFloorMult = 2.0
+	// onsetFluxRefractorySeconds is the flux trigger's own, longer
+	// refractory. A downstroke is not an instant: at a 20 ms spread the
+	// sixth string speaks 100 ms after the first, and every one of those
+	// strings is genuinely new spectral energy. Without a refractory
+	// covering the whole sweep the flux trigger fires a second time
+	// mid-strum and splits one chord into two Strums. The level
+	// trigger's shorter refractory is unchanged, so fast repeated
+	// picking still registers.
+	onsetFluxRefractorySeconds = 0.15
+	// onsetFluxMaxHz tops the flux band. Wider than chromaMaxHz on
+	// purpose: dense upper partials are bleed to a pitch-class fold but
+	// evidence to a "did the spectrum change" test.
+	onsetFluxMaxHz = 2500
+)
+
+// strumSkipHops is how many hops after the onset hop are dropped before
+// chroma accumulation starts. With Config.StrumWindowHops it sets the
+// Strum's latency: the span ends (strumSkipHops + StrumWindowHops) hops
+// after the onset hop, and the Strum is emitted then.
+//
+// It used to be 1 — "skip the onset hop itself" — which folded the attack
+// transient rather than the chord. Two things go wrong at 1. First, a
+// window is wider than a hop: at Window 2048 and Hop 480 it spans 4.3
+// hops, so hops 1 through 4 after the onset all STRADDLE the attack, each
+// one part pre-attack (silence, or worse, the previous chord) and part
+// pick noise. Second, a real downstroke is not an instant — at a 20 ms
+// inter-string spread the sixth string speaks 100 ms, ten hops, after the
+// first — so an early fold credits the last strings struck a fraction of
+// what it credits the first, and the scorer calls them Miss.
+//
+// 8 hops puts the earliest folded window at 47–90 ms after the attack:
+// clear of the transient, and past the sweep. Measured over the whole
+// chord corpus (8 shapes x 4 spreads, TestChordCorpusSoundedClassesRankFirst):
+//
+//	skip=1  span=4   28 false misses, 19 of 32 combinations wrong
+//	skip=4  span=4   10 false misses,  8 wrong
+//	skip=6  span=8    0 false misses, worst margin +0.026
+//	skip=8  span=8    0 false misses, worst margin +0.084   <- chosen
+//	skip=8  span=12   0 false misses, worst margin +0.100
+//
+// The latency this buys costs 160 ms from attack to Strum (8 + 8 hops at
+// 10 ms), against 50 ms before. That is a real cost and it was accepted
+// deliberately: a Strum is not the feedback path a player feels — Frames
+// and the f0 tracker still report within ~25–50 ms, and Strum.Frame
+// carries the ONSET's stamp, so scoring places the event at the right
+// moment however late the evidence arrives. What a longer span buys is
+// the difference between telling a player who nailed an open G that they
+// missed the D string and not doing that (docs/DECISIONS.md D5). 160 ms
+// also stays clear of the next beat: eighth notes at 120 bpm are 250 ms
+// apart, and an onset inside an open span truncates it rather than
+// merging, so a faster player loses span length, not Strums.
+const strumSkipHops = 8
+
 // A Detector turns a live sample stream into per-hop Frames. Feed it
 // arbitrary-length chunks; it buffers internally and emits one Frame per
 // hop. Not safe for concurrent use; feed it from one goroutine.
@@ -63,6 +162,7 @@ type Detector struct {
 	noiseFloor     float64 // linear RMS gate from Config.NoiseFloorDB
 	jumpRatio      float64 // linear form of onsetJumpDB
 	refractory     int64   // onset refractory period in samples
+	fluxRefractory int64   // flux-trigger refractory period in samples
 
 	total     int64 // input samples consumed so far
 	untilNext int   // samples until the next analysis window completes
@@ -88,11 +188,25 @@ type Detector struct {
 	prevHop     float64 // previous hop's RMS, for the rising-edge test
 	lastOnset   int64   // center stamp of the last onset
 
+	// Spectral-flux onset state; only used when the spectrum is computed
+	// (needSpectrum), which is every ungated hop on the built-in path.
+	needSpectrum bool
+	fluxLo       int       // first bin of the flux band
+	fluxHi       int       // last bin of the flux band (inclusive)
+	prevMag      []float64 // previous hop's |X(k)| over that band
+	prevMagOK    bool      // prevMag holds a usable previous hop
+	curMag       []float64 // this hop's Hann-smoothed |X(k)| over that band
+	lastFlux     float64   // most recent flux value (tests only)
+	smoothedFlux float64   // smoothed flux, the adaptive trigger's baseline
+
 	// Chroma/strum accumulation, all nil/zero unless Config.Strums.
-	chroma     *chromaFold
-	acc        [PitchClasses]float64 // unnormalized chroma of the open span
-	accActive  bool
-	accHops    int   // folded hops so far; -1 skips the onset hop itself
+	chroma    *chromaFold
+	acc       [PitchClasses]float64 // unnormalized chroma of the open span
+	accEarly  [PitchClasses]float64 // chroma of the skipped lead-in, as a fallback
+	accActive bool
+	// accHops counts hops since the onset hop: negative while the span
+	// is still inside strumSkipHops, then the number folded so far.
+	accHops    int
 	accFrame   int64 // the onset's stamp, which the Strum carries
 	accRMS     float64
 	accClarity float64
@@ -108,20 +222,21 @@ func NewDetector(cfg Config) *Detector {
 	cfg = cfg.withDefaults()
 	w := cfg.Window
 	d := &Detector{
-		cfg:        cfg,
-		noiseFloor: math.Pow(10, cfg.NoiseFloorDB/20),
-		jumpRatio:  math.Pow(10, float64(onsetJumpDB)/20),
-		refractory: int64(onsetRefractorySeconds * float64(cfg.SampleRate)),
-		untilNext:  w,
-		ring:       make([]float64, w),
-		fft:        fourier.NewFFT(2 * w),
-		padded:     make([]float64, 2*w),
-		coeff:      make([]complex128, w+1),
-		acf:        make([]float64, 2*w),
-		win:        make([]float64, w),
-		candLag:    make([]float64, 0, 64),
-		candVal:    make([]float64, 0, 64),
-		lastOnset:  math.MinInt64 / 2,
+		cfg:            cfg,
+		noiseFloor:     math.Pow(10, cfg.NoiseFloorDB/20),
+		jumpRatio:      math.Pow(10, float64(onsetJumpDB)/20),
+		refractory:     int64(onsetRefractorySeconds * float64(cfg.SampleRate)),
+		fluxRefractory: int64(onsetFluxRefractorySeconds * float64(cfg.SampleRate)),
+		untilNext:      w,
+		ring:           make([]float64, w),
+		fft:            fourier.NewFFT(2 * w),
+		padded:         make([]float64, 2*w),
+		coeff:          make([]complex128, w+1),
+		acf:            make([]float64, 2*w),
+		win:            make([]float64, w),
+		candLag:        make([]float64, 0, 64),
+		candVal:        make([]float64, 0, 64),
+		lastOnset:      math.MinInt64 / 2,
 	}
 	d.tauMin = int(float64(cfg.SampleRate) / cfg.MaxHz)
 	if d.tauMin < 2 {
@@ -154,6 +269,38 @@ func NewDetector(cfg Config) *Detector {
 		}
 		d.chroma = newChromaFold(cfg.SampleRate, 2*w, cfg.MinHz, hi)
 		d.strums = make([]Strum, 0, 8)
+	}
+	// The spectrum feeds three consumers now: the MPM autocorrelation,
+	// the chroma fold, and the flux onset trigger. The built-in path
+	// computes it on every ungated hop anyway; an external estimator
+	// only pays for it when Strums is on, and then on every hop rather
+	// than only inside a span, because the pre-onset baseline and the
+	// flux trigger both need the hops BEFORE an onset is known about.
+	d.needSpectrum = cfg.Estimator == nil || cfg.Strums
+	if d.needSpectrum {
+		// Flux band: the same range the chroma folds, which is where a
+		// guitar's note-defining partials live. Going higher would let
+		// pick scrape and string squeak trigger onsets.
+		binHz := float64(cfg.SampleRate) / float64(2*w)
+		// The Hann kernel reads two bins either side, so the band keeps
+		// that much headroom inside the transform.
+		d.fluxLo = int(math.Ceil(cfg.MinHz / binHz))
+		if d.fluxLo < 2 {
+			d.fluxLo = 2
+		}
+		fhi := float64(onsetFluxMaxHz)
+		if cfg.MaxHz > fhi {
+			fhi = cfg.MaxHz
+		}
+		d.fluxHi = int(math.Floor(fhi / binHz))
+		if d.fluxHi > w-2 {
+			d.fluxHi = w - 2
+		}
+		if d.fluxHi < d.fluxLo {
+			d.fluxHi = d.fluxLo
+		}
+		d.prevMag = make([]float64, d.fluxHi+1)
+		d.curMag = make([]float64, d.fluxHi+1)
 	}
 	if cfg.Estimator != nil {
 		d.winF32 = make([]float32, w)
@@ -189,9 +336,10 @@ func (d *Detector) Process(samples []float32) []Frame {
 // Config.Strums is set.
 //
 // "Completed" means the strum's whole accumulation window has been fed, so
-// a Strum surfaces about StrumWindowHops hops after its onset and carries
-// that onset's frame stamp. An onset in the last few hops of a stream
-// never completes and is never reported.
+// a Strum surfaces about (strumSkipHops + StrumWindowHops) hops after its
+// onset — ~160 ms at the defaults — and carries that onset's frame stamp,
+// not the stamp of the hop that completed it. An onset in the last few
+// hops of a stream never completes and is never reported.
 func (d *Detector) Strums() []Strum { return d.strums }
 
 // EstimatorName identifies the pitch estimator in use — Config.Estimator's
@@ -219,14 +367,20 @@ func (d *Detector) analyze() Frame {
 func (d *Detector) beginStrum(center int64) {
 	d.finishStrum()
 	d.acc = [PitchClasses]float64{}
+	d.accEarly = [PitchClasses]float64{}
 	d.accActive = true
-	// -1 skips the onset hop's own window, which is mostly pre-attack
-	// (the attack only just entered its last hop) and whose spectrum is
-	// therefore the pick transient rather than the strings.
-	d.accHops = -1
+	// Hops -strumSkipHops .. -1 are dropped: the onset hop's window and
+	// the few after it straddle the attack (a window is wider than a
+	// hop), and a real downstroke is still sweeping across the strings
+	// through them. See strumSkipHops.
+	d.accHops = -strumSkipHops
 	d.accFrame = center
 	d.accRMS = 0
 	d.accClarity = 0
+	// Arm the pre-onset baseline: the last hop observed before this
+	// onset, whose window ends where the attack begins, so it holds the
+	// PREVIOUS chord alone (or, from silence, nothing at all).
+	d.chroma.armBaseline()
 }
 
 // advanceStrum credits one analyzed hop to the open span and emits the
@@ -235,15 +389,20 @@ func (d *Detector) advanceStrum(f *Frame) {
 	if !d.accActive {
 		return
 	}
-	if d.accHops < 0 {
-		d.accHops = 0 // the onset hop, skipped
-		return
-	}
+	// RMS and Clarity cover the WHOLE span, lead-in included: the peak
+	// level of a strum is at the attack, in exactly the hops the chroma
+	// fold skips, and a Strum that under-reported its own loudness would
+	// misinform anything scoring dynamics. It also means a span
+	// truncated before its folding hops still carries a real level.
 	if f.RMS > d.accRMS {
 		d.accRMS = f.RMS
 	}
 	if f.Clarity > d.accClarity {
 		d.accClarity = f.Clarity
+	}
+	if d.accHops < 0 {
+		d.accHops++ // still inside the skipped lead-in
+		return
 	}
 	d.accHops++
 	if d.accHops >= d.cfg.StrumWindowHops {
@@ -252,13 +411,27 @@ func (d *Detector) advanceStrum(f *Frame) {
 }
 
 // finishStrum emits the open span, if any, as a Strum.
+//
+// A span truncated by the next onset before strumSkipHops had elapsed has
+// nothing in the main accumulator, and reporting an all-zero Chroma would
+// be the worst possible answer: the scorer would find none of the expected
+// classes and call every note of a chord the player did play a Miss
+// (docs/DECISIONS.md D5). So the lead-in is accumulated too, separately,
+// and stands in when the span never reached its folding hops. That
+// evidence is exactly the attack-transient-contaminated fold this change
+// set out to stop using — but as the fallback for playing faster than
+// strumSkipHops it is far better than nothing.
 func (d *Detector) finishStrum() {
 	if !d.accActive {
 		return
 	}
+	acc := &d.acc
+	if d.accHops <= 0 {
+		acc = &d.accEarly
+	}
 	d.strums = append(d.strums, Strum{
 		Frame:   d.accFrame,
-		Chroma:  normalizeChroma(&d.acc),
+		Chroma:  normalizeChroma(acc),
 		RMS:     d.accRMS,
 		Clarity: d.accClarity,
 	})
@@ -266,8 +439,10 @@ func (d *Detector) finishStrum() {
 }
 
 // spectrum fills d.coeff with the power spectrum |X(k)|^2 of the current
-// window, zero-padded to 2W. Both the MPM autocorrelation (which inverts
-// it) and the chroma fold (which reads it) run off this one transform.
+// window, zero-padded to 2W. Three consumers run off this one transform:
+// the MPM autocorrelation (which inverts it), the chroma fold (which reads
+// it), and the flux onset trigger — which reads the COMPLEX coefficients
+// first, in hannMags, before they are squared in place.
 func (d *Detector) spectrum() {
 	w := d.cfg.Window
 	copy(d.padded, d.win)
@@ -275,10 +450,72 @@ func (d *Detector) spectrum() {
 		d.padded[i] = 0
 	}
 	d.fft.Coefficients(d.coeff, d.padded)
+	if d.curMag != nil {
+		d.hannMags()
+	}
 	for i, c := range d.coeff {
 		re, im := real(c), imag(c)
 		d.coeff[i] = complex(re*re+im*im, 0)
 	}
+}
+
+// hannMags fills d.curMag over the flux band with the magnitudes the
+// transform WOULD have produced under a Hann window, at the cost of three
+// multiply-adds per bin and no second FFT.
+//
+// Why the flux trigger needs one when nothing else here does: the analysis
+// window is rectangular, so a partial sitting between bin centers both
+// leaks across the spectrum and loses amplitude to scalloping. The chroma
+// fold is immune — it picks peaks and interpolates, and never compares one
+// hop against another — but flux is a hop-to-hop DIFFERENCE, and under a
+// rectangular window a partial that merely SLIDES (vibrato, a bend, a
+// string settling after the attack) redistributes enough energy to look
+// like a new note. Measured on a 220 Hz sine with a ±30-cent 5 Hz vibrato:
+// rectangular flux peaks at 0.244 and fires seven spurious onsets in 1.4 s;
+// the Hann-smoothed flux over the same signal stays low enough to fire
+// none, while a chord change over a ringing chord is barely affected.
+//
+// The kernel: a periodic Hann of length W is 0.5 - 0.5*cos(2*pi*n/W), and
+// that cosine is bin 2 of the 2W-point transform the detector already
+// computes, so windowing is the convolution
+// X_hann(k) = 0.5*X(k) - 0.25*X(k-2) - 0.25*X(k+2).
+func (d *Detector) hannMags() {
+	for k := d.fluxLo; k <= d.fluxHi; k++ {
+		c := 0.5*d.coeff[k] - 0.25*(d.coeff[k-2]+d.coeff[k+2])
+		d.curMag[k] = math.Hypot(real(c), imag(c))
+	}
+}
+
+// spectralFlux returns this hop's half-wave-rectified spectral flux — the
+// share of the hop's total magnitude that ROSE since the previous hop —
+// and rolls d.prevMag forward. It returns 0 when there is no usable
+// previous hop (start of stream, or the first hop after a gated one), so
+// the level trigger alone handles attacks out of silence.
+//
+// Half-wave rectification is what makes this a chord-change detector
+// rather than a second loudness meter: falling bins contribute nothing, so
+// a note decaying from full volume scores near zero while a new string
+// added under a ringing chord scores high. Normalizing by the hop's own
+// total magnitude removes absolute level, so one threshold serves every
+// playing dynamic.
+func (d *Detector) spectralFlux() float64 {
+	sum, risen := 0.0, 0.0
+	for k := d.fluxLo; k <= d.fluxHi; k++ {
+		m := d.curMag[k]
+		sum += m
+		if diff := m - d.prevMag[k]; diff > 0 {
+			risen += diff
+		}
+		d.prevMag[k] = m
+	}
+	usable := d.prevMagOK
+	d.prevMagOK = true
+	if !usable || sum <= 0 {
+		d.lastFlux = 0
+		return 0
+	}
+	d.lastFlux = risen / sum
+	return d.lastFlux
 }
 
 // analyzeWindow runs the full per-hop pipeline — energy gate, onset
@@ -308,15 +545,41 @@ func (d *Detector) analyzeWindow() Frame {
 	center := d.total - int64(w/2)
 	frame := Frame{Frame: center, RMS: rms}
 
-	// Onset: the hop's RMS jumps by onsetJumpDB over the smoothed level
-	// (never comparing against less than the noise floor, so silence
-	// cannot arm hair-trigger onsets), on a rising edge, outside the
-	// refractory period.
+	gated := rms < d.noiseFloor
+
+	// The transform comes first now: the flux onset trigger reads it,
+	// the chroma fold reads it, and (on the built-in path) the
+	// autocorrelation inverts it. A gated window skips it entirely, so
+	// silence still costs nothing.
+	flux := 0.0
+	if gated || !d.needSpectrum {
+		d.prevMagOK = false
+	} else {
+		d.spectrum()
+		flux = d.spectralFlux()
+	}
+
+	// Onset, two independent triggers sharing one refractory period:
+	//
+	//   level — the hop's RMS jumps by onsetJumpDB over the smoothed
+	//   level (never compared against less than the noise floor, so
+	//   silence cannot arm hair-trigger onsets), on a rising edge. This
+	//   catches attacks out of silence and dynamic accents.
+	//
+	//   flux — a large fraction of the hop's magnitude is NEW since the
+	//   previous hop. This catches the case the level trigger cannot see
+	//   at all: a chord change at constant loudness, where the smoothed
+	//   level was already raised by the chord that is still ringing.
 	ref := d.smoothedHop
 	if ref < d.noiseFloor {
 		ref = d.noiseFloor
 	}
-	if hopRMS > ref*d.jumpRatio && hopRMS > d.prevHop && center-d.lastOnset >= d.refractory {
+	levelOnset := hopRMS > ref*d.jumpRatio && hopRMS > d.prevHop &&
+		center-d.lastOnset >= d.refractory
+	fluxOnset := flux > onsetFluxThreshold && flux > onsetFluxRatio*d.smoothedFlux &&
+		hopRMS > d.noiseFloor*onsetFluxFloorMult &&
+		center-d.lastOnset >= d.fluxRefractory
+	if levelOnset || fluxOnset {
 		frame.Onset = true
 		d.lastOnset = center
 		if d.chroma != nil {
@@ -325,36 +588,41 @@ func (d *Detector) analyzeWindow() Frame {
 	}
 	d.prevHop = hopRMS
 	d.smoothedHop = onsetSmoothing*d.smoothedHop + (1-onsetSmoothing)*hopRMS
+	d.smoothedFlux = onsetFluxSmoothing*d.smoothedFlux + (1-onsetFluxSmoothing)*flux
 
-	if rms < d.noiseFloor {
-		return frame // gated: unvoiced, no pitch analysis
+	// The chroma pass: every ungated hop refreshes the fold's baseline
+	// candidate, and hops inside an open span (beginStrum, just above,
+	// left the onset hop and strumSkipHops after it outside one) are
+	// also folded into the accumulator.
+	if d.chroma != nil {
+		switch {
+		case gated:
+			d.chroma.clearBaseline()
+		case !d.accActive:
+			d.chroma.hop(d.coeff, nil)
+		case d.accHops >= 0:
+			d.chroma.hop(d.coeff, &d.acc)
+		default:
+			// Inside the skipped lead-in: fold it anyway, into the
+			// fallback accumulator finishStrum uses only for a span
+			// truncated before it reached its real hops.
+			d.chroma.hop(d.coeff, &d.accEarly)
+		}
 	}
 
-	// Chroma needs the same spectrum the autocorrelation does, so hops
-	// inside an open strum span pay for the transform even on the
-	// external-estimator path (which otherwise skips it entirely).
-	foldChroma := d.chroma != nil && d.accActive && d.accHops >= 0
+	if gated {
+		return frame // unvoiced, no pitch analysis
+	}
 
 	if d.cfg.Estimator != nil {
-		if foldChroma {
-			d.spectrum()
-			d.chroma.fold(d.coeff, &d.acc)
-		}
 		return d.estimateExternal(frame)
 	}
 
 	tauLim := d.tauMax + 1
 
-	// r(tau) by FFT: spectrum zero-pads to 2W so the circular correlation
-	// equals the linear one and leaves the power spectrum in d.coeff;
-	// Sequence inverts it. The gonum transform is unnormalized, hence the
-	// 1/(2W).
-	d.spectrum()
-	if foldChroma {
-		// Before Sequence, which reads d.coeff without touching it —
-		// the fold and the autocorrelation share one transform.
-		d.chroma.fold(d.coeff, &d.acc)
-	}
+	// r(tau) from the power spectrum in d.coeff: the window zero-pads to
+	// 2W so the circular correlation equals the linear one, and Sequence
+	// inverts it. The gonum transform is unnormalized, hence the 1/(2W).
 	d.fft.Sequence(d.acf, d.coeff)
 	inv := 1 / float64(2*w)
 	for tau := 0; tau <= tauLim; tau++ {

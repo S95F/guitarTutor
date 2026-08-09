@@ -43,6 +43,26 @@
 // deadline unmatched but with a Strum recorded in its window, and with
 // chroma energy at its own pitch class, now scores Close instead —
 // erring toward "we heard you" is the direction D5 asks for.
+//
+// One evidence ladder, inside and outside a chord. Chroma presence is
+// graded, never binary: a class that DOMINATES the strum is a Hit, one
+// merely standing above the strum's own background is a Close, and only a
+// class down in that background is a Miss. verifyChord and deadlineResult
+// read the identical ladder, so the same audio means the same thing
+// whether the note happened to belong to a chord group or not. The
+// alternative — chord verification with only Hit and Miss — was both
+// harsher than the fallback path it was meant to improve on and, because
+// chroma weakens sharply for voicings wider than an E shape and for
+// strings struck late in a sweep, a reliable source of the false "you
+// missed" D5 names as the worst failure mode in this package.
+//
+// Background, not peak. Every threshold that decides "present" is measured
+// from the chroma's own background level (its lower-quartile bin) up to
+// its peak, because a strummed chord's octave fold is never quiet: on the
+// measured corpus the QUIETEST bin of a six-string strum still sits at
+// 0.19–0.28 of the peak, so any bare fraction-of-peak floor low enough to
+// respect a real palm mute admits all twelve classes and decides nothing.
+// See chromaStats.
 package practice
 
 import (
@@ -122,6 +142,11 @@ type Config struct {
 	// during chord verification. A fraction rather than an absolute
 	// level because Chroma is normalized per strum, so only ratios are
 	// comparable across strums. 0 takes the default (0.45).
+	//
+	// Clearing it earns a Hit only together with the discrimination test
+	// (see verifyChord): the class must also be at least as strong as the
+	// strongest pitch class the chord does NOT contain. Below it the class
+	// is not condemned, only demoted to the MuteEnergyRatio test.
 	ChordPresenceRatio float64
 	// ChordCorrelationMin is the sanity gate on chord verification: the
 	// Pearson correlation between the Strum's chroma and the expected
@@ -133,10 +158,23 @@ type Config struct {
 	// damped-note path can still credit it. 0 takes the default (0.30);
 	// a perfect match scores 1, flat noise 0, a foreign chord negative.
 	ChordCorrelationMin float64
-	// MuteEnergyRatio is the fraction of the largest chroma bin at which
-	// an unmatched expectation with an onset in its window scores Close
-	// (a damped or palm-muted note) rather than Miss. 0 takes the
-	// default (0.20).
+	// MuteEnergyRatio is the weakest evidence that still scores Close
+	// rather than Miss: the lowest chroma PROMINENCE — the class's
+	// position on the scale running from the chroma's own background
+	// (0) to its largest bin (1), see chromaStats — at which an expected
+	// pitch class counts as heard at all. 0 takes the default (0.10).
+	//
+	// It is deliberately NOT a fraction of the peak. Chroma folds every
+	// partial of every sounding string into twelve bins, so a full strum's
+	// background floor alone reaches 0.19–0.28 of the peak on the measured
+	// corpus: a peak fraction low enough not to deny a genuine palm mute
+	// is cleared by every class including the ones nobody played, which is
+	// how the correlation gate's rejection used to buy nothing (every note
+	// of a rejected chord took a Close at its deadline anyway). Measuring
+	// from the background instead makes the same leniency informative.
+	//
+	// Both the deadline path and chord verification use it, so weak
+	// evidence means Close in both.
 	MuteEnergyRatio float64
 }
 
@@ -159,7 +197,14 @@ const (
 	// binding on a chord that is actually right; it exists to catch the
 	// featureless-chroma and wrong-chord cases, which score 0 and below.
 	defaultChordCorrMin = 0.30
-	defaultMuteEnergy   = 0.20
+	// defaultMuteEnergy is a PROMINENCE, not a peak fraction (see
+	// Config.MuteEnergyRatio): a tenth of the way from the chroma's
+	// background bin to its loudest one. Measured on the voicing corpus in
+	// voicing_test.go, that admits every correctly played string bar one
+	// while cutting the classes it admits overall from 10/12 to 7/12 —
+	// the old 0.20-of-peak floor admitted 11/12 or 12/12 on a full strum,
+	// which is no test at all.
+	defaultMuteEnergy = 0.10
 )
 
 // withDefaults fills zero Config fields with the documented defaults.
@@ -198,18 +243,19 @@ func (cfg Config) withDefaults() Config {
 // be matched, but its deadline drops it instead of scoring a Miss.
 //
 // onset records that a Strum landed inside this expectation's timing
-// window without finalizing it (DetectedStrum). onsetEnergy is the best
-// chroma energy seen at the expectation's OWN pitch class across those
-// strums, as a fraction of that strum's largest bin, and onsetFrames the
-// timing error of the strum that supplied it. Together they are the
+// window without finalizing it (DetectedStrum). onsetProm is the best
+// chroma PROMINENCE seen at the expectation's OWN pitch class across those
+// strums (chromaStats.prominence — background 0, peak 1), and onsetFrames
+// the timing error of the strum that supplied it. Together they are the
 // damped-note evidence Advance uses: an attack in the window plus energy
-// at the right pitch class is a palm mute, not a miss (D5).
+// standing above the strum's background at the right pitch class is a palm
+// mute, not a miss (D5).
 type expectation struct {
 	ev          score.NoteEvent
 	outFrame    int64
 	abandoned   bool
 	onset       bool
-	onsetEnergy float64
+	onsetProm   float64
 	onsetFrames int64
 }
 
@@ -382,19 +428,21 @@ func (s *Scorer) Detected(notes []pitch.Note) {
 // judge all of them — the monophonic tracker cannot report N simultaneous
 // notes by construction. The strum's chroma is correlated against the
 // chord's binary pitch-class template; if that clears
-// ChordCorrelationMin, each expected note is verified INDEPENDENTLY —
-// pitch class at or above ChordPresenceRatio of the largest bin is a Hit,
-// below it a Miss — and all of them finalize from this one strum. The
-// largest in-window chord group wins, nearest in time on a tie. Below the
-// correlation gate nothing is finalized: the chroma is either
-// featureless or belongs to some other chord, and the expectations are
-// left to their deadlines (which see the recorded onset).
+// ChordCorrelationMin, each expected note is verified INDEPENDENTLY on the
+// three-rung ladder in verifyChord — dominant is a Hit, present is a
+// Close, absent from the chroma's own background is a Miss — and all of
+// them finalize from this one strum. The largest in-window chord group
+// wins, nearest in time on a tie. Below the correlation gate nothing is
+// finalized: the chroma is either featureless or belongs to some other
+// chord, and the expectations are left to their deadlines (which see the
+// recorded onset and grade it on the same ladder).
 //
-// A chord Hit means "this pitch class was present in the strum", NOT "in
-// tune to CentsTolerance". Chroma is octave-folded energy and carries no
-// cents at all, so a chord-verified result reports ErrCents 0 with
-// Matched true, and ErrFrames measured from the onset. Do not read a 0
-// there as perfect intonation.
+// A chord Hit means "this pitch class dominated the strum", and a chord
+// Close "it was audible in the strum" — neither means "in tune to
+// CentsTolerance". Chroma is octave-folded energy and carries no cents at
+// all, so a chord-verified result reports ErrCents 0 with Matched true,
+// and ErrFrames measured from the onset. Do not read a 0 there as perfect
+// intonation.
 //
 // SINGLE NOTES are deliberately not finalized here. The monophonic path
 // judges them strictly better — it has cents — and it is worth waiting
@@ -435,15 +483,12 @@ func (s *Scorer) DetectedStrum(st pitch.Strum) {
 	// Record the onset on every candidate BEFORE any finalizing, so the
 	// indices in cand stay valid; whatever the chord path then finalizes
 	// leaves the pending set and takes its recording with it.
-	peak := chromaPeak(st.Chroma)
+	stats := chromaStatsOf(st.Chroma)
 	for _, j := range cand {
 		exp := &s.pending[j]
-		e := 0.0
-		if peak > 0 {
-			e = float64(st.Chroma[pitch.ChromaOf(exp.ev.Key)]) / peak
-		}
-		if !exp.onset || e > exp.onsetEnergy {
-			exp.onsetEnergy = e
+		p := stats.prominence(float64(st.Chroma[pitch.ChromaOf(exp.ev.Key)]))
+		if !exp.onset || p > exp.onsetProm {
+			exp.onsetProm = p
 			exp.onsetFrames = stOut - exp.outFrame
 		}
 		exp.onset = true
@@ -468,15 +513,47 @@ func (s *Scorer) DetectedStrum(st pitch.Strum) {
 		}
 	}
 	if group >= 0 {
-		s.verifyChord(st, stOut, s.pending[group].ev.Start, s.pending[group].outFrame, peak)
+		s.verifyChord(st, stOut, s.pending[group].ev.Start, s.pending[group].outFrame, stats)
 	}
 }
 
 // verifyChord judges every pending expectation at (start, outFrame) from
 // one strum, or leaves them all pending if the strum is not credibly that
 // chord. Caller holds mu.
-func (s *Scorer) verifyChord(st pitch.Strum, stOut, start, outFrame int64, peak float64) {
-	if peak <= 0 {
+//
+// Three outcomes per note, the same ladder deadlineResult uses:
+//
+//   - HIT — the class DOMINATES the strum: at or above ChordPresenceRatio
+//     of the peak AND at least as strong as the strongest class the chord
+//     does not contain (the rival). The rival test is what stops a
+//     genuinely different chord from verifying as a full set of Hits.
+//     Correlation alone cannot: an Am strummed where an A was expected
+//     correlates 0.73 with the A template — twice the gate — because two
+//     of its three classes really are sounding, and the per-bin ratio then
+//     passes the third on harmonic mush. Measured, that wrong chord earned
+//     a clean 5-of-5 Hits, and an Em played against an expected open G
+//     earned 6 of 6. Requiring each expected class to out-rank every
+//     unexpected one puts the played C (0.76) above the expected C# (0.53)
+//     and breaks both sweeps (voicing_test.go).
+//
+//   - CLOSE — present but not dominant: prominence at or above
+//     MuteEnergyRatio. This is the outcome the path used to lack, and its
+//     absence made chord verification HARSHER than no verification at all.
+//     Measured on a correctly played open G: verifyChord scored the two B
+//     strings a hard Miss (0.387, under the 0.45 ratio) while the very
+//     same strum, offered to a lone expectation, scored them Close through
+//     deadlineResult. Chroma thins out fast for voicings wider than an E
+//     shape and for strings struck late in a downstroke, so "weak" is the
+//     normal state of a correctly played string, not evidence of failure
+//     (D5).
+//
+//   - MISS — the class is down in the strum's own background. That string
+//     really did not speak.
+//
+// The rival test only ever demotes a Hit to the Close/Miss ladder; it can
+// never turn evidence into a Miss on its own.
+func (s *Scorer) verifyChord(st pitch.Strum, stOut, start, outFrame int64, stats chromaStats) {
+	if stats.peak <= 0 {
 		return // no energy to fold: the strum says nothing
 	}
 	var tmpl [pitch.PitchClasses]bool
@@ -488,18 +565,25 @@ func (s *Scorer) verifyChord(st pitch.Strum, stOut, start, outFrame int64, peak 
 	if chordCorrelation(st.Chroma, tmpl) < s.cfg.ChordCorrelationMin {
 		return
 	}
-	thresh := s.cfg.ChordPresenceRatio * peak
+	hitThresh := s.cfg.ChordPresenceRatio * stats.peak
+	rival := rivalBin(st.Chroma, tmpl)
 	keep := s.pending[:0]
 	for _, exp := range s.pending {
 		if exp.ev.Start != start || exp.outFrame != outFrame {
 			keep = append(keep, exp)
 			continue
 		}
+		v := float64(st.Chroma[pitch.ChromaOf(exp.ev.Key)])
 		r := NoteResult{Event: exp.ev, OutFrame: exp.outFrame, Verdict: VerdictMiss}
-		if float64(st.Chroma[pitch.ChromaOf(exp.ev.Key)]) >= thresh {
+		switch {
+		case v >= hitThresh && v >= rival:
+			r.Verdict = VerdictHit
+		case stats.prominence(v) >= s.cfg.MuteEnergyRatio:
+			r.Verdict = VerdictClose
+		}
+		if r.Verdict != VerdictMiss {
 			// ErrCents stays 0: chroma is octave-folded energy and
 			// knows nothing about intonation (see DetectedStrum).
-			r.Verdict = VerdictHit
 			r.Matched = true
 			r.ErrFrames = stOut - exp.outFrame
 		}
@@ -508,18 +592,75 @@ func (s *Scorer) verifyChord(st pitch.Strum, stOut, start, outFrame int64, peak 
 	s.pending = keep
 }
 
-// chromaPeak returns the largest bin. Chroma is documented normalized to
-// a peak of 1, but every threshold here is expressed against the measured
-// peak so an un-normalized or all-zero chroma degrades safely instead of
-// declaring every pitch class present.
-func chromaPeak(ch pitch.Chroma) float64 {
-	peak := 0.0
-	for _, v := range ch {
-		if float64(v) > peak {
-			peak = float64(v)
+// chromaStats summarizes one strum's chroma for every presence decision in
+// this file: its largest bin and its BACKGROUND level.
+//
+// The background is the lower-quartile bin (the fourth smallest of the
+// twelve). It exists because a fraction of the peak is the wrong yardstick
+// for "was this class sounding". Chroma folds every partial of every
+// sounding string into twelve bins, so a strummed chord lights all twelve:
+// across the measured voicing corpus (voicing_test.go) the quietest bin of
+// a six-string strum sits at 0.19–0.28 of the peak, and a 0.20-of-peak
+// floor therefore called all twelve classes present. Prominence measures a
+// class on the scale from that background up to the peak instead, so a
+// threshold on it means the same thing on a sparse two-note chroma and on
+// a dense six-string one.
+//
+// A quartile rather than the median because the median of a chord's chroma
+// sits well INSIDE the chord's own energy — on the corpus, correctly
+// played strings routinely land just below it (an open G's B string at
+// 0.39 against a median of 0.35), and a median-relative floor would score
+// them hard Misses. The quartile tracks the noise floor, which is what the
+// Miss verdict is supposed to be about.
+type chromaStats struct {
+	peak float64
+	bg   float64
+}
+
+// chromaStatsOf measures a chroma. Chroma is documented normalized to a
+// peak of 1, but nothing here assumes it: an un-normalized or all-zero
+// chroma degrades safely instead of declaring every pitch class present.
+func chromaStatsOf(ch pitch.Chroma) chromaStats {
+	var sorted [pitch.PitchClasses]float64
+	for i, v := range ch {
+		sorted[i] = float64(v)
+	}
+	// Insertion sort: twelve elements on the stack, no allocation, called
+	// once per strum.
+	for i := 1; i < len(sorted); i++ {
+		v := sorted[i]
+		j := i - 1
+		for ; j >= 0 && sorted[j] > v; j-- {
+			sorted[j+1] = sorted[j]
+		}
+		sorted[j+1] = v
+	}
+	return chromaStats{peak: sorted[len(sorted)-1], bg: sorted[len(sorted)/4]}
+}
+
+// prominence places one bin on the scale from the chroma's background (0)
+// to its peak (1). Below the background it goes negative; a featureless
+// chroma (peak == background, every bin equal) yields 0 for every bin, so
+// noise credits nothing.
+func (s chromaStats) prominence(v float64) float64 {
+	if s.peak <= s.bg {
+		return 0
+	}
+	return (v - s.bg) / (s.peak - s.bg)
+}
+
+// rivalBin returns the strongest bin the template does NOT claim — the bar
+// an expected class must clear to be called dominant rather than merely
+// present. With every class templated (degenerate) there is no rival and
+// it returns 0.
+func rivalBin(ch pitch.Chroma, tmpl [pitch.PitchClasses]bool) float64 {
+	rival := 0.0
+	for i, v := range ch {
+		if !tmpl[i] && float64(v) > rival {
+			rival = float64(v)
 		}
 	}
-	return peak
+	return rival
 }
 
 // chordCorrelation is the Pearson correlation between a strum's chroma
@@ -610,8 +751,11 @@ func (s *Scorer) Advance(inFrame int64) {
 // deadlineResult judges an expectation nothing ever matched.
 //
 // Plain Miss, unless a Strum landed in its window (DetectedStrum) AND
-// that strum carried at least MuteEnergyRatio of its peak at this note's
-// pitch class — the signature of a palm-muted or otherwise damped note,
+// that strum carried at least MuteEnergyRatio of chroma PROMINENCE at this
+// note's pitch class — the class standing above the strum's own background
+// (chromaStats), not merely above a fraction of its peak, which a full
+// strum's harmonic mush clears at every class. This is the
+// signature of a palm-muted or otherwise damped note,
 // which has an unmistakable attack and a fundamental too smothered for
 // the tracker to ever open a note on. Calling that a Miss is the false
 // negative D5 names as the #1 rage-quit cause in this category, so it
@@ -622,9 +766,13 @@ func (s *Scorer) Advance(inFrame int64) {
 //
 // An onset with no energy at the expected class is still a plain Miss:
 // something was struck, but not this note.
+//
+// verifyChord's Close rung is this same test on the same constant, so a
+// note inside a chord group and a note outside one draw the same verdict
+// from the same evidence.
 func (s *Scorer) deadlineResult(exp expectation) NoteResult {
 	r := NoteResult{Event: exp.ev, OutFrame: exp.outFrame, Verdict: VerdictMiss}
-	if exp.onset && exp.onsetEnergy >= s.cfg.MuteEnergyRatio {
+	if exp.onset && exp.onsetProm >= s.cfg.MuteEnergyRatio {
 		r.Verdict = VerdictClose
 		r.Matched = true
 		r.ErrFrames = exp.onsetFrames

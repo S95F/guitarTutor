@@ -139,12 +139,18 @@ func scale(x []float32, g float32) []float32 {
 }
 
 // ksChord renders keys plucked simultaneously, mixed to mono.
+//
+// It renders them from ONE pluck voice (see ksStrum). The obvious
+// alternative — one ksNote per key, summed — is what this used to do, and
+// it lies: every pluck voice seeds its excitation noise identically, so
+// N strings came out as N perfectly correlated copies of the same noise
+// burst. The interference between them is not something a guitar can
+// produce, and it moved the chroma enough to matter: on E2/B2/G#3 the
+// correlated mix ranked F# (a harmonic of E) 0.09 ABOVE the played G#,
+// while the same chord from independent excitations puts G# on top with a
+// 0.30 margin over the strongest unsounded class.
 func ksChord(seconds float64, keys ...int) []float32 {
-	sigs := make([][]float32, len(keys))
-	for i, k := range keys {
-		sigs[i] = ksNote(k, seconds)
-	}
-	return mix(sigs...)
+	return ksStrum(seconds, 0, keys...)
 }
 
 // strumConfig is the default config with Phase 4 strum emission on.
