@@ -1,0 +1,9 @@
+# Normalize text; gofmt canon is LF, so Go sources are always LF.
+* text=auto
+*.go text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.gtab text eol=lf
+*.mid binary
+*.wav binary
+*.sf2 binary
