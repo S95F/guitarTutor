@@ -41,6 +41,14 @@ var (
 	colLoopEdge = color.RGBA{60, 160, 90, 255}
 	colHUD      = color.RGBA{200, 200, 210, 255}
 	colCountIn  = color.RGBA{255, 200, 60, 255}
+
+	// Phase 2 live feedback (live.go).
+	colHit      = color.RGBA{80, 210, 120, 255}  // verdict: hit
+	colClose    = color.RGBA{240, 160, 50, 255}  // verdict: close
+	colMiss     = color.RGBA{235, 80, 80, 255}   // verdict: miss
+	colWaitLo   = color.RGBA{180, 140, 40, 255}  // wait pulse, dim phase
+	colWaitHi   = color.RGBA{255, 245, 180, 255} // wait pulse, bright phase
+	colTuneZone = color.RGBA{40, 90, 55, 255}    // tuner in-tune band
 )
 
 var face = text.NewGoXFace(basicfont.Face7x13)
@@ -56,6 +64,11 @@ type App struct {
 	// config), so the UI mirrors their state for the HUD and toggles.
 	metronome bool
 	ramp      bool
+
+	// liveUI carries the Phase 2 live-feedback state and feed mailbox
+	// (live.go). Its zero value is fully inert: no feeds, Phase 1
+	// behavior.
+	liveUI
 }
 
 // New builds the practice view. track is the index into sc.Tracks to
@@ -102,6 +115,8 @@ func (a *App) barAt(tick int64) int {
 
 // Update handles input. All controls go straight to the engine.
 func (a *App) Update() error {
+	a.frame++
+	a.syncLive()
 	eng, bars := a.eng, a.displayed().Bars
 
 	switch {
@@ -145,6 +160,12 @@ func (a *App) Update() error {
 		a.toggleMetronome()
 	case inpututil.IsKeyJustPressed(ebiten.KeyR):
 		a.toggleRamp()
+	case inpututil.IsKeyJustPressed(ebiten.KeyT):
+		a.tunerView = !a.tunerView
+	case inpututil.IsKeyJustPressed(ebiten.KeyW):
+		if a.waitCtl {
+			a.toggleWait()
+		}
 	case inpututil.IsKeyJustPressed(ebiten.KeyEqual), inpututil.IsKeyJustPressed(ebiten.KeyKPAdd):
 		if a.zoom < 4 {
 			a.zoom *= 1.25
@@ -208,9 +229,19 @@ func (a *App) toggleRamp() {
 // M key toggles from the right place.
 func (a *App) SetInitialMetronome(on bool) { a.metronome = on }
 
-// Draw renders the frame from engine state.
+// Draw renders the frame from engine state. The tuner overlay (T)
+// replaces the tab; the HUD and transport keys stay active either way.
 func (a *App) Draw(screen *ebiten.Image) {
 	screen.Fill(colBG)
+	if a.tunerView {
+		a.drawTuner(screen)
+	} else {
+		a.drawTab(screen)
+	}
+	a.drawHUD(screen)
+}
+
+func (a *App) drawTab(screen *ebiten.Image) {
 	pos := a.eng.PosTick()
 	ppt := a.pxPerTick()
 	phX := float32(screenW * playheadX)
@@ -239,6 +270,7 @@ func (a *App) Draw(screen *ebiten.Image) {
 	}
 
 	// Bars, beats, notes.
+	waiting := a.waitingKeys()
 	for bi, bar := range tr.Bars {
 		barEnd := bar.Start + bar.Len()
 		if barEnd < minTick || bar.Start > maxTick {
@@ -259,12 +291,21 @@ func (a *App) Draw(screen *ebiten.Image) {
 				if n.Tech&score.TechDead != 0 {
 					label = "x"
 				}
+				// Sounding/inferred are the base; a verdict tints
+				// over them (latest wins — loops re-judge each
+				// pass); an active wait point pulses over all.
 				col := colNote
 				if n.Inferred {
 					col = colInferred
 				}
 				if beat.Start <= pos && pos < beat.Start+beat.Dur {
 					col = colSounding
+				}
+				if v, ok := a.verdicts[noteKey{beat.Start, n.String}]; ok {
+					col = verdictColor(v)
+				}
+				if waiting[noteKey{beat.Start, n.String}] {
+					col = a.pulseCol()
 				}
 				// Blank out the string line behind the number.
 				w := float32(8 * len(label))
@@ -283,7 +324,9 @@ func (a *App) Draw(screen *ebiten.Image) {
 	// Playhead.
 	vector.StrokeLine(screen, phX, tabTop-24, phX, float32(tabTop+(nStr-1)*stringGap+24), 2, colPlayhead, false)
 
-	a.drawHUD(screen)
+	if a.eng.Waiting() {
+		drawText(screen, "WAITING", screenW*playheadX-24, tabTop-48, a.pulseCol())
+	}
 }
 
 func (a *App) drawHUD(screen *ebiten.Image) {
@@ -305,7 +348,18 @@ func (a *App) drawHUD(screen *ebiten.Image) {
 	if a.ramp {
 		line1 += " | ramp"
 	}
+	if a.wait {
+		line1 += " | wait"
+	}
+	if a.live {
+		line1 += " | live"
+	}
 	drawText(screen, line1, 16, 16, colHUD)
+
+	if a.live {
+		a.drawLiveHUD(screen)
+		a.drawLegend(screen)
+	}
 
 	for i, t := range a.sc.Tracks {
 		name := t.Name
@@ -323,7 +377,11 @@ func (a *App) drawHUD(screen *ebiten.Image) {
 		drawText(screen, fmt.Sprintf("%s%d %s [%s]", cur, i+1, name, mark), 16, float64(40+16*i), colHUD)
 	}
 
-	help := "space play/pause  arrows seek  up/dn tempo  A/B loop  L clear  M click  R ramp  +/- zoom  1-9 mute  Q quit"
+	help := "space play/pause  arrows seek  up/dn tempo  A/B loop  L clear  M click  R ramp  T tuner"
+	if a.waitCtl {
+		help += "  W wait"
+	}
+	help += "  +/- zoom  1-9 mute  Q quit"
 	drawText(screen, help, 16, screenH-24, colBarline)
 }
 
