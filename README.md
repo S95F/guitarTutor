@@ -51,7 +51,7 @@ guitarTutor aims to fill it with the practice loop every guitarist converges on:
 
 **Phase 5 — the app shell (landed)**
 
-- Start screen with recent pieces, a file browser, and drag-and-drop
+- Start screen with recent pieces, native file-dialog opening, and drag-and-drop
 - In-app settings: audio device pickers, latency calibration in-window, SoundFont, count-in
 - Fixed-BPM entry, track solo, a help overlay, and live warnings surfaced in the UI
 
@@ -106,7 +106,7 @@ Requires Go 1.26+. Phase 1 is pure Go — no C toolchain, no assets to download.
 go build ./cmd/guitartutor
 ```
 
-Run it with no arguments — or double-click the binary — and it opens the start screen: recent pieces, a file browser over the formats it imports, drag-and-drop, and settings (audio devices, latency calibration, SoundFont, count-in) without touching a terminal.
+Run it with no arguments — or double-click the binary — and it opens the start screen: recent pieces, an Open button that browses with the system's own file dialog (filtered to the formats it imports), drag-and-drop onto the window, and settings (audio devices, latency calibration, SoundFont, count-in) without touching a terminal.
 
 ```bash
 ./guitartutor

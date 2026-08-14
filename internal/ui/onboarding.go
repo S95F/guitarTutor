@@ -15,7 +15,6 @@ package ui
 
 import (
 	"github.com/hajimehoshi/ebiten/v2"
-	"github.com/hajimehoshi/ebiten/v2/vector"
 )
 
 // An onboardStep is one line of the getting-started checklist.
@@ -84,8 +83,8 @@ func (b *Browser) stepList() []onboardStep {
 	}
 	steps = append(steps, onboardStep{
 		title:  "Open a piece",
-		detail: "browse on the right, or drop a .gp, .musicxml or .mid file here",
-		act:    func() { b.focus = browserPaneBrowse },
+		detail: "picks with the system's file dialog; dropping a file here works too",
+		act:    func() { b.launchOpenDialog("") },
 	})
 	return steps
 }
@@ -94,10 +93,10 @@ func (b *Browser) stepList() []onboardStep {
 // do is a no-op rather than an error: it is there to be read.
 func (b *Browser) activateStep() {
 	steps := b.stepList()
-	if b.recentSel < 0 || b.recentSel >= len(steps) {
+	if b.sel < 0 || b.sel >= len(steps) {
 		return
 	}
-	if act := steps[b.recentSel].act; act != nil {
+	if act := steps[b.sel].act; act != nil {
 		act()
 	}
 }
@@ -107,8 +106,8 @@ func (b *Browser) drawSteps(screen *ebiten.Image) {
 	steps := b.stepList()
 	for i, st := range steps {
 		y := float32(brwListTop + i*brwRecentRowH)
-		if bg, ok := b.rowBG(browserPaneRecent, i); ok {
-			vector.DrawFilledRect(screen, brwRecentX-4, y-2, brwRecentW+8, brwRecentRowH-2, bg, false)
+		if bg, ok := b.rowBG(i); ok {
+			fillRounded(screen, rect{brwRecentX - 4, float64(y) - 2, brwRecentW + 8, brwRecentRowH - 2}, bg)
 		}
 		mark, markCol := "[ ]", colDim
 		if st.done {

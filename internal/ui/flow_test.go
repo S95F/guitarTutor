@@ -1,9 +1,9 @@
 package ui
 
 // Cross-screen tests: the first-run checklist, the settings screen's
-// mouse, the file picker, and re-opening a piece in place. These are the
-// paths that used to dead-end — the ones where the only way forward was
-// to quit and retype a command line.
+// mouse, and re-opening a piece in place. These are the paths that used
+// to dead-end — the ones where the only way forward was to quit and
+// retype a command line.
 
 import (
 	"os"
@@ -80,15 +80,16 @@ func TestChecklistWithoutAnAudioBackendStatesTheFactInstead(t *testing.T) {
 }
 
 // TestChecklistStepsAreActivatable: Enter on a configuration step opens
-// settings, and Enter on the last one moves to the folder listing.
+// settings, and Enter on the last one launches the OS file dialog.
 func TestChecklistStepsAreActivatable(t *testing.T) {
 	sh := NewShell(Services{Prefs: &settingsFakePrefs{}, Audio: newSettingsAudio()}, nil)
 	b := NewBrowser(sh)
 	opened := 0
 	b.SetSettingsOpener(func() { opened++ })
+	launches := 0
+	b.SetOpenDialog(func(string) { launches++ })
 
-	b.focus = browserPaneRecent
-	b.setSelection(browserPaneRecent, 0)
+	b.setSel(0)
 	if err := b.handleKey(ebiten.KeyEnter); err != nil {
 		t.Fatalf("Enter on step 1: %v", err)
 	}
@@ -96,10 +97,10 @@ func TestChecklistStepsAreActivatable(t *testing.T) {
 		t.Errorf("step 1 opened settings %d times, want 1", opened)
 	}
 
-	b.setSelection(browserPaneRecent, len(b.stepList())-1)
+	b.setSel(len(b.stepList()) - 1)
 	_ = b.handleKey(ebiten.KeyEnter)
-	if b.focus != browserPaneBrowse {
-		t.Error(`the "open a piece" step should move the focus to the folder listing`)
+	if launches != 1 {
+		t.Errorf(`the "open a piece" step launched the file dialog %d times, want 1`, launches)
 	}
 }
 
@@ -241,107 +242,6 @@ func TestSettingsOnCloseRunsOnce(t *testing.T) {
 	if closes != 1 {
 		t.Errorf("the close hook ran %d times, want exactly 1", closes)
 	}
-}
-
-// ---- file picker ---------------------------------------------------------
-
-// pickerFixture builds a picker over a temp tree holding one .sf2 and one
-// file that must not be listed.
-func pickerFixture(t *testing.T) (*FilePicker, string, *string) {
-	t.Helper()
-	dir := t.TempDir()
-	for _, name := range []string{"grand.sf2", "notes.txt"} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.Mkdir(filepath.Join(dir, "more"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	var got string
-	p := NewFilePicker(nil, "CHOOSE", []string{".sf2"}, func(s string) { got = s })
-	p.setDir(dir)
-	return p, dir, &got
-}
-
-// TestFilePickerListsOnlyWhatItWasAskedFor.
-func TestFilePickerListsOnlyWhatItWasAskedFor(t *testing.T) {
-	p, dir, _ := pickerFixture(t)
-	var names []string
-	for _, e := range p.listing {
-		names = append(names, e.name)
-	}
-	for _, want := range []string{"..", "more", "grand.sf2"} {
-		if !containsString(names, want) {
-			t.Errorf("listing %v is missing %q", names, want)
-		}
-	}
-	if containsString(names, "notes.txt") {
-		t.Errorf("listing %v includes a file the picker was not asked for", names)
-	}
-	if p.dir != dir {
-		t.Errorf("picker is in %q, want %q", p.dir, dir)
-	}
-}
-
-// TestFilePickerChoosesAFile.
-func TestFilePickerChoosesAFile(t *testing.T) {
-	p, dir, got := pickerFixture(t)
-	for i, e := range p.listing {
-		if e.name == "grand.sf2" {
-			p.setSel(i)
-		}
-	}
-	if !p.activate() {
-		t.Fatal("choosing a file should finish the picker")
-	}
-	if want := filepath.Join(dir, "grand.sf2"); *got != want {
-		t.Errorf("picker returned %q, want %q", *got, want)
-	}
-}
-
-// TestFilePickerDescendsWithoutChoosing.
-func TestFilePickerDescendsWithoutChoosing(t *testing.T) {
-	p, dir, got := pickerFixture(t)
-	for i, e := range p.listing {
-		if e.name == "more" {
-			p.setSel(i)
-		}
-	}
-	if p.activate() {
-		t.Fatal("entering a folder should not finish the picker")
-	}
-	if p.dir != filepath.Join(dir, "more") {
-		t.Errorf("picker is in %q, want the subfolder", p.dir)
-	}
-	if *got != "" {
-		t.Errorf("nothing was chosen, but the callback got %q", *got)
-	}
-	p.goParent()
-	if p.dir != dir {
-		t.Errorf("backspace left the picker in %q, want %q", p.dir, dir)
-	}
-}
-
-// TestFilePickerCancelsWithoutCallingBack: escape must not look like a
-// choice, or cancelling would silently set a SoundFont.
-func TestFilePickerCancelsWithoutCallingBack(t *testing.T) {
-	p, _, got := pickerFixture(t)
-	if !p.handleKey(ebiten.KeyEscape) {
-		t.Fatal("escape should finish the picker")
-	}
-	if *got != "" {
-		t.Errorf("cancelling reported a choice of %q", *got)
-	}
-}
-
-func containsString(xs []string, want string) bool {
-	for _, x := range xs {
-		if x == want {
-			return true
-		}
-	}
-	return false
 }
 
 // ---- reopening a piece ---------------------------------------------------
@@ -498,20 +398,20 @@ func TestChecklistIsClickable(t *testing.T) {
 	b.SetSettingsOpener(func() { opened++ })
 
 	// Row 1 of the checklist (the calibration step) sits one row down in
-	// the recents pane.
+	// the list.
 	x, y := brwRecentX+10, brwListTop+brwRecentRowH+2
-	pane, i, ok := b.hitTest(x, y)
-	if !ok || pane != browserPaneRecent || i != 1 {
-		t.Fatalf("hitTest over the second checklist step = %v, %d, %v; want the recents pane, row 1", pane, i, ok)
+	i, ok := b.hitTest(x, y)
+	if !ok || i != 1 {
+		t.Fatalf("hitTest over the second checklist step = %d, %v; want row 1", i, ok)
 	}
 
 	// The screen-wide click rule: a click on an unselected row selects it,
 	// a click on the selected row activates it.
-	b.click(pane, i)
+	b.click(i)
 	if opened != 0 {
 		t.Fatalf("selecting a step already opened settings %d times", opened)
 	}
-	b.click(pane, i)
+	b.click(i)
 	if opened != 1 {
 		t.Errorf("activating the calibration step opened settings %d times, want 1", opened)
 	}
@@ -546,20 +446,6 @@ func TestTextMetricsMeasureWhatIsDrawn(t *testing.T) {
 				}
 			}
 		}
-	}
-}
-
-// TestPickerErrorSuppressesRowHits (audit A5): while the unreadable-folder
-// message is showing the rows are not drawn, so a click where a row would
-// have been must not navigate blind.
-func TestPickerErrorSuppressesRowHits(t *testing.T) {
-	p, _, _ := pickerFixture(t)
-	p.dirErr = "access is denied"
-	if _, ok := p.hitTest(uiPadX+10, pkListTop+2); ok {
-		t.Error("a hidden row answered a hit test")
-	}
-	if p.handleMouse(pointer{x: uiPadX + 10, y: pkListTop + 2, down: true, pressed: true}) {
-		t.Error("a click on the error pane finished the picker")
 	}
 }
 

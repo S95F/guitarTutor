@@ -46,6 +46,14 @@ func runShell() error {
 	sh, browser := ui.NewBrowserShell(svc)
 	opener.shell = sh
 	browser.SetSettingsOpener(func() { opener.showSettings(nil) })
+	// Opening a piece goes through the OS file dialog. It blocks while
+	// the user browses, so it runs on its own goroutine and posts the
+	// outcome to the browser's mailbox; the game loop drains it.
+	browser.SetOpenDialog(func(startDir string) {
+		go func() {
+			browser.OfferDialogResult(pickPieceFile(startDir))
+		}()
+	})
 	return sh.Run()
 }
 
@@ -83,8 +91,15 @@ func (o *shellOpener) showSettings(app *ui.App) {
 		return
 	}
 	st := ui.NewSettings(o.shell)
+	// The SoundFont row browses with the OS file dialog. The chosen
+	// callback only posts to the settings screen's mailbox, so calling it
+	// from the dialog goroutine is safe; a cancel simply never calls it.
 	st.SetFilePicker(func(exts []string, chosen func(string)) {
-		o.shell.Show(ui.NewFilePicker(o.shell, "CHOOSE A SOUNDFONT", exts, chosen))
+		go func() {
+			if path := pickSoundFont(); path != "" {
+				chosen(path)
+			}
+		}()
 	})
 	if app != nil {
 		before := o.openTimeSnapshot()

@@ -352,10 +352,10 @@ func (s *Settings) focusFirstUnconfigured() {
 }
 
 // SetFilePicker installs the hook the SoundFont row uses to browse for a
-// .sf2 file. The full file picker belongs to the browser screen, so the
-// integrator wires it here: fn receives the extensions to filter on and a
-// callback to invoke with the chosen path (never invoked if the user
-// cancels). The callback is safe to call from any goroutine — it only
+// .sf2 file. The integrator wires it to the OS file dialog, which blocks
+// while the user browses, so fn must return immediately (start a
+// goroutine) and call chosen with the picked path — or never, if the
+// user cancels. The callback is safe to call from any goroutine: it only
 // posts to a mailbox that the game loop drains. When no picker is
 // installed the SoundFont row shows the current value and offers only
 // "clear".
@@ -1296,7 +1296,7 @@ func (s *Settings) items() []settingsItem {
 	}
 	b.addRow("soundfont", ellipsizeW(s.soundFontText(), 430), colHUD, sfButtons...)
 	if s.pick == nil {
-		b.note("no file chooser is wired in this build; -sf2 on the command line still works", colBarline)
+		b.note("no file dialog is available in this build; -sf2 on the command line still works", colBarline)
 	}
 
 	b.section("PRACTICE")

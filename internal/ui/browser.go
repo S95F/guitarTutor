@@ -1,16 +1,25 @@
 package ui
 
 // The start screen: the first thing a user sees when the binary is
-// launched with no arguments. Two sections side by side — recent pieces
-// on the left, a filtered directory listing on the right — plus
-// drag-and-drop onto the window.
+// launched with no arguments. One list — recently opened pieces, or the
+// getting-started checklist until there are any — beside an open card,
+// plus drag-and-drop onto the window.
 //
-// Everything the screen decides lives in plain methods on Browser
-// (move, activate, setDir, click, handleDrop, handleKey) that take no
-// Ebitengine state and can be driven directly from a test; Update only
-// translates the keyboard and mouse into those calls, and Draw is a
-// projection of the fields they set. That split is what makes the screen
-// testable at all: Ebitengine cannot open a window in a unit test.
+// Opening a file goes through the OPERATING SYSTEM's file dialog, not an
+// in-app directory listing. The screen used to carry its own folder pane
+// and a separate picker screen; both are gone, because a re-implemented
+// file browser is always the worst file browser on the machine — no
+// search, no pins, no network places, none of the muscle memory the real
+// one has earned. The dialog blocks, so the integrator runs it on its
+// own goroutine and posts the outcome to a mailbox this screen drains on
+// the game loop (OfferDialogResult) — the same pattern the settings
+// screen uses for its calibration wizard.
+//
+// Everything the screen decides lives in plain methods (move, activate,
+// click, handleDrop, handleKey, launchOpenDialog) that take no Ebitengine
+// state and can be driven directly from a test; Update only translates
+// the keyboard and mouse into those calls, and Draw is a projection of
+// the fields they set.
 //
 // Drag-and-drop note. ebiten.DroppedFiles returns an fs.FS whose root
 // lists the dropped items by base name only — the real path is not part
@@ -29,25 +38,27 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
 	"github.com/hajimehoshi/ebiten/v2/vector"
 )
 
-// Layout of the two panes, in logical pixels (screenW x screenH).
+// Layout, in logical pixels (screenW x screenH). The recents list owns
+// the left, the open card the right.
 const (
 	brwRecentX    = 24
-	brwRecentW    = 400
-	brwBrowseX    = 456
-	brwBrowseW    = 800
+	brwRecentW    = 600
+	brwCardX      = 672
+	brwCardW      = 584
 	brwListTop    = 156
-	brwRecentRowH = 36
-	brwRecentRows = 11
-	brwBrowseRowH = 22
-	brwBrowseRows = 18
-	brwStatusY    = 578
+	brwRecentRowH = 40
+	brwRecentRows = 10
+	brwStatusY    = 600
 	brwNameScale  = 1.35
+	brwOpenBtnW   = 280.0
+	brwOpenBtnH   = 48.0
 )
 
 // colMissing tints a recent whose file is no longer on disk. Every other
@@ -55,8 +66,9 @@ const (
 var colMissing = color.RGBA{150, 90, 90, 255}
 
 // browserPieceExts is the set of piece formats the application imports.
-// Anything else is hidden from the listing: an unfiltered view of a real
-// Documents folder is unusable.
+// It feeds both the drag-and-drop filter here and, through
+// PieceExtensions, the file dialog's filter — one source of truth, so
+// the dialog can never offer a file the drop path would reject.
 var browserPieceExts = map[string]bool{
 	".gtab":     true,
 	".mid":      true,
@@ -68,6 +80,18 @@ var browserPieceExts = map[string]bool{
 	".xml":      true,
 }
 
+// PieceExtensions returns the piece formats the application imports,
+// sorted, with their leading dots. The integrator builds the OS file
+// dialog's filter from this.
+func PieceExtensions() []string {
+	out := make([]string, 0, len(browserPieceExts))
+	for e := range browserPieceExts {
+		out = append(out, e)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // browserSupported reports whether a file name looks like a piece the
 // application can import. The comparison is case-insensitive, so SONG.GP
 // lists the same as song.gp.
@@ -75,24 +99,13 @@ func browserSupported(name string) bool {
 	return browserPieceExts[strings.ToLower(filepath.Ext(name))]
 }
 
-// A browserEntry is one selectable row: a recent piece, a sub-directory,
-// or a piece file in the current directory.
+// A browserEntry is one selectable row of the recents list.
 type browserEntry struct {
 	name    string // base name, shown prominently
 	path    string // full path, what gets opened
-	parent  string // containing directory, shown dimmed (recents)
-	isDir   bool
-	missing bool // a recent whose file is no longer on disk
+	parent  string // containing directory, shown dimmed
+	missing bool   // a recent whose file is no longer on disk
 }
-
-// browserPane names one of the two sections; Tab moves between them.
-type browserPane int
-
-// The two sections of the start screen.
-const (
-	browserPaneRecent browserPane = iota
-	browserPaneBrowse
-)
 
 // browserRecentRemover is an optional extension of Prefs: an
 // implementation that can drop one entry from the recents list. Prefs
@@ -103,18 +116,24 @@ type browserRecentRemover interface {
 	RemoveRecent(path string)
 }
 
-// A Browser is the start screen and piece browser. It lists recently
-// opened pieces alongside a directory listing filtered to the formats
-// the application imports, opens the selection through the Shell, and
-// reports import errors and warnings inline rather than propagating them
-// — a malformed file must never end the session.
-type Browser struct {
-	sh    *Shell
-	focus browserPane
+// dialogResult is what the file-dialog goroutine posts back: a chosen
+// path, an error worth showing, or neither (the user cancelled).
+type dialogResult struct {
+	path string
+	err  string
+}
 
-	recents   []browserEntry
-	recentSel int
-	recentTop int
+// A Browser is the start screen. It lists recently opened pieces (or the
+// first-run checklist), launches the OS file dialog to open new ones,
+// opens the selection through the Shell, and reports import errors and
+// warnings inline rather than propagating them — a malformed file must
+// never end the session.
+type Browser struct {
+	sh *Shell
+
+	recents []browserEntry
+	sel     int
+	top     int
 	// forgotten holds recents dismissed with Delete, so they stay gone
 	// for this session even when Prefs cannot remove them permanently.
 	// Opening a piece again clears its entry: a pane that keeps hiding a
@@ -131,49 +150,48 @@ type Browser struct {
 	// to count the probes and to stand in for a path that blocks.
 	statFn func(string) (fs.FileInfo, error)
 
-	dir       string
-	listing   []browserEntry
-	browseSel int
-	browseTop int
-	dirErr    string
-
 	errMsg string
 	warns  []string
 
 	settings func()
+	// openDialog launches the OS file dialog rooted at the given
+	// directory. The integrator wires it (SetOpenDialog); it must not
+	// block — it starts a goroutine that eventually posts to
+	// OfferDialogResult. nil means no dialog is available in this build,
+	// and the open card says so instead of silently doing nothing.
+	openDialog func(startDir string)
+	// dialogBusy is true from launch until the result (or cancel) comes
+	// back, so a double-click cannot stack two Explorer windows. Game
+	// loop owned; the mailbox drain clears it.
+	dialogBusy bool
 
 	// helpOpen is the ?/F1 key-binding overlay. While it is up nothing
 	// else on the screen reacts, so a key pressed to dismiss it cannot
 	// also open a piece behind it.
 	helpOpen bool
 
-	// Mouse state, refreshed every frame by handleMouse.
-	ptr       pointer
-	hoverOK   bool
-	hoverPane browserPane
-	hoverIdx  int
-	wheelAcc  float64
+	// Mouse state, refreshed every frame.
+	ptr      pointer
+	hoverIdx int // recents row under the cursor, -1 for none
+	wheelAcc float64
+
+	// mu guards the dialog mailbox, written by the dialog goroutine and
+	// drained by Update on the game loop.
+	mu      sync.Mutex
+	pending *dialogResult
 }
 
-// NewBrowser builds the start screen for sh. It loads the recents list
-// from the shell's preferences and opens the directory listing on the
-// most recent piece's folder, falling back to the user's home directory.
+// NewBrowser builds the start screen for sh, loading the recents list
+// from the shell's preferences.
 func NewBrowser(sh *Shell) *Browser {
-	b := &Browser{sh: sh, forgotten: map[string]bool{}}
+	b := &Browser{sh: sh, forgotten: map[string]bool{}, hoverIdx: -1}
 	b.reloadRecents()
-	b.setDir(b.startDir())
-	// The focus starts on the left pane (the zero value) and stays
-	// there: that pane always has something to select. With pieces
-	// behind you it lists them, and on a first run the getting-started
-	// checklist stands in for them — which is precisely where a
-	// first-time user should land, rather than in a folder listing they
-	// have no reason to trust yet.
 	return b
 }
 
 // NewBrowserShell builds the application host with the start screen as
-// its root, and hands back both so the caller can wire the settings
-// opener.
+// its root, and hands back both so the caller can wire the settings and
+// dialog openers.
 //
 // It exists because of a chicken and egg: NewBrowser needs the Shell it
 // will talk to, and NewShell needs a root screen. The Shell therefore
@@ -203,6 +221,58 @@ func (browserPlaceholder) Draw(dst *ebiten.Image) { dst.Fill(colBG) }
 // it is not drawn.
 func (b *Browser) SetSettingsOpener(fn func()) { b.settings = fn }
 
+// SetOpenDialog installs the OS file dialog launcher behind the open
+// card, the O key, and a dropped folder. fn receives the directory the
+// dialog should start in and must return immediately, posting its
+// outcome to OfferDialogResult from whatever goroutine runs the dialog.
+func (b *Browser) SetOpenDialog(fn func(startDir string)) { b.openDialog = fn }
+
+// OfferDialogResult posts the file dialog's outcome. Safe from any
+// goroutine. An empty path with an empty error is a cancel and does
+// nothing beyond re-arming the dialog.
+func (b *Browser) OfferDialogResult(path, errMsg string) {
+	b.mu.Lock()
+	b.pending = &dialogResult{path: path, err: errMsg}
+	b.mu.Unlock()
+}
+
+// drainDialog applies a posted dialog outcome on the game loop.
+func (b *Browser) drainDialog() {
+	b.mu.Lock()
+	res := b.pending
+	b.pending = nil
+	b.mu.Unlock()
+	if res == nil {
+		return
+	}
+	b.dialogBusy = false
+	switch {
+	case res.err != "":
+		b.errMsg = "could not open the file dialog: " + res.err
+	case res.path != "":
+		b.openPath(res.path)
+	}
+}
+
+// launchOpenDialog starts the OS file dialog rooted where the user's
+// pieces live. A dialog already in flight is left alone: two Explorer
+// windows fighting over one mailbox helps nobody.
+func (b *Browser) launchOpenDialog(startDir string) {
+	if b.openDialog == nil {
+		b.errMsg = "no file dialog is available in this build"
+		return
+	}
+	if b.dialogBusy {
+		return
+	}
+	if startDir == "" {
+		startDir = b.startDir()
+	}
+	b.dialogBusy = true
+	b.errMsg = ""
+	b.openDialog(startDir)
+}
+
 // prefs returns the preferences facade, or nil when the shell has none.
 func (b *Browser) prefs() Prefs {
 	if b.sh == nil {
@@ -211,9 +281,9 @@ func (b *Browser) prefs() Prefs {
 	return b.sh.Services().Prefs
 }
 
-// startDir picks the directory the browser opens on: the folder holding
-// the most recent piece if it still exists, otherwise the user's home,
-// otherwise the working directory.
+// startDir picks the directory the file dialog opens on: the folder
+// holding the most recent piece if it still exists, otherwise the user's
+// home, otherwise the working directory.
 func (b *Browser) startDir() string {
 	for _, e := range b.recents {
 		if e.missing {
@@ -246,7 +316,7 @@ func (b *Browser) statRecent(path string) (fs.FileInfo, error) {
 	return os.Stat(path)
 }
 
-// reloadRecents rebuilds the recents pane from Prefs, dropping entries
+// reloadRecents rebuilds the recents list from Prefs, dropping entries
 // forgotten this session and flagging the ones whose file has gone away.
 //
 // It runs on the game loop, and it is called again after every open and
@@ -283,126 +353,16 @@ func (b *Browser) reloadRecents() {
 		}
 	}
 	b.recentStatus = status
-	b.recentSel = browserClamp(b.recentSel, len(b.recents))
-	b.recentTop = browserClampTop(b.recentSel, b.recentTop, brwRecentRows, len(b.recents))
+	b.setSel(b.sel)
 }
 
-// extMatcher returns a name filter accepting the given extensions,
-// case-insensitively. It is what lets the same directory listing serve
-// the start screen (piece formats) and the SoundFont picker (.sf2).
-func extMatcher(exts []string) func(string) bool {
-	set := make(map[string]bool, len(exts))
-	for _, e := range exts {
-		set[strings.ToLower(e)] = true
+// listLen is how many rows the list holds: recents, or the checklist
+// standing in for them on a first run.
+func (b *Browser) listLen() int {
+	if b.onboarding() {
+		return len(b.stepList())
 	}
-	return func(name string) bool { return set[strings.ToLower(filepath.Ext(name))] }
-}
-
-// browserReadListing reads dir and returns the rows worth showing:
-// sub-directories and files accept says yes to, directories first and
-// then names, both case-insensitively. Dot-files are hidden. The error is
-// the directory read failure, if any; the caller shows it inline.
-func browserReadListing(dir string, accept func(string) bool) ([]browserEntry, error) {
-	des, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]browserEntry, 0, len(des))
-	for _, de := range des {
-		name := de.Name()
-		if strings.HasPrefix(name, ".") {
-			continue
-		}
-		isDir := de.IsDir()
-		// A symlink reports neither dir nor regular from ReadDir; stat
-		// it so linked folders are still browsable.
-		if !isDir && de.Type()&os.ModeSymlink != 0 {
-			isDir = browserIsDir(filepath.Join(dir, name))
-		}
-		if !isDir && !accept(name) {
-			continue
-		}
-		out = append(out, browserEntry{name: name, path: filepath.Join(dir, name), isDir: isDir})
-	}
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].isDir != out[j].isDir {
-			return out[i].isDir
-		}
-		li, lj := strings.ToLower(out[i].name), strings.ToLower(out[j].name)
-		if li != lj {
-			return li < lj
-		}
-		return out[i].name < out[j].name
-	})
-	return out, nil
-}
-
-// browserParentOf returns the parent of dir and whether there is one.
-// At a filesystem root (/ on Unix, C:\ on Windows) there is not, and the
-// second result is false.
-func browserParentOf(dir string) (string, bool) {
-	dir = filepath.Clean(dir)
-	p := filepath.Dir(dir)
-	if p == dir {
-		return dir, false
-	}
-	return p, true
-}
-
-// setDir points the browse pane at dir. A directory that cannot be read
-// still becomes the current directory — with the failure recorded in
-// dirErr and an empty listing — so the user can always back out of it
-// with Backspace instead of being stuck.
-func (b *Browser) setDir(dir string) {
-	dir = filepath.Clean(dir)
-	b.dir = dir
-	b.dirErr = ""
-	kids, err := browserReadListing(dir, browserSupported)
-	if err != nil {
-		b.dirErr = browserErrText(err)
-		kids = nil
-	}
-	b.listing = nil
-	if p, ok := browserParentOf(dir); ok {
-		b.listing = append(b.listing, browserEntry{name: "..", path: p, isDir: true})
-	}
-	b.listing = append(b.listing, kids...)
-	b.browseSel, b.browseTop = 0, 0
-}
-
-// browserErrText renders a filesystem error for inline display without
-// repeating the path the pane is already showing.
-func browserErrText(err error) string {
-	if pe, ok := err.(*fs.PathError); ok && pe.Err != nil {
-		return pe.Err.Error()
-	}
-	return err.Error()
-}
-
-// selectName moves the browse selection to the entry with this base
-// name, if it is present. Used when going up so the folder just left is
-// highlighted.
-func (b *Browser) selectName(name string) {
-	for i, e := range b.listing {
-		if e.name == name {
-			b.browseSel = i
-			b.browseTop = browserClampTop(i, b.browseTop, brwBrowseRows, len(b.listing))
-			return
-		}
-	}
-}
-
-// goParent moves the browse pane up one directory, keeping the folder
-// just left selected. At a filesystem root it does nothing.
-func (b *Browser) goParent() {
-	p, ok := browserParentOf(b.dir)
-	if !ok {
-		return
-	}
-	leaving := filepath.Base(b.dir)
-	b.setDir(p)
-	b.focus = browserPaneBrowse
-	b.selectName(leaving)
+	return len(b.recents)
 }
 
 // browserClamp constrains an index to [0, n), returning 0 for an empty
@@ -439,139 +399,56 @@ func browserClampTop(sel, top, rows, n int) int {
 	return top
 }
 
-// paneRows reports the viewport height of a pane in rows.
-func (b *Browser) paneRows(p browserPane) int {
-	if p == browserPaneRecent {
-		return brwRecentRows
-	}
-	return brwBrowseRows
+// setSel selects a row, clamping it and scrolling the viewport so it
+// stays visible.
+func (b *Browser) setSel(i int) {
+	b.sel = browserClamp(i, b.listLen())
+	b.top = browserClampTop(b.sel, b.top, brwRecentRows, b.listLen())
 }
 
-// paneLen reports how many entries a pane holds. With no recents the
-// left pane holds the getting-started checklist instead, and its steps
-// are what the selection moves over.
-func (b *Browser) paneLen(p browserPane) int {
-	if p == browserPaneRecent {
-		if b.onboarding() {
-			return len(b.stepList())
-		}
-		return len(b.recents)
-	}
-	return len(b.listing)
-}
+// move steps the selection by delta, clamping at both ends.
+func (b *Browser) move(delta int) { b.setSel(b.sel + delta) }
 
-// selection reports the selected index in a pane.
-func (b *Browser) selection(p browserPane) int {
-	if p == browserPaneRecent {
-		return b.recentSel
-	}
-	return b.browseSel
-}
-
-// setSelection selects an index in a pane, clamping it and scrolling the
-// viewport so it stays visible.
-func (b *Browser) setSelection(p browserPane, i int) {
-	i = browserClamp(i, b.paneLen(p))
-	if p == browserPaneRecent {
-		b.recentSel = i
-		b.recentTop = browserClampTop(i, b.recentTop, brwRecentRows, len(b.recents))
-		return
-	}
-	b.browseSel = i
-	b.browseTop = browserClampTop(i, b.browseTop, brwBrowseRows, len(b.listing))
-}
-
-// move steps the focused pane's selection by delta, clamping at both
-// ends and scrolling the viewport to follow.
-func (b *Browser) move(delta int) {
-	b.setSelection(b.focus, b.selection(b.focus)+delta)
-}
-
-// scrollBy scrolls a pane's viewport by delta rows without moving the
+// scrollBy scrolls the viewport by delta rows without moving the
 // selection — the mouse wheel's behaviour.
-func (b *Browser) scrollBy(p browserPane, delta int) {
-	rows, n := b.paneRows(p), b.paneLen(p)
-	max := n - rows
+func (b *Browser) scrollBy(delta int) {
+	max := b.listLen() - brwRecentRows
 	if max < 0 {
 		max = 0
 	}
-	top := b.paneTop(p) + delta
+	top := b.top + delta
 	if top > max {
 		top = max
 	}
 	if top < 0 {
 		top = 0
 	}
-	if p == browserPaneRecent {
-		b.recentTop = top
-	} else {
-		b.browseTop = top
-	}
+	b.top = top
 }
 
-// paneTop reports a pane's scroll offset.
-func (b *Browser) paneTop(p browserPane) int {
-	if p == browserPaneRecent {
-		return b.recentTop
-	}
-	return b.browseTop
-}
-
-// toggleFocus moves between the recent and browse sections.
-func (b *Browser) toggleFocus() {
-	if b.focus == browserPaneRecent {
-		b.focus = browserPaneBrowse
-	} else {
-		b.focus = browserPaneRecent
-	}
-}
-
-// activate opens whatever is selected in the focused pane: a directory
-// is descended into, a piece is opened, a recent that has gone missing
-// says so instead.
+// activate opens whatever is selected: a recent piece, or a checklist
+// step's action on a first run. A recent that has gone missing says so
+// instead.
 func (b *Browser) activate() {
-	switch b.focus {
-	case browserPaneRecent:
-		if b.onboarding() {
-			b.activateStep()
-			return
-		}
-		if b.recentSel >= len(b.recents) {
-			return
-		}
-		e := b.recents[b.recentSel]
-		if e.missing {
-			b.errMsg = "not found: " + e.path + "  (press Del to forget it)"
-			return
-		}
-		b.openPath(e.path)
-	default:
-		if b.browseSel >= len(b.listing) {
-			return
-		}
-		e := b.listing[b.browseSel]
-		if e.isDir {
-			if e.name == ".." {
-				b.goParent()
-				return
-			}
-			b.setDir(e.path)
-			b.focus = browserPaneBrowse
-			return
-		}
-		b.openPath(e.path)
-	}
-}
-
-// openPath opens a piece, or browses to it when it is a directory. Any
-// import failure is recorded for inline display and never propagated: a
-// malformed file must not end the session.
-func (b *Browser) openPath(path string) {
-	if browserIsDir(path) {
-		b.setDir(path)
-		b.focus = browserPaneBrowse
+	if b.onboarding() {
+		b.activateStep()
 		return
 	}
+	if b.sel >= len(b.recents) {
+		return
+	}
+	e := b.recents[b.sel]
+	if e.missing {
+		b.errMsg = "not found: " + e.path + "  (press Del to forget it)"
+		return
+	}
+	b.openPath(e.path)
+}
+
+// openPath opens a piece. Any import failure is recorded for inline
+// display and never propagated: a malformed file must not end the
+// session.
+func (b *Browser) openPath(path string) {
 	b.errMsg, b.warns = "", nil
 	if b.sh == nil || b.sh.Services().Opener == nil {
 		b.errMsg = "no importer is available in this build"
@@ -591,17 +468,17 @@ func (b *Browser) openPath(path string) {
 	delete(b.forgotten, path)
 	delete(b.recentStatus, path)
 	b.reloadRecents()
-	b.setSelection(browserPaneRecent, 0)
+	b.setSel(0)
 }
 
 // forgetRecent (the Delete key) removes the selected recent. It is
 // permanent when the preferences implementation supports removal, and
 // otherwise lasts for the session.
 func (b *Browser) forgetRecent() {
-	if b.focus != browserPaneRecent || b.recentSel >= len(b.recents) {
+	if b.onboarding() || b.sel >= len(b.recents) {
 		return
 	}
-	p := b.recents[b.recentSel].path
+	p := b.recents[b.sel].path
 	if b.forgotten == nil {
 		b.forgotten = map[string]bool{}
 	}
@@ -689,7 +566,9 @@ func (b *Browser) noteSkipped(skipped int) {
 }
 
 // handleDrop acts on files dropped onto the window: the first supported
-// piece is opened, or the first directory is browsed to. Items the
+// piece is opened, and a dropped FOLDER opens the OS file dialog rooted
+// there — the closest honest reading of "here is where my tabs live"
+// now that the screen carries no directory listing of its own. Items the
 // platform could not hand over are skipped, and the outcome is always
 // reported — including a drop of nothing usable, which must say so
 // rather than fail silently.
@@ -701,18 +580,17 @@ func (b *Browser) handleDrop(fsys fs.FS) {
 		return
 	}
 	for _, p := range paths {
-		if browserIsDir(p) {
-			b.setDir(p)
-			b.focus = browserPaneBrowse
-			b.errMsg = ""
+		if browserSupported(p) && !browserIsDir(p) {
+			// openPath resets the status line and fills it in on failure.
+			b.openPath(p)
 			b.noteSkipped(skipped)
 			return
 		}
 	}
 	for _, p := range paths {
-		if browserSupported(p) {
-			// openPath resets the status line and fills it in on failure.
-			b.openPath(p)
+		if browserIsDir(p) {
+			b.errMsg = ""
+			b.launchOpenDialog(p)
 			b.noteSkipped(skipped)
 			return
 		}
@@ -725,8 +603,8 @@ func (b *Browser) handleDrop(fsys fs.FS) {
 var browserKeys = []ebiten.Key{
 	ebiten.KeyUp, ebiten.KeyDown, ebiten.KeyPageUp, ebiten.KeyPageDown,
 	ebiten.KeyHome, ebiten.KeyEnd,
-	ebiten.KeyEnter, ebiten.KeyNumpadEnter, ebiten.KeyBackspace,
-	ebiten.KeyTab, ebiten.KeyDelete, ebiten.KeyS,
+	ebiten.KeyEnter, ebiten.KeyNumpadEnter,
+	ebiten.KeyO, ebiten.KeyDelete, ebiten.KeyS,
 	ebiten.KeyF1, ebiten.KeySlash,
 	ebiten.KeyEscape, ebiten.KeyQ,
 }
@@ -763,19 +641,17 @@ func (b *Browser) handleKey(k ebiten.Key) error {
 	case ebiten.KeyDown:
 		b.move(1)
 	case ebiten.KeyPageUp:
-		b.move(-b.paneRows(b.focus))
+		b.move(-brwRecentRows)
 	case ebiten.KeyPageDown:
-		b.move(b.paneRows(b.focus))
+		b.move(brwRecentRows)
 	case ebiten.KeyHome:
-		b.setSelection(b.focus, 0)
+		b.setSel(0)
 	case ebiten.KeyEnd:
-		b.setSelection(b.focus, b.paneLen(b.focus)-1)
+		b.setSel(b.listLen() - 1)
 	case ebiten.KeyEnter, ebiten.KeyNumpadEnter:
 		b.activate()
-	case ebiten.KeyBackspace:
-		b.goParent()
-	case ebiten.KeyTab:
-		b.toggleFocus()
+	case ebiten.KeyO:
+		b.launchOpenDialog("")
 	case ebiten.KeyDelete:
 		b.forgetRecent()
 	case ebiten.KeyS:
@@ -796,16 +672,15 @@ func (b *Browser) browserBindings() []helpBinding {
 		leave = helpBinding{Group: "session", Keys: "esc", Hint: "esc back", Desc: "Go back to where you came from"}
 	}
 	return []helpBinding{
+		{Group: "opening", Keys: "O", Hint: "O open a file", Off: b.openDialog == nil,
+			Desc: "Choose a piece with the system's own file dialog"},
+		{Group: "opening", Keys: "enter", Hint: "enter open", Desc: "Open the selected recent piece"},
+		{Group: "opening", Keys: "drag and drop", Desc: "Drop a piece on the window to open it; drop a folder to browse it in the file dialog"},
+		{Group: "opening", Keys: "del", Hint: "del forget recent", Desc: "Forget the selected recent piece"},
+
 		{Group: "choosing", Keys: "up / down", Hint: "up/dn select", Desc: "Move the selection"},
 		{Group: "choosing", Keys: "page up / down", Desc: "Move the selection a screenful at a time"},
-		{Group: "choosing", Keys: "home / end", Desc: "Jump to the first or last entry"},
-		{Group: "choosing", Keys: "tab", Hint: "tab switch pane", Desc: "Switch between recent pieces and the folder listing"},
 		{Group: "choosing", Keys: "click", Desc: "Select an entry; click it again to open it"},
-
-		{Group: "opening", Keys: "enter", Hint: "enter open", Desc: "Open the selected piece, or go into the selected folder"},
-		{Group: "opening", Keys: "backspace", Hint: "backspace up a folder", Desc: "Go up to the parent folder"},
-		{Group: "opening", Keys: "drag and drop", Desc: "Drop a piece on the window to open it, or a folder to browse it"},
-		{Group: "opening", Keys: "del", Hint: "del forget recent", Desc: "Forget the selected recent piece"},
 
 		{Group: "session", Keys: "S", Hint: "s settings", Off: b.settings == nil,
 			Desc: "Audio devices, latency calibration, SoundFont and count-in"},
@@ -815,74 +690,69 @@ func (b *Browser) browserBindings() []helpBinding {
 	}
 }
 
-// hitTest maps a cursor position to the pane and entry index under it.
-func (b *Browser) hitTest(x, y int) (browserPane, int, bool) {
-	if y < brwListTop {
-		return 0, 0, false
-	}
-	switch {
-	case x >= brwRecentX && x < brwRecentX+brwRecentW:
-		row := (y - brwListTop) / brwRecentRowH
-		if row < 0 || row >= brwRecentRows {
-			return 0, 0, false
-		}
-		i := b.recentTop + row
-		// The bound is paneLen, not len(b.recents): during first-run
-		// onboarding the pane holds the getting-started checklist and
-		// len(b.recents) is zero by definition — bounding on it made the
-		// whole checklist unclickable for exactly the users it exists for
-		// (audit A1).
-		if i >= b.paneLen(browserPaneRecent) {
-			return 0, 0, false
-		}
-		return browserPaneRecent, i, true
-	case x >= brwBrowseX && x < brwBrowseX+brwBrowseW:
-		row := (y - brwListTop) / brwBrowseRowH
-		if row < 0 || row >= brwBrowseRows {
-			return 0, 0, false
-		}
-		i := b.browseTop + row
-		if i >= len(b.listing) {
-			return 0, 0, false
-		}
-		return browserPaneBrowse, i, true
-	}
-	return 0, 0, false
+// hintLine is the one-line key summary in the footer, built from the
+// same table as the overlay.
+func (b *Browser) hintLine() string { return hintLineOf(b.browserBindings()) }
+
+// openButtonRect is the open card's button, shared by layout and hit
+// testing so they cannot drift.
+func openButtonRect() rect {
+	return rect{brwCardX + (brwCardW-brwOpenBtnW)/2, brwListTop + 64, brwOpenBtnW, brwOpenBtnH}
 }
 
-// click applies a left click on an entry: the first click focuses the
-// pane and selects the row, a click on the row that is already selected
-// opens it — which is also what the second click of a double click
-// lands on.
-func (b *Browser) click(p browserPane, i int) {
-	if b.focus == p && b.selection(p) == i {
+// hitTest maps a cursor position to a recents-list row index.
+func (b *Browser) hitTest(x, y int) (int, bool) {
+	if y < brwListTop || x < brwRecentX || x >= brwRecentX+brwRecentW {
+		return 0, false
+	}
+	row := (y - brwListTop) / brwRecentRowH
+	if row < 0 || row >= brwRecentRows {
+		return 0, false
+	}
+	i := b.top + row
+	if i >= b.listLen() {
+		return 0, false
+	}
+	return i, true
+}
+
+// click applies a left click on a list row: the first click selects, a
+// click on the row that is already selected opens it — which is also
+// what the second click of a double click lands on.
+func (b *Browser) click(i int) {
+	if b.sel == i {
 		b.activate()
 		return
 	}
-	b.focus = p
-	b.setSelection(p, i)
+	b.setSel(i)
 }
 
 // handleMouse reads the pointer once per frame: hover highlighting,
-// wheel scrolling of the pane under the cursor, and clicks.
+// wheel scrolling, list clicks, and the open button.
 func (b *Browser) handleMouse(pt pointer) {
-	p, i, ok := b.hitTest(int(pt.x), int(pt.y))
-	b.hoverOK, b.hoverPane, b.hoverIdx = ok, p, i
+	i, ok := b.hitTest(int(pt.x), int(pt.y))
+	b.hoverIdx = -1
+	if ok {
+		b.hoverIdx = i
+	}
 
 	if pt.wheel != 0 {
 		b.wheelAcc += pt.wheel
 		var steps int
 		steps, b.wheelAcc = wheelSteps(b.wheelAcc)
 		if steps != 0 {
-			target := b.focus
-			if ok {
-				target = p
-			}
-			b.scrollBy(target, -steps*3)
+			b.scrollBy(-steps * 3)
 		}
 	}
-	if ok && pt.pressed {
-		b.click(p, i)
+	if !pt.pressed {
+		return
+	}
+	if pt.over(openButtonRect()) {
+		b.launchOpenDialog("")
+		return
+	}
+	if ok {
+		b.click(i)
 	}
 }
 
@@ -934,6 +804,7 @@ func (b *Browser) handleKeys(fires func(ebiten.Key) bool) error {
 // display instead of being returned, so a bad file cannot end the app.
 func (b *Browser) Update() error {
 	b.ptr = readPointer()
+	b.drainDialog()
 	// The overlay is modal: while it is up, a key or click dismisses it
 	// and reaches nothing underneath.
 	if b.helpOpen {
@@ -959,22 +830,14 @@ func (b *Browser) Update() error {
 	return nil
 }
 
-// hintLine is the one-line key summary in the footer, built from the
-// same table as the overlay. The settings hint appears only once an
-// opener has been installed, and the leave key is honest about whether
-// it quits or goes back.
-func (b *Browser) hintLine() string { return hintLineOf(b.browserBindings()) }
-
 // Draw paints the start screen. It reads only fields the methods above
 // set, so nothing here decides anything.
 func (b *Browser) Draw(screen *ebiten.Image) {
 	screen.Fill(colBG)
 	drawHeader(screen, "guitarTutor", "a practice companion for guitarists", colDim)
-	drawText(screen, "drop a Guitar Pro, MusicXML or MIDI file on this window to open it",
-		uiPadX, uiBodyTop+8, colBarline)
 
 	b.drawRecents(screen)
-	b.drawBrowse(screen)
+	b.drawOpenCard(screen)
 	b.drawStatus(screen)
 	drawFooter(screen, b.hintLine())
 
@@ -983,37 +846,21 @@ func (b *Browser) Draw(screen *ebiten.Image) {
 	}
 }
 
-// drawPaneFrame paints a pane's background, title and focus underline.
-func (b *Browser) drawPaneFrame(screen *ebiten.Image, p browserPane, x, w float32, title string) {
-	rows, rowH := b.paneRows(p), brwRecentRowH
-	if p == browserPaneBrowse {
-		rowH = brwBrowseRowH
-	}
-	if p == browserPaneRecent && b.onboarding() {
-		// The checklist is three lines, not eleven: a pane sized for a
-		// full recents list would be mostly empty box.
-		rows = len(b.stepList()) + 1
-	}
-	h := float32(rows * rowH)
-	vector.DrawFilledRect(screen, x-8, brwListTop-8, w+16, h+16, colPanel, false)
-	col := colDim
-	if b.focus == p {
-		col = colSounding
-	}
-	drawText(screen, title, float64(x), 124, col)
-	vector.StrokeLine(screen, x, 142, x+w, 142, 1, col, false)
+// drawPaneFrame paints a pane's background and title.
+func drawPaneFrame(screen *ebiten.Image, x, w float64, rows int, title string) {
+	h := float64(rows * brwRecentRowH)
+	fillRounded(screen, rect{x - 8, brwListTop - 8, w + 16, h + 16}, colPanel)
+	drawText(screen, title, x, 124, colDim)
+	vector.StrokeLine(screen, float32(x), 146, float32(x+w), 146, 1, colPanelEdge, false)
 }
 
-// rowBG returns the background colour for a row, or false when it needs
-// none.
-func (b *Browser) rowBG(p browserPane, i int) (color.RGBA, bool) {
-	if b.selection(p) == i && b.paneLen(p) > 0 {
-		if b.focus == p {
-			return colFocus, true
-		}
-		return colFocusDim, true
+// rowBG returns the background colour for a list row, or false when it
+// needs none.
+func (b *Browser) rowBG(i int) (color.RGBA, bool) {
+	if b.sel == i && b.listLen() > 0 {
+		return colFocus, true
 	}
-	if b.hoverOK && b.hoverPane == p && b.hoverIdx == i {
+	if b.hoverIdx == i {
 		return colHover, true
 	}
 	return color.RGBA{}, false
@@ -1021,75 +868,66 @@ func (b *Browser) rowBG(p browserPane, i int) (color.RGBA, bool) {
 
 func (b *Browser) drawRecents(screen *ebiten.Image) {
 	if b.onboarding() {
-		b.drawPaneFrame(screen, browserPaneRecent, brwRecentX, brwRecentW, "GETTING STARTED")
+		drawPaneFrame(screen, brwRecentX, brwRecentW, len(b.stepList())+1, "GETTING STARTED")
 		b.drawSteps(screen)
 		return
 	}
-	b.drawPaneFrame(screen, browserPaneRecent, brwRecentX, brwRecentW, "RECENT PIECES")
+	drawPaneFrame(screen, brwRecentX, brwRecentW, brwRecentRows, "RECENT PIECES")
 	for row := 0; row < brwRecentRows; row++ {
-		i := b.recentTop + row
+		i := b.top + row
 		if i >= len(b.recents) {
 			break
 		}
 		e := b.recents[i]
 		y := float32(brwListTop + row*brwRecentRowH)
-		if bg, ok := b.rowBG(browserPaneRecent, i); ok {
-			vector.DrawFilledRect(screen, brwRecentX-4, y-2, brwRecentW+8, brwRecentRowH-2, bg, false)
+		if bg, ok := b.rowBG(i); ok {
+			fillRounded(screen, rect{brwRecentX - 4, float64(y) - 2, brwRecentW + 8, brwRecentRowH - 2}, bg)
 		}
 		nameCol := colNote
 		sub := e.parent
 		if e.missing {
 			nameCol = colMissing
-			sub = "missing - press Del to forget"
+			sub = "missing — press Del to forget"
 		}
 		drawTextScaled(screen, truncateWScaled(e.name, brwRecentW-16, brwNameScale), brwRecentX+4, float64(y), brwNameScale, nameCol)
-		drawText(screen, ellipsizeW(sub, brwRecentW-16), brwRecentX+4, float64(y)+21, colDim)
+		drawTextSmall(screen, ellipsizeW(sub, brwRecentW-16), brwRecentX+4, float64(y)+22, colDim)
 	}
 	if len(b.recents) > brwRecentRows {
-		drawText(screen, fmt.Sprintf("%d-%d of %d", b.recentTop+1,
-			min(b.recentTop+brwRecentRows, len(b.recents)), len(b.recents)),
+		drawTextSmall(screen, fmt.Sprintf("%d–%d of %d", b.top+1,
+			min(b.top+brwRecentRows, len(b.recents)), len(b.recents)),
 			brwRecentX+4, brwListTop+brwRecentRows*brwRecentRowH+12, colBarline)
 	}
 }
 
-func (b *Browser) drawBrowse(screen *ebiten.Image) {
-	title := "BROWSE   " + ellipsizeW(b.dir, brwBrowseW-80)
-	b.drawPaneFrame(screen, browserPaneBrowse, brwBrowseX, brwBrowseW, title)
+// drawOpenCard paints the right-hand card: the button that opens the
+// system file dialog, and the drop hint.
+func (b *Browser) drawOpenCard(screen *ebiten.Image) {
+	drawPaneFrame(screen, brwCardX, brwCardW, brwRecentRows, "OPEN")
 
-	if b.dirErr != "" {
-		drawText(screen, "cannot read this folder: "+b.dirErr, brwBrowseX+4, brwListTop+8, colMiss)
-		drawText(screen, "press Backspace to go back up", brwBrowseX+4, brwListTop+28, colBarline)
-		return
+	btn := openButtonRect()
+	label := "Open a piece…"
+	fill, edge, tcol := colFocus, colInferred, colNote
+	switch {
+	case b.openDialog == nil:
+		fill, edge, tcol = colBG, colBarline, colBarline
+	case b.dialogBusy:
+		label = "waiting for the file dialog…"
+		fill, edge, tcol = colPanel, colPanelEdge, colDim
+	case b.ptr.over(btn):
+		edge = colNote
 	}
-	for row := 0; row < brwBrowseRows; row++ {
-		i := b.browseTop + row
-		if i >= len(b.listing) {
-			break
-		}
-		e := b.listing[i]
-		y := float32(brwListTop + row*brwBrowseRowH)
-		if bg, ok := b.rowBG(browserPaneBrowse, i); ok {
-			vector.DrawFilledRect(screen, brwBrowseX-4, y-3, brwBrowseW+8, brwBrowseRowH, bg, false)
-		}
-		label, col := e.name, colNote
-		if e.isDir {
-			col = colInferred
-			if e.name == ".." {
-				label = ".. (up one folder)"
-			} else {
-				label += "/"
-			}
-		}
-		drawText(screen, truncateW(label, brwBrowseW-16), brwBrowseX+4, float64(y), col)
-	}
-	if len(b.listing) == 0 {
-		drawText(screen, "No pieces or folders here.", brwBrowseX+4, brwListTop+8, colDim)
-	}
-	if len(b.listing) > brwBrowseRows {
-		drawText(screen, fmt.Sprintf("%d-%d of %d", b.browseTop+1,
-			min(b.browseTop+brwBrowseRows, len(b.listing)), len(b.listing)),
-			brwBrowseX+4, brwListTop+brwBrowseRows*brwBrowseRowH+12, colBarline)
-	}
+	drawPanel(screen, btn, fill, edge)
+	drawTextScaled(screen, label, centreXScaled(label, btn.x, btn.w, 1.15), btn.y+11, 1.15, tcol)
+	hint := "browses with the system's file dialog  (O)"
+	drawTextSmall(screen, hint, brwCardX+(brwCardW-textWSmall(hint))/2, btn.y+btn.h+14, colDim)
+
+	midY := btn.y + btn.h + 64
+	or := "— or —"
+	drawTextSmall(screen, or, brwCardX+(brwCardW-textWSmall(or))/2, midY, colBarline)
+	drop := "drop a file anywhere on this window"
+	drawText(screen, drop, brwCardX+(brwCardW-textW(drop))/2, midY+26, colHUD)
+	formats := "Guitar Pro (.gp) · MusicXML (.musicxml, .mxl) · MIDI (.mid) · text tab (.gtab)"
+	drawTextSmall(screen, formats, brwCardX+(brwCardW-textWSmall(formats))/2, midY+52, colDim)
 }
 
 // drawStatus paints the last open's error and importer warnings under
@@ -1104,7 +942,7 @@ func (b *Browser) drawStatus(screen *ebiten.Image) {
 	}
 	for i, w := range b.warns {
 		if i == maxWarn {
-			drawText(screen, fmt.Sprintf("... and %d more warnings", len(b.warns)-maxWarn), brwRecentX, y, colClose)
+			drawText(screen, fmt.Sprintf("… and %d more warnings", len(b.warns)-maxWarn), brwRecentX, y, colClose)
 			break
 		}
 		drawText(screen, truncateW("warning: "+w, width), brwRecentX, y, colClose)

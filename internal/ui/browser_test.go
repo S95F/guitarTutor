@@ -1,9 +1,10 @@
 package ui
 
 // Browser tests. Ebitengine cannot open a window here, so every test
-// drives the Browser's plain state methods — setDir, move, activate,
-// handleKey, click, handleDrop — against a real directory tree built in
-// t.TempDir(). Nothing in this file renders.
+// drives the Browser's plain state methods — move, activate, handleKey,
+// click, handleDrop, launchOpenDialog — with doubles standing in for the
+// preferences, the importer, and the OS file dialog. Nothing in this
+// file renders.
 
 import (
 	"errors"
@@ -190,28 +191,24 @@ func browserTree(t *testing.T, root string, paths ...string) {
 	}
 }
 
-// browserFixture builds a Browser over a shell with the given doubles,
-// pointed at dir.
-func browserFixture(t *testing.T, pr Prefs, op Opener, dir string) *Browser {
+// browserFixture builds a Browser over a shell with the given doubles.
+// The recents list — the screen's one list — comes from pr.
+func browserFixture(t *testing.T, pr Prefs, op Opener) *Browser {
 	t.Helper()
 	sh := NewShell(Services{Opener: op, Prefs: pr}, nil)
-	b := NewBrowser(sh)
-	b.setDir(dir)
-	b.focus = browserPaneBrowse
-	return b
+	return NewBrowser(sh)
 }
 
 // browserStatFixture builds a Browser whose recents probe is the given
 // hook, installed before the first load so the probes NewBrowser would
-// have made are counted too — which is why this repeats its two steps
+// have made are counted too — which is why this repeats its steps
 // instead of calling it.
-func browserStatFixture(t *testing.T, pr Prefs, op Opener, dir string,
+func browserStatFixture(t *testing.T, pr Prefs, op Opener,
 	stat func(string) (fs.FileInfo, error)) *Browser {
 	t.Helper()
 	sh := NewShell(Services{Opener: op, Prefs: pr}, nil)
-	b := &Browser{sh: sh, forgotten: map[string]bool{}, statFn: stat}
+	b := &Browser{sh: sh, forgotten: map[string]bool{}, hoverIdx: -1, statFn: stat}
 	b.reloadRecents()
-	b.setDir(dir)
 	return b
 }
 
@@ -225,7 +222,7 @@ func browserPressed(keys ...ebiten.Key) func(ebiten.Key) bool {
 	return func(k ebiten.Key) bool { return down[k] }
 }
 
-// browserNames lists a pane's entry names, for compact assertions.
+// browserNames lists the entries' names, for compact assertions.
 func browserNames(es []browserEntry) []string {
 	out := make([]string, len(es))
 	for i, e := range es {
@@ -246,41 +243,21 @@ func browserEqual(a, b []string) bool {
 	return true
 }
 
-// --- tests ---------------------------------------------------------------
-
-// TestBrowserListingFilters: the listing keeps sub-directories and the
-// piece formats the app imports (case-insensitively), hides everything
-// else, and sorts directories before files.
-func TestBrowserListingFilters(t *testing.T) {
-	dir := t.TempDir()
-	browserTree(t, dir,
-		"Zebra/", "albums/",
-		"riff.gp", "SONG.MIDI", "tune.mid", "part.smf", "hand.gtab",
-		"score.musicxml", "packed.mxl", "plain.xml",
-		"notes.txt", "cover.png", "song.gp.bak", "noext",
-		".hidden.gp", ".config/",
-	)
-	got, err := browserReadListing(dir, browserSupported)
-	if err != nil {
-		t.Fatalf("browserReadListing: %v", err)
+// browserRecentsFixture builds a Browser whose recents are n real files
+// under a fresh temp root, returning the paths in list order.
+func browserRecentsFixture(t *testing.T, op Opener, n int) (*Browser, []string) {
+	t.Helper()
+	root := t.TempDir()
+	paths := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		name := string(rune('a'+i/10)) + string(rune('0'+i%10)) + ".gp"
+		browserTree(t, root, name)
+		paths = append(paths, filepath.Join(root, name))
 	}
-	want := []string{
-		"albums", "Zebra", // directories first, case-insensitive order
-		"hand.gtab", "packed.mxl", "part.smf", "plain.xml",
-		"riff.gp", "score.musicxml", "SONG.MIDI", "tune.mid",
-	}
-	if names := browserNames(got); !browserEqual(names, want) {
-		t.Errorf("listing = %v\nwant %v", names, want)
-	}
-	for _, e := range got {
-		if !e.isDir && !browserSupported(e.name) {
-			t.Errorf("unsupported file %q survived the filter", e.name)
-		}
-		if !filepath.IsAbs(e.path) {
-			t.Errorf("entry %q has a non-absolute path %q", e.name, e.path)
-		}
-	}
+	return browserFixture(t, &browserFakePrefs{recents: paths}, op), paths
 }
+
+// --- tests ---------------------------------------------------------------
 
 // TestBrowserSupportedExtensions pins the accepted set and its
 // case-insensitivity.
@@ -324,155 +301,75 @@ func TestBrowserClampTop(t *testing.T) {
 // TestBrowserSelectionClampsAndScrolls: Up/Down stop at both ends of the
 // list and drag the viewport with them.
 func TestBrowserSelectionClampsAndScrolls(t *testing.T) {
-	dir := t.TempDir()
-	names := make([]string, 0, 40)
-	for i := 0; i < 40; i++ {
-		names = append(names, string(rune('a'+i/10))+string(rune('0'+i%10))+".gp")
-	}
-	browserTree(t, dir, names...)
-	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{}, dir)
+	b, _ := browserRecentsFixture(t, &browserFakeOpener{}, 40)
 
-	// 40 files plus the ".." row.
-	if n := len(b.listing); n != 41 {
-		t.Fatalf("listing has %d entries, want 41", n)
+	if n := b.listLen(); n != 40 {
+		t.Fatalf("list has %d entries, want 40", n)
 	}
 	b.move(-1)
-	if b.browseSel != 0 || b.browseTop != 0 {
-		t.Errorf("up at the top moved to sel=%d top=%d, want 0/0", b.browseSel, b.browseTop)
+	if b.sel != 0 || b.top != 0 {
+		t.Errorf("up at the top moved to sel=%d top=%d, want 0/0", b.sel, b.top)
 	}
 	for i := 0; i < 100; i++ {
 		b.move(1)
 	}
-	if b.browseSel != 40 {
-		t.Errorf("down past the end selected %d, want 40", b.browseSel)
+	if b.sel != 39 {
+		t.Errorf("down past the end selected %d, want 39", b.sel)
 	}
-	if want := 41 - brwBrowseRows; b.browseTop != want {
-		t.Errorf("viewport top = %d, want %d", b.browseTop, want)
+	if want := 40 - brwRecentRows; b.top != want {
+		t.Errorf("viewport top = %d, want %d", b.top, want)
 	}
-	if b.browseSel < b.browseTop || b.browseSel >= b.browseTop+brwBrowseRows {
-		t.Errorf("selection %d outside viewport [%d,%d)", b.browseSel, b.browseTop, b.browseTop+brwBrowseRows)
+	if b.sel < b.top || b.sel >= b.top+brwRecentRows {
+		t.Errorf("selection %d outside viewport [%d,%d)", b.sel, b.top, b.top+brwRecentRows)
 	}
 
 	// The wheel scrolls the viewport without moving the selection.
-	sel := b.browseSel
-	b.scrollBy(browserPaneBrowse, -1000)
-	if b.browseTop != 0 {
-		t.Errorf("scroll to the top left top=%d, want 0", b.browseTop)
+	sel := b.sel
+	b.scrollBy(-1000)
+	if b.top != 0 {
+		t.Errorf("scroll to the top left top=%d, want 0", b.top)
 	}
-	if b.browseSel != sel {
-		t.Errorf("scrolling moved the selection to %d, want %d", b.browseSel, sel)
+	if b.sel != sel {
+		t.Errorf("scrolling moved the selection to %d, want %d", b.sel, sel)
 	}
-	b.scrollBy(browserPaneBrowse, 1000)
-	if want := 41 - brwBrowseRows; b.browseTop != want {
-		t.Errorf("scroll to the bottom left top=%d, want %d", b.browseTop, want)
+	b.scrollBy(1000)
+	if want := 40 - brwRecentRows; b.top != want {
+		t.Errorf("scroll to the bottom left top=%d, want %d", b.top, want)
 	}
 }
 
-// TestBrowserSelectionEmptyPane: an empty pane clamps to 0 and Enter on
-// it does nothing rather than indexing past the end.
-func TestBrowserSelectionEmptyPane(t *testing.T) {
-	dir := t.TempDir()
-	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{}, dir)
-	b.focus = browserPaneRecent
-	b.move(1)
+// TestBrowserSelectionStaysInBounds: the selection clamps at both ends
+// of the short checklist, and Enter never indexes past the end of the
+// recents — even if the selection somehow outlived a shrink.
+func TestBrowserSelectionStaysInBounds(t *testing.T) {
+	// With no recents at all the list is the checklist, and its ends
+	// still clamp.
+	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
 	b.move(-1)
-	if b.recentSel != 0 || b.recentTop != 0 {
-		t.Errorf("empty recents pane at sel=%d top=%d, want 0/0", b.recentSel, b.recentTop)
+	if b.sel != 0 || b.top != 0 {
+		t.Errorf("up at the top of the checklist left sel=%d top=%d, want 0/0", b.sel, b.top)
 	}
+	for i := 0; i < 50; i++ {
+		b.move(1)
+	}
+	if b.sel != b.listLen()-1 {
+		t.Errorf("down past the checklist's end selected %d, want %d", b.sel, b.listLen()-1)
+	}
+
+	// A selection past the recents — standing in for any frame where the
+	// list shrank before setSel re-clamped — activates to nothing rather
+	// than indexing past the slice.
+	root := t.TempDir()
+	browserTree(t, root, "here.gp")
+	op := &browserFakeOpener{}
+	b = browserFixture(t, &browserFakePrefs{recents: []string{filepath.Join(root, "here.gp")}}, op)
+	b.sel = 5
 	b.activate() // must not panic
+	if len(op.opened) != 0 {
+		t.Errorf("an out-of-range selection opened %v", op.opened)
+	}
 	if b.errMsg != "" {
-		t.Errorf("activating an empty pane set errMsg %q", b.errMsg)
-	}
-}
-
-// TestBrowserDescendAndParent walks into a sub-directory and back out,
-// and checks the folder just left comes back selected.
-func TestBrowserDescendAndParent(t *testing.T) {
-	root := t.TempDir()
-	browserTree(t, root, "albums/inner.gp", "top.gp")
-	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{}, root)
-
-	if b.listing[0].name != ".." {
-		t.Fatalf("first row = %q, want the parent row", b.listing[0].name)
-	}
-	b.setSelection(browserPaneBrowse, 1)
-	if b.listing[1].name != "albums" {
-		t.Fatalf("row 1 = %q, want albums", b.listing[1].name)
-	}
-	b.activate()
-	if filepath.Base(b.dir) != "albums" {
-		t.Fatalf("after descending, dir = %q", b.dir)
-	}
-	if names := browserNames(b.listing); !browserEqual(names, []string{"..", "inner.gp"}) {
-		t.Errorf("sub-directory listing = %v", names)
-	}
-
-	b.goParent()
-	if b.dir != filepath.Clean(root) {
-		t.Fatalf("after going up, dir = %q, want %q", b.dir, root)
-	}
-	if b.listing[b.browseSel].name != "albums" {
-		t.Errorf("selection after going up = %q, want albums", b.listing[b.browseSel].name)
-	}
-}
-
-// TestBrowserParentAtRoot: at a filesystem root there is no parent row
-// and Backspace is a no-op — not a crash and not a loop.
-func TestBrowserParentAtRoot(t *testing.T) {
-	root := filepath.VolumeName(t.TempDir())
-	if root == "" {
-		root = "/"
-	} else {
-		root += string(filepath.Separator)
-	}
-	if p, ok := browserParentOf(root); ok {
-		t.Fatalf("browserParentOf(%q) = %q, true; want no parent", root, p)
-	}
-	// A trailing separator must not fool the check either.
-	if p, ok := browserParentOf(filepath.Clean(root) + string(filepath.Separator)); ok {
-		t.Fatalf("browserParentOf with a trailing separator = %q, true; want no parent", p)
-	}
-	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{}, root)
-	if len(b.listing) > 0 && b.listing[0].name == ".." {
-		t.Error("the filesystem root offers a parent row")
-	}
-	before := b.dir
-	b.goParent() // no-op, must not panic
-	if b.dir != before {
-		t.Errorf("goParent at the root moved to %q", b.dir)
-	}
-	// One level down there is a parent again.
-	if _, ok := browserParentOf(t.TempDir()); !ok {
-		t.Error("a normal directory reports no parent")
-	}
-}
-
-// TestBrowserUnreadableDirectory: a directory that cannot be listed
-// shows the failure inline, leaves the pane usable, and offers the way
-// back up.
-func TestBrowserUnreadableDirectory(t *testing.T) {
-	root := t.TempDir()
-	browserTree(t, root, "notafolder.gp")
-	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{}, root)
-
-	for _, bad := range []string{
-		filepath.Join(root, "notafolder.gp"), // a file, not a directory
-		filepath.Join(root, "nope", "gone"),  // does not exist
-	} {
-		b.setDir(bad)
-		if b.dirErr == "" {
-			t.Errorf("setDir(%q) reported no error", bad)
-		}
-		if len(b.listing) != 1 || b.listing[0].name != ".." {
-			t.Errorf("setDir(%q) listing = %v, want just the parent row", bad, browserNames(b.listing))
-		}
-		b.move(1) // must not panic on the short listing
-		b.activate()
-	}
-	// Backing out clears the error.
-	b.setDir(root)
-	if b.dirErr != "" {
-		t.Errorf("dirErr survived a good setDir: %q", b.dirErr)
+		t.Errorf("an out-of-range selection set errMsg %q", b.errMsg)
 	}
 }
 
@@ -487,8 +384,7 @@ func TestBrowserMissingRecentFlaggedAndForgotten(t *testing.T) {
 
 	pr := &browserFakePrefs{recents: []string{gone, here}}
 	op := &browserFakeOpener{}
-	b := browserFixture(t, pr, op, root)
-	b.focus = browserPaneRecent
+	b := browserFixture(t, pr, op)
 
 	if len(b.recents) != 2 {
 		t.Fatalf("recents = %v", browserNames(b.recents))
@@ -503,7 +399,7 @@ func TestBrowserMissingRecentFlaggedAndForgotten(t *testing.T) {
 		t.Errorf("recent parent = %q, want %q", b.recents[1].parent, root)
 	}
 
-	b.setSelection(browserPaneRecent, 0)
+	b.setSel(0)
 	b.activate()
 	if b.errMsg == "" {
 		t.Error("opening a missing recent reported nothing")
@@ -522,8 +418,8 @@ func TestBrowserMissingRecentFlaggedAndForgotten(t *testing.T) {
 	if len(b.recents) != 1 {
 		t.Errorf("a forgotten recent came back: %v", browserNames(b.recents))
 	}
-	if b.recentSel != 0 {
-		t.Errorf("selection = %d after the list shrank, want 0", b.recentSel)
+	if b.sel != 0 {
+		t.Errorf("selection = %d after the list shrank, want 0", b.sel)
 	}
 }
 
@@ -535,10 +431,9 @@ func TestBrowserForgetPersistsWhenPrefsCanRemove(t *testing.T) {
 	a := filepath.Join(root, "a.gp")
 	bpath := filepath.Join(root, "b.gp")
 	pr := &browserRemovingPrefs{browserFakePrefs{recents: []string{a, bpath}}}
-	b := browserFixture(t, pr, &browserFakeOpener{}, root)
-	b.focus = browserPaneRecent
+	b := browserFixture(t, pr, &browserFakeOpener{})
 
-	b.setSelection(browserPaneRecent, 0)
+	b.setSel(0)
 	b.forgetRecent()
 	if len(pr.recents) != 1 || pr.recents[0] != bpath {
 		t.Errorf("prefs recents = %v, want just %q", pr.recents, bpath)
@@ -554,13 +449,11 @@ func TestBrowserForgetPersistsWhenPrefsCanRemove(t *testing.T) {
 func TestBrowserOpenErrorIsCapturedNotPropagated(t *testing.T) {
 	root := t.TempDir()
 	browserTree(t, root, "broken.gp")
+	broken := filepath.Join(root, "broken.gp")
 	op := &browserFakeOpener{err: errors.New("truncated archive"), warns: []string{"bar 3 has no notes"}}
-	b := browserFixture(t, &browserFakePrefs{}, op, root)
+	b := browserFixture(t, &browserFakePrefs{recents: []string{broken}}, op)
 
-	b.setSelection(browserPaneBrowse, 1)
-	if b.listing[1].name != "broken.gp" {
-		t.Fatalf("row 1 = %q", b.listing[1].name)
-	}
+	b.setSel(0)
 	b.activate()
 
 	if b.errMsg == "" || !strings.Contains(b.errMsg, "truncated archive") {
@@ -578,18 +471,21 @@ func TestBrowserOpenErrorIsCapturedNotPropagated(t *testing.T) {
 	}
 }
 
-// TestBrowserOpenSuccess: a good piece reaches the opener, is recorded
-// as recent, and any warnings are kept for display.
+// TestBrowserOpenSuccess: a good piece chosen in the file dialog reaches
+// the opener, is recorded as recent, and any warnings are kept for
+// display.
 func TestBrowserOpenSuccess(t *testing.T) {
 	root := t.TempDir()
 	browserTree(t, root, "good.gp")
 	good := filepath.Join(root, "good.gp")
 	pr := &browserFakePrefs{}
 	op := &browserFakeOpener{warns: []string{"tempo track ignored"}}
-	b := browserFixture(t, pr, op, root)
+	b := browserFixture(t, pr, op)
+	b.SetOpenDialog(func(string) {})
 
-	b.setSelection(browserPaneBrowse, 1)
-	b.activate()
+	b.launchOpenDialog("")
+	b.OfferDialogResult(good, "")
+	b.drainDialog()
 
 	if len(op.opened) != 1 || op.opened[0] != good {
 		t.Fatalf("opener saw %v, want [%q]", op.opened, good)
@@ -606,6 +502,9 @@ func TestBrowserOpenSuccess(t *testing.T) {
 	if b.recents[0].missing {
 		t.Error("a piece that just opened is flagged missing")
 	}
+	if b.dialogBusy {
+		t.Error("the dialog is still marked busy after its result arrived")
+	}
 }
 
 // TestBrowserOpenWithoutOpener: a shell with no importer says so rather
@@ -613,11 +512,10 @@ func TestBrowserOpenSuccess(t *testing.T) {
 func TestBrowserOpenWithoutOpener(t *testing.T) {
 	root := t.TempDir()
 	browserTree(t, root, "song.gp")
-	sh := NewShell(Services{Prefs: &browserFakePrefs{}}, nil)
+	song := filepath.Join(root, "song.gp")
+	sh := NewShell(Services{Prefs: &browserFakePrefs{recents: []string{song}}}, nil)
 	b := NewBrowser(sh)
-	b.setDir(root)
-	b.focus = browserPaneBrowse
-	b.setSelection(browserPaneBrowse, 1)
+	b.setSel(0)
 	b.activate()
 	if b.errMsg == "" {
 		t.Error("opening with no importer reported nothing")
@@ -628,46 +526,26 @@ func TestBrowserOpenWithoutOpener(t *testing.T) {
 // root of the stack exits the application. Nothing else returns an
 // error.
 func TestBrowserEscapeQuits(t *testing.T) {
-	dir := t.TempDir()
-	browserTree(t, dir, "a.gp")
-	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{}, dir)
+	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
 
 	for _, k := range []ebiten.Key{ebiten.KeyEscape, ebiten.KeyQ} {
 		if err := b.handleKey(k); err != errQuit {
 			t.Errorf("handleKey(%v) = %v, want errQuit", k, err)
 		}
 	}
-	for _, k := range []ebiten.Key{ebiten.KeyUp, ebiten.KeyDown, ebiten.KeyTab,
-		ebiten.KeyBackspace, ebiten.KeyDelete, ebiten.KeyHome, ebiten.KeyEnd,
-		ebiten.KeyPageUp, ebiten.KeyPageDown, ebiten.KeyS} {
+	for _, k := range []ebiten.Key{ebiten.KeyUp, ebiten.KeyDown, ebiten.KeyDelete,
+		ebiten.KeyHome, ebiten.KeyEnd, ebiten.KeyPageUp, ebiten.KeyPageDown,
+		ebiten.KeyS, ebiten.KeyO} {
 		if err := b.handleKey(k); err != nil {
 			t.Errorf("handleKey(%v) = %v, want nil", k, err)
 		}
 	}
 }
 
-// TestBrowserTabSwitchesPanes.
-func TestBrowserTabSwitchesPanes(t *testing.T) {
-	dir := t.TempDir()
-	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{}, dir)
-	b.focus = browserPaneRecent
-	if err := b.handleKey(ebiten.KeyTab); err != nil {
-		t.Fatalf("Tab: %v", err)
-	}
-	if b.focus != browserPaneBrowse {
-		t.Error("Tab did not move to the browse pane")
-	}
-	_ = b.handleKey(ebiten.KeyTab)
-	if b.focus != browserPaneRecent {
-		t.Error("Tab did not move back to the recents pane")
-	}
-}
-
 // TestBrowserSettingsHook: S is inert and unadvertised until the
 // application installs an opener for the settings screen.
 func TestBrowserSettingsHook(t *testing.T) {
-	dir := t.TempDir()
-	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{}, dir)
+	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
 
 	if strings.Contains(b.hintLine(), "settings") {
 		t.Errorf("hint advertises settings with no hook: %q", b.hintLine())
@@ -689,48 +567,43 @@ func TestBrowserSettingsHook(t *testing.T) {
 	}
 }
 
-// TestBrowserHitTestAndClick: hovering maps to a row, a first click
-// selects, and a click on the already-selected row opens.
+// TestBrowserHitTestAndClick: hovering maps to a recents row, a first
+// click selects, and a click on the already-selected row opens.
 func TestBrowserHitTestAndClick(t *testing.T) {
-	root := t.TempDir()
-	browserTree(t, root, "albums/", "one.gp", "two.gp")
-	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{}, root)
-	b.focus = browserPaneRecent
+	op := &browserFakeOpener{}
+	b, paths := browserRecentsFixture(t, op, 3)
 
-	// Above the lists is nothing.
-	if _, _, ok := b.hitTest(brwBrowseX+10, 20); ok {
+	// Above the list is nothing.
+	if _, ok := b.hitTest(brwRecentX+10, 20); ok {
 		t.Error("the header hit-tested as a row")
 	}
-	// Between the panes is nothing.
-	if _, _, ok := b.hitTest((brwRecentX+brwRecentW+brwBrowseX)/2, brwListTop+4); ok {
-		t.Error("the gap between panes hit-tested as a row")
+	// The open card is not a list row.
+	if _, ok := b.hitTest(brwCardX+10, brwListTop+4); ok {
+		t.Error("the open card hit-tested as a row")
 	}
 	// Past the last entry is nothing.
-	if _, _, ok := b.hitTest(brwBrowseX+10, brwListTop+len(b.listing)*brwBrowseRowH+4); ok {
-		t.Error("empty space below the listing hit-tested as a row")
+	if _, ok := b.hitTest(brwRecentX+10, brwListTop+b.listLen()*brwRecentRowH+4); ok {
+		t.Error("empty space below the list hit-tested as a row")
 	}
 
-	p, i, ok := b.hitTest(brwBrowseX+10, brwListTop+2*brwBrowseRowH+4)
-	if !ok || p != browserPaneBrowse || i != 2 {
-		t.Fatalf("hitTest = %v, %d, %v; want the browse pane, row 2", p, i, ok)
+	i, ok := b.hitTest(brwRecentX+10, brwListTop+2*brwRecentRowH+4)
+	if !ok || i != 2 {
+		t.Fatalf("hitTest = %d, %v; want row 2", i, ok)
 	}
 
-	// First click focuses and selects, it does not open.
-	b.click(p, i)
-	if b.focus != browserPaneBrowse || b.browseSel != 2 {
-		t.Fatalf("after the first click: focus=%v sel=%d", b.focus, b.browseSel)
+	// First click selects, it does not open.
+	b.click(i)
+	if b.sel != 2 {
+		t.Fatalf("after the first click: sel=%d, want 2", b.sel)
 	}
-	if b.dir != filepath.Clean(root) {
-		t.Fatal("the first click opened something")
+	if len(op.opened) != 0 {
+		t.Fatalf("the first click opened %v", op.opened)
 	}
-	// Clicking the selected row opens it — here, descends into it.
-	b.setSelection(browserPaneBrowse, 1)
-	if b.listing[1].name != "albums" {
-		t.Fatalf("row 1 = %q, want albums", b.listing[1].name)
-	}
-	b.click(browserPaneBrowse, 1)
-	if filepath.Base(b.dir) != "albums" {
-		t.Errorf("clicking the selected folder left dir = %q", b.dir)
+	// Clicking the selected row opens it — which is also what the second
+	// click of a double click lands on.
+	b.click(i)
+	if len(op.opened) != 1 || op.opened[0] != paths[2] {
+		t.Errorf("clicking the selected row opened %v, want [%q]", op.opened, paths[2])
 	}
 }
 
@@ -806,7 +679,8 @@ func TestBrowserDroppedPathsRecoversRealPaths(t *testing.T) {
 }
 
 // TestBrowserHandleDrop: dropping a piece opens it, dropping a folder
-// browses to it, dropping something unsupported explains itself.
+// launches the OS file dialog rooted there, dropping something
+// unsupported explains itself.
 func TestBrowserHandleDrop(t *testing.T) {
 	root := t.TempDir()
 	browserTree(t, root, "albums/inner.gp", "song.gp", "notes.txt")
@@ -815,19 +689,23 @@ func TestBrowserHandleDrop(t *testing.T) {
 	notes := filepath.Join(root, "notes.txt")
 
 	op := &browserFakeOpener{}
-	b := browserFixture(t, &browserFakePrefs{}, op, root)
+	b := browserFixture(t, &browserFakePrefs{}, op)
 
 	b.handleDrop(browserDropFS{paths: []string{song}})
 	if len(op.opened) != 1 || op.opened[0] != song {
 		t.Fatalf("dropping a piece: opener saw %v", op.opened)
 	}
 
+	// A dropped folder is "here is where my tabs live": the dialog opens
+	// rooted there, and is marked in flight.
+	var dialogDirs []string
+	b.SetOpenDialog(func(startDir string) { dialogDirs = append(dialogDirs, startDir) })
 	b.handleDrop(browserDropFS{paths: []string{albums}})
-	if filepath.Base(b.dir) != "albums" {
-		t.Errorf("dropping a folder left dir = %q", b.dir)
+	if len(dialogDirs) != 1 || dialogDirs[0] != albums {
+		t.Errorf("dropping a folder launched the dialog with %v, want [%q]", dialogDirs, albums)
 	}
-	if b.focus != browserPaneBrowse {
-		t.Error("dropping a folder did not focus the browse pane")
+	if !b.dialogBusy {
+		t.Error("dropping a folder did not mark the dialog busy")
 	}
 
 	b.errMsg = ""
@@ -839,50 +717,44 @@ func TestBrowserHandleDrop(t *testing.T) {
 		t.Errorf("an unsupported drop reached the opener: %v", op.opened)
 	}
 
-	// A drop of nothing recoverable changes nothing.
-	before := b.dir
+	// A drop of nothing recoverable reports itself and launches nothing.
 	b.handleDrop(browserDropFS{paths: []string{filepath.Join(root, "vanished.gp")}})
-	if b.dir != before {
-		t.Errorf("an unrecoverable drop moved to %q", b.dir)
+	if b.errMsg == "" {
+		t.Error("an unrecoverable drop reported nothing")
+	}
+	if len(op.opened) != 1 || len(dialogDirs) != 1 {
+		t.Errorf("an unrecoverable drop acted: opened %v, dialogs %v", op.opened, dialogDirs)
 	}
 }
 
-// TestBrowserStartsOnTheLastPiecesFolder: with a usable recent, the
-// browse pane opens where that piece lives rather than at home.
+// TestBrowserStartsOnTheLastPiecesFolder: with a usable recent, the file
+// dialog starts where that piece lives rather than at home — a recent
+// whose file has gone missing is skipped over.
 func TestBrowserStartsOnTheLastPiecesFolder(t *testing.T) {
 	root := t.TempDir()
 	browserTree(t, root, "songs/last.gp")
 	last := filepath.Join(root, "songs", "last.gp")
 	pr := &browserFakePrefs{recents: []string{filepath.Join(root, "ghost.gp"), last}}
-	sh := NewShell(Services{Opener: &browserFakeOpener{}, Prefs: pr}, nil)
-	b := NewBrowser(sh)
-	if b.dir != filepath.Dir(last) {
-		t.Errorf("start directory = %q, want %q", b.dir, filepath.Dir(last))
-	}
-	if b.focus != browserPaneRecent {
-		t.Error("with recents present, focus should start on the recents pane")
+	b := browserFixture(t, pr, &browserFakeOpener{})
+	if got, want := b.startDir(), filepath.Dir(last); got != want {
+		t.Errorf("startDir() = %q, want %q", got, want)
 	}
 }
 
 // TestBrowserStartsOnTheChecklistWithNoRecents: a first run has no
-// pieces to list, so the left pane holds the getting-started checklist
-// and the focus stays on it. Landing in a folder listing instead would
-// drop a brand-new user into the one part of the screen that assumes
-// they already know what they are looking for.
+// pieces to list, so the list is the getting-started checklist — with
+// something selectable on it — and the file dialog still has somewhere
+// sensible to open.
 func TestBrowserStartsOnTheChecklistWithNoRecents(t *testing.T) {
-	sh := NewShell(Services{Opener: &browserFakeOpener{}, Prefs: &browserFakePrefs{}}, nil)
-	b := NewBrowser(sh)
+	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
 	if !b.onboarding() {
 		t.Fatal("with no recents the screen should be onboarding")
 	}
-	if b.focus != browserPaneRecent {
-		t.Error("focus should start on the checklist")
+	if b.listLen() == 0 {
+		t.Error("the checklist reports nothing to select")
 	}
-	if b.paneLen(browserPaneRecent) == 0 {
-		t.Error("the checklist pane reports nothing to select")
-	}
-	if b.dir == "" {
-		t.Error("no start directory was chosen")
+	if b.startDir() == "" {
+		t.Error("the file dialog has no starting directory")
 	}
 }
 
@@ -911,21 +783,21 @@ func TestNewBrowserShell(t *testing.T) {
 	}
 }
 
-// TestBrowserNilPrefs: a shell without preferences still browses.
+// TestBrowserNilPrefs: a shell without preferences still puts up a
+// working start screen.
 func TestBrowserNilPrefs(t *testing.T) {
-	dir := t.TempDir()
-	browserTree(t, dir, "a.gp")
 	sh := NewShell(Services{Opener: &browserFakeOpener{}}, nil)
 	b := NewBrowser(sh)
-	b.setDir(dir)
 	if len(b.recents) != 0 {
 		t.Errorf("recents = %v with no Prefs", browserNames(b.recents))
 	}
-	b.focus = browserPaneRecent
 	b.forgetRecent() // must not panic
 	b.reloadRecents()
 	if b.hintLine() == "" {
 		t.Error("empty hint line")
+	}
+	if b.startDir() == "" {
+		t.Error("the file dialog has no starting directory")
 	}
 }
 
@@ -971,13 +843,9 @@ func TestBrowserOneActionPerFrame(t *testing.T) {
 	browserTree(t, root, "song.gp")
 	song := filepath.Join(root, "song.gp")
 	op := &browserFakeOpener{}
-	b := browserFixture(t, &browserFakePrefs{}, op, root)
+	b := browserFixture(t, &browserFakePrefs{recents: []string{song}}, op)
 
-	b.setSelection(browserPaneBrowse, 1)
-	if b.listing[1].name != "song.gp" {
-		t.Fatalf("row 1 = %q, want song.gp", b.listing[1].name)
-	}
-
+	b.setSel(0)
 	if err := b.handleKeys(browserPressed(ebiten.KeyEnter, ebiten.KeyEscape)); err != nil {
 		t.Fatalf("open and quit on one frame = %v, want nil: the quit must not ride along with a queued push", err)
 	}
@@ -1001,7 +869,7 @@ func TestBrowserOneActionPerFrame(t *testing.T) {
 
 	// A second piece cannot be opened on the same frame either.
 	op.opened = nil
-	b.setSelection(browserPaneBrowse, 1)
+	b.setSel(0)
 	if err := b.handleKeys(browserPressed(ebiten.KeyEnter, ebiten.KeyNumpadEnter)); err != nil {
 		t.Fatalf("two open keys on one frame = %v", err)
 	}
@@ -1039,7 +907,7 @@ func TestBrowserRecentsProbeEachPathOnce(t *testing.T) {
 		return os.Stat(p)
 	}
 	pr := &browserFakePrefs{recents: []string{unreachable, here}}
-	b := browserStatFixture(t, pr, &browserFakeOpener{}, root, stat)
+	b := browserStatFixture(t, pr, &browserFakeOpener{}, stat)
 
 	if probes[unreachable] != 1 {
 		t.Fatalf("the first load probed the unreachable recent %d times, want 1", probes[unreachable])
@@ -1051,7 +919,7 @@ func TestBrowserRecentsProbeEachPathOnce(t *testing.T) {
 		t.Error("a present recent is flagged missing")
 	}
 
-	// Frames, opens and Deletes all rebuild the pane; none may re-probe.
+	// Frames, opens and Deletes all rebuild the list; none may re-probe.
 	for i := 0; i < 10; i++ {
 		b.reloadRecents()
 	}
@@ -1063,8 +931,7 @@ func TestBrowserRecentsProbeEachPathOnce(t *testing.T) {
 			b.recents[0].missing, b.recents[1].missing)
 	}
 
-	b.focus = browserPaneRecent
-	b.setSelection(browserPaneRecent, 1)
+	b.setSel(1)
 	b.forgetRecent()
 	if probes[unreachable] != 1 {
 		t.Errorf("Delete re-probed the unreachable recent (%d probes)", probes[unreachable])
@@ -1086,29 +953,28 @@ func TestBrowserRecentsProbeEachPathOnce(t *testing.T) {
 
 // TestBrowserReopeningAForgottenRecentShowsItAgain is the B3 regression:
 // Delete hides a recent for the session, but opening that exact file
-// again puts it back in the configuration's recents, and the pane must
-// agree with what was saved instead of hiding it until the next restart.
+// again — through the OS dialog now — puts it back in the
+// configuration's recents, and the list must agree with what was saved
+// instead of hiding it until the next restart.
 func TestBrowserReopeningAForgottenRecentShowsItAgain(t *testing.T) {
 	root := t.TempDir()
 	browserTree(t, root, "song.gp")
 	song := filepath.Join(root, "song.gp")
 	pr := &browserFakePrefs{recents: []string{song}}
 	op := &browserFakeOpener{}
-	b := browserFixture(t, pr, op, root)
+	b := browserFixture(t, pr, op)
 
-	b.focus = browserPaneRecent
-	b.setSelection(browserPaneRecent, 0)
+	b.setSel(0)
 	b.forgetRecent()
 	if len(b.recents) != 0 {
 		t.Fatalf("after Delete, recents = %v, want none", browserNames(b.recents))
 	}
 
-	b.focus = browserPaneBrowse
-	b.setSelection(browserPaneBrowse, 1)
-	if b.listing[1].name != "song.gp" {
-		t.Fatalf("row 1 = %q, want song.gp", b.listing[1].name)
-	}
-	b.activate()
+	// The user finds the same file again in the dialog.
+	b.SetOpenDialog(func(string) {})
+	b.launchOpenDialog("")
+	b.OfferDialogResult(song, "")
+	b.drainDialog()
 
 	if len(op.opened) != 1 {
 		t.Fatalf("opener saw %v, want the re-opened piece", op.opened)
@@ -1149,7 +1015,7 @@ func TestBrowserDropSkipsUnreadableEntries(t *testing.T) {
 	}
 
 	op := &browserFakeOpener{}
-	b := browserFixture(t, &browserFakePrefs{}, op, root)
+	b := browserFixture(t, &browserFakePrefs{}, op)
 	b.handleDrop(browserPartialDropFS{
 		paths:    []string{song},
 		nilHoles: 2,
@@ -1165,12 +1031,15 @@ func TestBrowserDropSkipsUnreadableEntries(t *testing.T) {
 		t.Errorf("errMsg = %q, want the two skipped items in it", b.errMsg)
 	}
 
-	// The same for a listed item that refuses to open, and for a folder.
+	// The same for a listed item that refuses to open, and for a folder —
+	// which now launches the dialog rooted there.
 	op.opened = nil
 	b.errMsg = ""
+	var dialogDirs []string
+	b.SetOpenDialog(func(startDir string) { dialogDirs = append(dialogDirs, startDir) })
 	b.handleDrop(browserPartialDropFS{paths: []string{albums}, bad: []string{"locked.gp"}})
-	if filepath.Base(b.dir) != "albums" {
-		t.Errorf("dropping a folder alongside a bad item left dir = %q", b.dir)
+	if len(dialogDirs) != 1 || dialogDirs[0] != albums {
+		t.Errorf("dropping a folder alongside a bad item launched the dialog with %v, want [%q]", dialogDirs, albums)
 	}
 	if !strings.Contains(b.errMsg, "1 dropped item") {
 		t.Errorf("errMsg = %q, want the one skipped item in it", b.errMsg)
@@ -1181,7 +1050,10 @@ func TestBrowserDropSkipsUnreadableEntries(t *testing.T) {
 // when a drop yields nothing usable, and used to return in silence.
 func TestBrowserDropAlwaysReportsOutcome(t *testing.T) {
 	root := t.TempDir()
-	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{}, root)
+	op := &browserFakeOpener{}
+	b := browserFixture(t, &browserFakePrefs{}, op)
+	launches := 0
+	b.SetOpenDialog(func(string) { launches++ })
 
 	for _, c := range []struct {
 		name string
@@ -1193,28 +1065,117 @@ func TestBrowserDropAlwaysReportsOutcome(t *testing.T) {
 		{"a drop the platform could not read at all", browserPartialDropFS{err: errors.New("read failed")}},
 	} {
 		b.errMsg = ""
-		before := b.dir
 		b.handleDrop(c.fsys)
 		if b.errMsg == "" {
 			t.Errorf("%s reported nothing", c.name)
 		}
-		if b.dir != before {
-			t.Errorf("%s moved the browse pane to %q", c.name, b.dir)
-		}
+	}
+	if len(op.opened) != 0 {
+		t.Errorf("an unusable drop reached the opener: %v", op.opened)
+	}
+	if launches != 0 {
+		t.Errorf("an unusable drop launched the dialog %d times", launches)
 	}
 }
 
-// TestBrowserTextIsASCII: basicfont has no glyphs beyond ASCII, so any
-// non-ASCII character in the chrome would render as tofu.
-func TestBrowserTextIsASCII(t *testing.T) {
-	dir := t.TempDir()
-	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{}, dir)
-	b.SetSettingsOpener(func() {})
-	for _, s := range []string{b.hintLine(), "RECENT PIECES", "BROWSE", ".. (up one folder)"} {
-		for _, r := range s {
-			if r > 127 {
-				t.Errorf("non-ASCII rune %q in %q", r, s)
-			}
-		}
+// TestBrowserDialogRoundTrip covers the mailbox between the screen and
+// the dialog goroutine: launch marks the dialog in flight and hands over
+// a starting directory; a chosen path is opened, a cancel does nothing,
+// and a failure is reported inline — each re-arming the dialog.
+func TestBrowserDialogRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	browserTree(t, root, "picked.gtab")
+	picked := filepath.Join(root, "picked.gtab")
+	op := &browserFakeOpener{}
+	b := browserFixture(t, &browserFakePrefs{}, op)
+	var dirs []string
+	b.SetOpenDialog(func(startDir string) { dirs = append(dirs, startDir) })
+
+	// A chosen file comes back and is opened.
+	b.launchOpenDialog("")
+	if !b.dialogBusy {
+		t.Fatal("launching did not mark the dialog busy")
+	}
+	if len(dirs) != 1 || dirs[0] == "" {
+		t.Fatalf("the dialog was launched with dirs %v, want one non-empty starting directory", dirs)
+	}
+	b.OfferDialogResult(picked, "")
+	b.drainDialog()
+	if len(op.opened) != 1 || op.opened[0] != picked {
+		t.Fatalf("opener saw %v, want [%q]", op.opened, picked)
+	}
+	if b.dialogBusy {
+		t.Error("the dialog stayed busy after its result was drained")
+	}
+
+	// A cancel opens nothing and reports nothing: not choosing a file is
+	// not an error.
+	b.launchOpenDialog("")
+	b.OfferDialogResult("", "")
+	b.drainDialog()
+	if len(op.opened) != 1 {
+		t.Errorf("a cancelled dialog opened %v", op.opened[1:])
+	}
+	if b.dialogBusy {
+		t.Error("the dialog stayed busy after a cancel")
+	}
+	if b.errMsg != "" {
+		t.Errorf("a cancel set errMsg %q", b.errMsg)
+	}
+
+	// A dialog failure is shown inline rather than swallowed.
+	b.launchOpenDialog("")
+	b.OfferDialogResult("", "boom")
+	b.drainDialog()
+	if !strings.Contains(b.errMsg, "boom") {
+		t.Errorf("errMsg = %q, want the dialog failure in it", b.errMsg)
+	}
+	if b.dialogBusy {
+		t.Error("the dialog stayed busy after a failure")
+	}
+}
+
+// TestBrowserDialogBusyGuard: while a dialog is in flight another launch
+// is ignored — two Explorer windows fighting over one mailbox helps
+// nobody — and once the result arrives the dialog can launch again.
+func TestBrowserDialogBusyGuard(t *testing.T) {
+	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
+	calls := 0
+	b.SetOpenDialog(func(string) { calls++ })
+
+	b.launchOpenDialog("")
+	b.launchOpenDialog("")
+	if calls != 1 {
+		t.Fatalf("a launch while busy ran the dialog %d times, want 1", calls)
+	}
+	b.OfferDialogResult("", "")
+	b.drainDialog()
+	b.launchOpenDialog("")
+	if calls != 2 {
+		t.Errorf("after a result the dialog launched %d times, want 2", calls)
+	}
+}
+
+// TestBrowserDialogUnavailable: a build with no dialog wired says so
+// instead of silently doing nothing.
+func TestBrowserDialogUnavailable(t *testing.T) {
+	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
+	b.launchOpenDialog("")
+	if !strings.Contains(b.errMsg, "no file dialog") {
+		t.Errorf("errMsg = %q, want the no-dialog explanation", b.errMsg)
+	}
+}
+
+// TestBrowserOKeyLaunchesDialog: O is the keyboard's way to the open
+// card's button.
+func TestBrowserOKeyLaunchesDialog(t *testing.T) {
+	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
+	calls := 0
+	b.SetOpenDialog(func(string) { calls++ })
+	if err := b.handleKey(ebiten.KeyO); err != nil {
+		t.Fatalf("handleKey(O) = %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("O launched the dialog %d times, want 1", calls)
 	}
 }

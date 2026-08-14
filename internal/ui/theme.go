@@ -82,10 +82,53 @@ func drawSection(dst *ebiten.Image, y *float64, title string) {
 	*y += uiSectionH
 }
 
-// drawPanel paints a control-sized background with a border.
+// uiCornerRadius rounds every control the UI draws. One constant, so
+// chips, buttons, panes and rows all carry the same curvature and read
+// as one family.
+const uiCornerRadius = 5.0
+
+// roundedRectPath traces r with uiCornerRadius corners. The radius is
+// clamped so degenerate rects (thinner than two radii) stay valid.
+func roundedRectPath(r rect) *vector.Path {
+	rad := float32(uiCornerRadius)
+	if half := float32(r.w) / 2; rad > half {
+		rad = half
+	}
+	if half := float32(r.h) / 2; rad > half {
+		rad = half
+	}
+	x0, y0 := float32(r.x), float32(r.y)
+	x1, y1 := float32(r.x+r.w), float32(r.y+r.h)
+	var p vector.Path
+	p.MoveTo(x0+rad, y0)
+	p.ArcTo(x1, y0, x1, y1, rad)
+	p.ArcTo(x1, y1, x0, y1, rad)
+	p.ArcTo(x0, y1, x0, y0, rad)
+	p.ArcTo(x0, y0, x1, y0, rad)
+	p.Close()
+	return &p
+}
+
+// fillRounded fills a rounded rectangle.
+func fillRounded(dst *ebiten.Image, r rect, col color.RGBA) {
+	op := &vector.DrawPathOptions{AntiAlias: true}
+	op.ColorScale.ScaleWithColor(col)
+	vector.FillPath(dst, roundedRectPath(r), nil, op)
+}
+
+// strokeRounded outlines a rounded rectangle.
+func strokeRounded(dst *ebiten.Image, r rect, col color.RGBA) {
+	op := &vector.DrawPathOptions{AntiAlias: true}
+	op.ColorScale.ScaleWithColor(col)
+	so := &vector.StrokeOptions{Width: 1}
+	vector.StrokePath(dst, roundedRectPath(r), so, op)
+}
+
+// drawPanel paints a control-sized background with a border — the one
+// shape every chip, button and row is made of.
 func drawPanel(dst *ebiten.Image, r rect, fill, edge color.RGBA) {
-	vector.DrawFilledRect(dst, float32(r.x), float32(r.y), float32(r.w), float32(r.h), fill, false)
-	vector.StrokeRect(dst, float32(r.x), float32(r.y), float32(r.w), float32(r.h), 1, edge, false)
+	fillRounded(dst, r, fill)
+	strokeRounded(dst, r, edge)
 }
 
 // A chipState is how a toggle chip renders: what it says, whether it is

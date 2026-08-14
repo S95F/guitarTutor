@@ -64,8 +64,11 @@ func build(which, piece string) (ui.Screen, error) {
 	case "start", "settings":
 		sh, browser := ui.NewBrowserShell(ui.Services{Prefs: &memPrefs{}, Audio: fakeAudio{}})
 		browser.SetSettingsOpener(func() {})
+		browser.SetOpenDialog(func(string) {})
 		if which == "settings" {
-			return ui.NewSettings(sh), nil
+			st := ui.NewSettings(sh)
+			st.SetFilePicker(func([]string, func(string)) {})
+			return st, nil
 		}
 		return browser, nil
 	}
