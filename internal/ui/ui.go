@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"image/color"
 	"strconv"
-	"strings"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
@@ -24,9 +23,15 @@ const (
 	screenW = 1280
 	screenH = 720
 
-	playheadX  = 0.3 // fraction of width where "now" sits
-	stringGap  = 26
-	tabTop     = 160
+	playheadX = 0.3 // fraction of width where "now" sits
+	stringGap = 26
+	// tabTop leaves the top of the window to the transport row and the
+	// track strip (see transport.go), so the controls and the notation
+	// stop competing for the same band of pixels. It is chosen to centre a
+	// standard six-string staff between the controls above and the
+	// timeline below; the layout test checks that four to eight strings
+	// all still fit without collisions.
+	tabTop     = 274
 	defaultPxQ = 96 // pixels per quarter note at zoom 1
 )
 
@@ -61,7 +66,13 @@ var (
 	colSounding = color.RGBA{255, 200, 60, 255}
 	colInferred = color.RGBA{120, 200, 255, 255}
 	colPlayhead = color.RGBA{230, 70, 70, 255}
-	colLoop     = color.RGBA{60, 160, 90, 60}
+	// colLoop is the loop region's wash. color.RGBA is alpha-premultiplied
+	// — that is what image/color means by the type — so the components
+	// have to be scaled by the alpha themselves. Written the obvious way,
+	// {60, 160, 90, 60}, the green is four times its own alpha, which
+	// Ebitengine clamps into a near-solid block that buries the tab it is
+	// supposed to tint. These are (60, 160, 90) premultiplied by 90/255.
+	colLoop     = color.RGBA{21, 56, 32, 90}
 	colLoopEdge = color.RGBA{60, 160, 90, 255}
 	colHUD      = color.RGBA{200, 200, 210, 255}
 	colCountIn  = color.RGBA{255, 200, 60, 255}
@@ -129,6 +140,29 @@ type App struct {
 	// the whole application rather than just this piece. nil keeps the
 	// standalone behaviour of quitting the process.
 	quitAll func()
+
+	// settings opens the settings screen over this piece (the S key and
+	// the SETTINGS chip). nil in a standalone practice window, where
+	// there is no shell to host another screen: the chip is then drawn
+	// disabled rather than lying about a key that does nothing.
+	settings func()
+	// reload re-opens the current piece. Some settings — the audio
+	// device, the SoundFont, the count-in — are read when a piece is
+	// opened and cannot reach a running engine, so changing one leaves
+	// the view showing something the configuration no longer describes.
+	// Rather than pretend otherwise, the view offers this.
+	reload func()
+	// settingsTouched is set when the settings screen this view opened
+	// changed something that only applies at open time, and drives the
+	// reload prompt.
+	settingsTouched bool
+
+	// Mouse state, refreshed once per Update. drag is the gesture that
+	// currently owns the pointer; wheelAcc carries fractional trackpad
+	// scroll between frames.
+	ptr      pointer
+	drag     dragTarget
+	wheelAcc float64
 
 	// liveUI carries the Phase 2 live-feedback state and feed mailbox
 	// (live.go). Its zero value is fully inert: no feeds, Phase 1
@@ -204,10 +238,14 @@ func (a *App) SetQuitAll(fn func()) { a.quitAll = fn }
 func (a *App) Update() error {
 	a.frame++
 	a.syncLive()
+	a.ptr = readPointer()
 
 	// Modal layers take the whole keyboard. The BPM entry must swallow
 	// digits so they cannot double as track mute/solo keys, and the help
-	// overlay must not let a stray key act on the piece behind it.
+	// overlay must not let a stray key act on the piece behind it. Both
+	// also close on a click outside themselves, because a modal you can
+	// only dismiss from the keyboard is a dead end for anyone who opened
+	// it with the mouse.
 	if a.bpmEntry {
 		a.updateBPMEntry()
 		return nil
@@ -220,40 +258,33 @@ func (a *App) Update() error {
 		a.dismissWarning()
 		return nil
 	}
+	if err := a.handleKeys(); err != nil {
+		return err
+	}
+	a.handleMouse(a.ptr, a.shiftHeld())
+	return nil
+}
 
-	eng, bars := a.eng, a.displayed().Bars
-
+// handleKeys applies this frame's keyboard. It returns errQuit when the
+// user leaves the piece.
+func (a *App) handleKeys() error {
+	eng := a.eng
 	switch {
 	case inpututil.IsKeyJustPressed(ebiten.KeyEscape):
 		// Finish this screen only: back to the song list.
 		return errQuit
 	case inpututil.IsKeyJustPressed(ebiten.KeyQ):
 		return a.quitApp()
-	case inpututil.IsKeyJustPressed(ebiten.KeyF1),
-		inpututil.IsKeyJustPressed(ebiten.KeySlash) && a.shiftHeld():
+	case helpKeyPressed():
 		a.openHelp()
 	case inpututil.IsKeyJustPressed(ebiten.KeySpace):
-		if eng.Playing() {
-			eng.Pause()
-		} else {
-			eng.Play()
-		}
+		a.togglePlay()
 	case inpututil.IsKeyJustPressed(ebiten.KeyHome):
-		eng.SeekTick(0)
+		a.seekTo(0)
 	case inpututil.IsKeyJustPressed(ebiten.KeyLeft):
-		if i := a.barAt(eng.PosTick()); i >= 0 {
-			// To the start of this bar; if already near it, the bar before.
-			b := bars[i]
-			if eng.PosTick()-b.Start < b.Len()/8 && i > 0 {
-				eng.SeekTick(bars[i-1].Start)
-			} else {
-				eng.SeekTick(b.Start)
-			}
-		}
+		a.seekPrevBar()
 	case inpututil.IsKeyJustPressed(ebiten.KeyRight):
-		if i := a.barAt(eng.PosTick()); i+1 < len(bars) {
-			eng.SeekTick(bars[i+1].Start)
-		}
+		a.seekNextBar()
 	case inpututil.IsKeyJustPressed(ebiten.KeyUp):
 		eng.SetTempoScale(eng.TempoScale() + 0.05)
 	case inpututil.IsKeyJustPressed(ebiten.KeyDown):
@@ -277,6 +308,10 @@ func (a *App) Update() error {
 		a.toggleMetronome()
 	case inpututil.IsKeyJustPressed(ebiten.KeyR):
 		a.toggleRamp()
+	case inpututil.IsKeyJustPressed(ebiten.KeyS):
+		a.openSettings()
+	case inpututil.IsKeyJustPressed(ebiten.KeyF5):
+		a.reloadPiece()
 	case inpututil.IsKeyJustPressed(ebiten.KeyT):
 		a.tunerView = !a.tunerView
 	case inpututil.IsKeyJustPressed(ebiten.KeyW):
@@ -284,13 +319,9 @@ func (a *App) Update() error {
 			a.toggleWait()
 		}
 	case inpututil.IsKeyJustPressed(ebiten.KeyEqual), inpututil.IsKeyJustPressed(ebiten.KeyKPAdd):
-		if a.zoom < 4 {
-			a.zoom *= 1.25
-		}
+		a.zoomIn()
 	case inpututil.IsKeyJustPressed(ebiten.KeyMinus), inpututil.IsKeyJustPressed(ebiten.KeyKPSubtract):
-		if a.zoom > 0.3 {
-			a.zoom /= 1.25
-		}
+		a.zoomOut()
 	}
 	for i := 0; i < len(a.sc.Tracks) && i < 9; i++ {
 		if inpututil.IsKeyJustPressed(ebiten.Key1 + ebiten.Key(i)) {
@@ -315,20 +346,65 @@ func (a *App) quitApp() error {
 	return errQuit
 }
 
+// SetSettingsOpener installs the action behind the S key and the SETTINGS
+// chip: showing the settings screen over this piece. Without it — a
+// standalone practice window has no shell to host another screen — the
+// chip is drawn disabled and S does nothing, rather than the view
+// advertising a key that silently fails.
+func (a *App) SetSettingsOpener(fn func()) { a.settings = fn }
+
+// SetReloader installs the action behind F5: re-opening the piece from
+// disk. The integrator supplies it because re-opening means rebuilding an
+// engine and an audio stream, which the view knows nothing about.
+func (a *App) SetReloader(fn func()) { a.reload = fn }
+
+// MarkSettingsChanged tells the view that a setting which is only read
+// when a piece is opened has changed underneath it — the capture device,
+// the SoundFont, the count-in. The view then offers a reload instead of
+// going on displaying a session the configuration no longer describes.
+// Whoever hosts the settings screen calls this on the way back.
+func (a *App) MarkSettingsChanged() { a.settingsTouched = a.reload != nil }
+
+// openSettings shows the settings screen over the piece, when the
+// integrator has wired one.
+func (a *App) openSettings() {
+	if a.settings != nil {
+		a.settings()
+	}
+}
+
+// reloadPiece (F5) re-opens the piece, picking up settings the running
+// engine could not. It also clears the prompt, so a reload that the
+// integrator declines to perform does not leave the offer up forever.
+func (a *App) reloadPiece() {
+	if a.reload == nil {
+		return
+	}
+	a.settingsTouched = false
+	a.reload()
+}
+
+// reloadPrompt is the line offering a reload, or "" when there is
+// nothing to offer.
+func (a *App) reloadPrompt() string {
+	if !a.settingsTouched {
+		return ""
+	}
+	return "settings changed: press F5 to re-open this piece with them"
+}
+
 // openHelp raises the key-binding overlay.
 func (a *App) openHelp() { a.helpOpen = true }
 
 // closeHelp lowers the key-binding overlay.
 func (a *App) closeHelp() { a.helpOpen = false }
 
-// updateHelp runs the key-binding overlay: escape, F1 or ? closes it and
-// nothing else reaches the piece. Escape closing the overlay rather than
-// the piece is why the overlay is handled before the main bindings.
+// updateHelp runs the key-binding overlay: escape, F1 or ? closes it, a
+// click anywhere closes it, and nothing else reaches the piece. Escape
+// closing the overlay rather than the piece is why the overlay is handled
+// before the main bindings.
 func (a *App) updateHelp() {
-	switch {
-	case inpututil.IsKeyJustPressed(ebiten.KeyEscape),
-		inpututil.IsKeyJustPressed(ebiten.KeyF1),
-		inpututil.IsKeyJustPressed(ebiten.KeySlash):
+	if helpDismissed(a.ptr) {
 		a.closeHelp()
 	}
 }
@@ -405,7 +481,17 @@ func (a *App) updateBPMEntry() {
 		a.commitBPMEntry()
 	case inpututil.IsKeyJustPressed(ebiten.KeyEscape):
 		a.cancelBPMEntry()
+	case a.ptr.pressed && !a.ptr.over(bpmEntryRect()):
+		// Clicking away from a box is how every other application
+		// dismisses one; a modal that ignores it traps a mouse user.
+		a.cancelBPMEntry()
 	}
+}
+
+// bpmEntryRect is the tempo-entry box, centred over the tab.
+func bpmEntryRect() rect {
+	const w, h = 300, 84
+	return rect{(screenW - w) / 2, tabTop + 20, w, h}
 }
 
 // bpmDigit appends one typed digit, up to bpmEntryMaxDigits. A leading
@@ -677,6 +763,7 @@ var practiceBindings = []practiceBinding{
 	{Group: "transport", Keys: "space", Hint: "space play/pause", Desc: "Start or pause playback"},
 	{Group: "transport", Keys: "left / right", Hint: "arrows seek", Desc: "Jump to the previous / next bar"},
 	{Group: "transport", Keys: "home", Desc: "Jump back to the first bar"},
+	{Group: "transport", Keys: "click / drag", Desc: "On the tab or the timeline: move the playhead"},
 
 	{Group: "tempo", Keys: "up / down", Hint: "up/dn tempo", Desc: "Practice speed up / down by 5%"},
 	{Group: "tempo", Keys: "shift+B", Hint: "shift+B bpm", Desc: "Type an exact target BPM"},
@@ -686,55 +773,45 @@ var practiceBindings = []practiceBinding{
 	{Group: "loop", Keys: "A", Hint: "A/B loop", Desc: "Set the loop start at the current bar"},
 	{Group: "loop", Keys: "B", Desc: "Set the loop end at the current bar"},
 	{Group: "loop", Keys: "L", Desc: "Clear the loop"},
+	{Group: "loop", Keys: "drag an edge", Desc: "Move a loop end: snaps to the beat, shift for tick-exact"},
 
-	{Group: "tracks", Keys: "1..9", Hint: "1-9 mute", Desc: "Mute / unmute a track"},
-	{Group: "tracks", Keys: "shift+1..9", Desc: "Solo a track; press again to release"},
+	{Group: "tracks", Keys: "1..9", Hint: "1-9 mute", Desc: "Mute / unmute a track (or click its chip)"},
+	{Group: "tracks", Keys: "shift+1..9", Desc: "Solo a track; press again to release (or right-click it)"},
 
 	{Group: "practice", Keys: "M", Hint: "M click", Desc: "Metronome click on / off"},
 	{Group: "practice", Keys: "T", Hint: "T tuner", Desc: "Tuner overlay"},
 	{Group: "practice", Keys: "W", Hint: "W wait", Desc: "Wait at each note until you play it",
 		Enabled: func(a *App) bool { return a.waitCtl }},
 
-	{Group: "view", Keys: "+ / -", Desc: "Zoom the tab in / out"},
+	{Group: "view", Keys: "+ / -", Desc: "Zoom the tab in / out (or the wheel over it)"},
 
+	{Group: "session", Keys: "S", Hint: "S settings", Desc: "Settings, without leaving the piece",
+		Enabled: func(a *App) bool { return a.settings != nil }},
+	{Group: "session", Keys: "F5", Desc: "Re-open this piece, picking up changed settings",
+		Enabled: func(a *App) bool { return a.reload != nil }},
 	{Group: "session", Keys: "? or F1", Hint: "? help", Desc: "This key-binding list"},
 	{Group: "session", Keys: "D", Desc: "Dismiss the warning banner"},
 	{Group: "session", Keys: "esc", Hint: "esc back", Desc: "Leave this piece and go back"},
 	{Group: "session", Keys: "Q", Hint: "Q quit", Desc: "Quit guitarTutor"},
 }
 
-// A practiceHelpGroup is one section of the help overlay.
-type practiceHelpGroup struct {
-	Name string
-	Rows []practiceBinding
+// helpRows resolves the binding table against this App: which bindings
+// do anything right now is a question only the view can answer.
+func (a *App) helpRows() []helpBinding {
+	out := make([]helpBinding, len(practiceBindings))
+	for i, b := range practiceBindings {
+		out[i] = helpBinding{Group: b.Group, Keys: b.Keys, Hint: b.Hint, Desc: b.Desc, Off: !b.enabled(a)}
+	}
+	return out
 }
 
-// helpGroups slices the binding table into the overlay's sections, in
+// helpGroups slices the resolved table into the overlay's sections, in
 // table order.
-func (a *App) helpGroups() []practiceHelpGroup {
-	var gs []practiceHelpGroup
-	for _, b := range practiceBindings {
-		if n := len(gs); n > 0 && gs[n-1].Name == b.Group {
-			gs[n-1].Rows = append(gs[n-1].Rows, b)
-			continue
-		}
-		gs = append(gs, practiceHelpGroup{Name: b.Group, Rows: []practiceBinding{b}})
-	}
-	return gs
-}
+func (a *App) helpGroups() []helpSection { return helpSections(a.helpRows()) }
 
-// hintLine is the one-line HUD summary, built from the same table as the
-// overlay and dropping bindings that are not currently available.
-func (a *App) hintLine() string {
-	parts := make([]string, 0, len(practiceBindings))
-	for _, b := range practiceBindings {
-		if b.Hint == "" || !b.enabled(a) {
-			continue
-		}
-		parts = append(parts, b.Hint)
-	}
-	return strings.Join(parts, "  ")
-}
+// hintLine is the one-line footer summary, built from the same table as
+// the overlay so the two cannot drift apart.
+func (a *App) hintLine() string { return hintLineOf(a.helpRows()) }
 
 // Draw renders the frame from engine state. The tuner overlay (T)
 // replaces the tab; the HUD and transport keys stay active either way.
@@ -742,12 +819,13 @@ func (a *App) hintLine() string {
 // that order, help being fully modal.
 func (a *App) Draw(screen *ebiten.Image) {
 	screen.Fill(colBG)
+	l := a.layout()
 	if a.tunerView {
 		a.drawTuner(screen)
 	} else {
 		a.drawTab(screen)
 	}
-	a.drawHUD(screen)
+	a.drawHUD(screen, l)
 	if a.warningVisible() {
 		a.drawWarning(screen)
 	}
@@ -844,104 +922,86 @@ func (a *App) drawTab(screen *ebiten.Image) {
 	vector.StrokeLine(screen, phX, tabTop-24, phX, float32(tabTop+(nStr-1)*stringGap+24), 2, colPlayhead, false)
 
 	if a.eng.Waiting() {
-		drawText(screen, "WAITING", screenW*playheadX-24, tabTop-48, a.pulseCol())
+		a.drawStateChip(screen, "WAITING", a.pulseCol(), a.stateChipY())
 	}
 }
 
-func (a *App) drawHUD(screen *ebiten.Image) {
-	state := "paused"
-	if a.eng.Playing() {
-		state = "playing"
-	}
-	if in, left := a.eng.CountingIn(); in {
-		drawText(screen, fmt.Sprintf("COUNT-IN %d", left), screenW*playheadX-30, tabTop-64, colCountIn)
-		state = "count-in"
-	}
-	line1 := fmt.Sprintf("%s | %.0f BPM (x%.2f) | pass %d | %s",
-		state, a.eng.EffectiveBPM(), a.eng.TempoScale(), a.eng.PassCount(), a.countInLabel())
-	if _, _, on := a.eng.Loop(); on {
-		line1 += " | LOOP"
-	}
-	if a.metronome {
-		line1 += " | click"
-	}
-	if a.ramp {
-		line1 += " | ramp"
-	}
-	if a.wait {
-		line1 += " | wait"
-	}
-	if a.live {
-		line1 += " | live"
-	}
-	drawText(screen, line1, 16, 16, colHUD)
+// drawHUD paints everything around the notation: the header, the
+// transport row, the track strip, the timeline and the footer.
+func (a *App) drawHUD(screen *ebiten.Image, l practiceLayout) {
+	drawHeader(screen, a.pieceTitle(), a.statusLine(), a.statusColour())
+	a.drawTransport(screen, l, a.ptr)
+	a.drawTrackStrip(screen, l, a.ptr)
+	a.drawTimeline(screen, l, a.ptr)
 
+	if in, left := a.eng.CountingIn(); in {
+		a.drawStateChip(screen, fmt.Sprintf("COUNT-IN %d", left), colCountIn, a.stateChipY())
+	}
 	if a.live {
 		a.drawLiveHUD(screen)
 		a.drawLegend(screen)
 	}
-
-	for i, t := range a.sc.Tracks {
-		name := t.Name
-		if name == "" {
-			name = fmt.Sprintf("track %d", i+1)
-		}
-		cur := " "
-		if i == a.track {
-			cur = ">"
-		}
-		col := colHUD
-		if a.mutedAudibly(i) {
-			col = colString
-		}
-		drawText(screen, fmt.Sprintf("%s%d %s [%s]", cur, i+1, name, a.trackMarks(i)), 16, float64(40+16*i), col)
-	}
-
 	if msg := a.bpmMessage(); msg != "" {
-		drawText(screen, msg, (screenW-float64(7*len(msg)))/2, screenH-70, colSounding)
+		drawText(screen, msg, centreX(msg, 0, screenW), a.msgY(), colSounding)
 	}
+	if msg := a.reloadPrompt(); msg != "" {
+		drawText(screen, msg, centreX(msg, 0, screenW), a.msgY()+20, colClose)
+	}
+	drawFooter(screen, a.hintLine())
+}
 
-	hint := a.hintLine()
-	drawText(screen, hint, 16, screenH-24, colBarline)
+// pieceTitle is the header's left-hand text: the piece's own title, or a
+// neutral fallback for a score that carries none.
+func (a *App) pieceTitle() string {
+	if a.sc.Title != "" {
+		return truncate(a.sc.Title, 34)
+	}
+	return "guitarTutor"
+}
+
+// statusLine is the header's right-hand text: what the transport is
+// doing, at what tempo, and on which pass.
+func (a *App) statusLine() string {
+	state := "paused"
+	if a.eng.Playing() {
+		state = "playing"
+	}
+	if in, _ := a.eng.CountingIn(); in {
+		state = "count-in"
+	}
+	s := fmt.Sprintf("%s     %.0f BPM  (x%.2f)     pass %d",
+		state, a.eng.EffectiveBPM(), a.eng.TempoScale(), a.eng.PassCount())
+	if a.live {
+		s += "     live"
+	}
+	return s
+}
+
+// statusColour tints the header's status: amber while the transport is
+// moving, grey at rest, so the state reads without being parsed.
+func (a *App) statusColour() color.RGBA {
+	if a.eng.Playing() {
+		return colSounding
+	}
+	return colHUD
 }
 
 // drawBPMEntry paints the exact-tempo entry box: what has been typed so
-// far, and the two keys that end it.
+// far, and the ways out of it.
 func (a *App) drawBPMEntry(screen *ebiten.Image) {
-	const w, h = 300, 80
-	x := float32((screenW - w) / 2)
-	y := float32(tabTop - 130)
-	vector.DrawFilledRect(screen, x, y, w, h, colBG, false)
-	vector.StrokeRect(screen, x, y, w, h, 2, colSounding, false)
-	drawText(screen, "target BPM", float64(x)+16, float64(y)+12, colHUD)
-	drawTextScaled(screen, a.bpmDigits+"_", float64(x)+16, float64(y)+30, 2, colNote)
-	drawText(screen, "enter apply   esc cancel", float64(x)+16, float64(y)+60, colBarline)
+	r := bpmEntryRect()
+	vector.DrawFilledRect(screen, float32(r.x), float32(r.y), float32(r.w), float32(r.h), colBG, false)
+	vector.StrokeRect(screen, float32(r.x), float32(r.y), float32(r.w), float32(r.h), 2, colSounding, false)
+	drawText(screen, "target BPM", r.x+16, r.y+12, colHUD)
+	drawTextScaled(screen, a.bpmDigits+"_", r.x+16, r.y+30, 2, colNote)
+	drawText(screen, "enter apply    esc or click away to cancel", r.x+16, r.y+64, colBarline)
 }
 
-// drawHelp paints the full key-binding list over everything else. It is
-// generated from practiceBindings, the same table the HUD hint line uses;
-// bindings that are unavailable right now are greyed rather than hidden,
-// so the key is never a mystery.
+// drawHelp paints the full key-binding list over everything else, from
+// the same table the footer hint uses.
 func (a *App) drawHelp(screen *ebiten.Image) {
-	vector.DrawFilledRect(screen, 0, 0, screenW, screenH, colHelpDim, false)
-	drawTextScaled(screen, "KEY BINDINGS", 220, 24, 2, colNote)
-	y := 68.0
-	for _, g := range a.helpGroups() {
-		drawText(screen, strings.ToUpper(g.Name), 220, y, colSounding)
-		y += 18
-		for _, b := range g.Rows {
-			col, desc := colNote, b.Desc
-			if !b.enabled(a) {
-				col, desc = colBarline, b.Desc+"  (not available now)"
-			}
-			drawText(screen, b.Keys, 240, y, col)
-			drawText(screen, desc, 420, y, col)
-			y += 16
-		}
-		y += 8
-	}
-	drawText(screen, "track marks:  M muted    m muted by another track's solo    S soloed", 220, y+4, colHUD)
-	drawText(screen, "esc, F1 or ? closes this", 220, float64(screenH)-40, colHUD)
+	drawHelpOverlay(screen, "PRACTICE KEYS", a.helpRows(),
+		"track chips:  click to mute    right-click to solo    the blue edge marks the track the tab is showing")
 }
 
 func drawText(dst *ebiten.Image, s string, x, y float64, col color.RGBA) {

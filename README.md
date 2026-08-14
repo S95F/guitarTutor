@@ -134,7 +134,9 @@ Legacy Guitar Pro formats (`.gp3`–`.gp5`, `.gpx`) aren't parsed directly — c
 MuseScore4.exe song.gp5 -o song.musicxml
 ```
 
-In the practice view: **space** play/pause, **←/→** seek by bar, **↑/↓** tempo ±5%, **A/B** set loop points at the current bar, **L** clear loop, **M** metronome, **R** progressive speed ramp, **+/−** zoom, **1–9** mute tracks, **T** tuner, **W** wait mode (live), **Q** quit.
+In the practice view: **space** play/pause, **←/→** seek by bar, **↑/↓** tempo ±5%, **shift+B** exact BPM, **A/B** set loop points at the current bar, **L** clear loop, **M** metronome, **R** progressive speed ramp, **C** count-in, **+/−** zoom, **1–9** mute tracks (**shift+1–9** solo), **T** tuner, **W** wait mode (live), **S** settings, **F5** re-open the piece, **esc** back, **Q** quit. Press **?** or **F1** on any screen for the full list.
+
+The mouse works everywhere too: a transport bar and toggles across the top, a timeline under the tab showing where you are in the whole piece — click or drag it to move — and loop ends you can drag on either the tab or the timeline, snapping to the beat unless you hold shift. Click a track chip to mute it, right-click to solo it.
 
 ### Live mode — the guitar plugs in
 

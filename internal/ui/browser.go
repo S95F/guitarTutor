@@ -47,22 +47,16 @@ const (
 	brwBrowseRowH = 22
 	brwBrowseRows = 18
 	brwStatusY    = 578
-	brwCharW      = 7 // basicfont is a 7x13 fixed-width face
 	brwNameScale  = 1.7
 	// brwRecentNameChars is how many scaled-up characters fit across the
-	// recents pane: (brwRecentW-16) / (brwCharW * brwNameScale), rounded
+	// recents pane: (brwRecentW-16) / (glyphW * brwNameScale), rounded
 	// down. Spelt out because Go will not truncate a constant to int.
 	brwRecentNameChars = 32
 )
 
-var (
-	colBrwPanel   = color.RGBA{24, 24, 32, 255}
-	colBrwSel     = color.RGBA{38, 66, 104, 255}
-	colBrwSelDim  = color.RGBA{34, 38, 48, 255}
-	colBrwHover   = color.RGBA{28, 30, 40, 255}
-	colBrwDim     = color.RGBA{132, 132, 148, 255}
-	colBrwMissing = color.RGBA{150, 90, 90, 255}
-)
+// colMissing tints a recent whose file is no longer on disk. Every other
+// colour this screen uses is the shared palette in theme.go.
+var colMissing = color.RGBA{150, 90, 90, 255}
 
 // browserPieceExts is the set of piece formats the application imports.
 // Anything else is hidden from the listing: an unfiltered view of a real
@@ -152,7 +146,13 @@ type Browser struct {
 
 	settings func()
 
+	// helpOpen is the ?/F1 key-binding overlay. While it is up nothing
+	// else on the screen reacts, so a key pressed to dismiss it cannot
+	// also open a piece behind it.
+	helpOpen bool
+
 	// Mouse state, refreshed every frame by handleMouse.
+	ptr       pointer
 	hoverOK   bool
 	hoverPane browserPane
 	hoverIdx  int
@@ -166,9 +166,12 @@ func NewBrowser(sh *Shell) *Browser {
 	b := &Browser{sh: sh, forgotten: map[string]bool{}}
 	b.reloadRecents()
 	b.setDir(b.startDir())
-	if len(b.recents) == 0 {
-		b.focus = browserPaneBrowse
-	}
+	// The focus starts on the left pane (the zero value) and stays
+	// there: that pane always has something to select. With pieces
+	// behind you it lists them, and on a first run the getting-started
+	// checklist stands in for them — which is precisely where a
+	// first-time user should land, rather than in a folder listing they
+	// have no reason to trust yet.
 	return b
 }
 
@@ -288,12 +291,22 @@ func (b *Browser) reloadRecents() {
 	b.recentTop = browserClampTop(b.recentSel, b.recentTop, brwRecentRows, len(b.recents))
 }
 
+// extMatcher returns a name filter accepting the given extensions,
+// case-insensitively. It is what lets the same directory listing serve
+// the start screen (piece formats) and the SoundFont picker (.sf2).
+func extMatcher(exts []string) func(string) bool {
+	set := make(map[string]bool, len(exts))
+	for _, e := range exts {
+		set[strings.ToLower(e)] = true
+	}
+	return func(name string) bool { return set[strings.ToLower(filepath.Ext(name))] }
+}
+
 // browserReadListing reads dir and returns the rows worth showing:
-// sub-directories and files whose extension the application imports,
-// directories first and then names, both case-insensitively. Dot-files
-// are hidden. The error is the directory read failure, if any; the
-// caller shows it inline.
-func browserReadListing(dir string) ([]browserEntry, error) {
+// sub-directories and files accept says yes to, directories first and
+// then names, both case-insensitively. Dot-files are hidden. The error is
+// the directory read failure, if any; the caller shows it inline.
+func browserReadListing(dir string, accept func(string) bool) ([]browserEntry, error) {
 	des, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -310,7 +323,7 @@ func browserReadListing(dir string) ([]browserEntry, error) {
 		if !isDir && de.Type()&os.ModeSymlink != 0 {
 			isDir = browserIsDir(filepath.Join(dir, name))
 		}
-		if !isDir && !browserSupported(name) {
+		if !isDir && !accept(name) {
 			continue
 		}
 		out = append(out, browserEntry{name: name, path: filepath.Join(dir, name), isDir: isDir})
@@ -348,7 +361,7 @@ func (b *Browser) setDir(dir string) {
 	dir = filepath.Clean(dir)
 	b.dir = dir
 	b.dirErr = ""
-	kids, err := browserReadListing(dir)
+	kids, err := browserReadListing(dir, browserSupported)
 	if err != nil {
 		b.dirErr = browserErrText(err)
 		kids = nil
@@ -438,9 +451,14 @@ func (b *Browser) paneRows(p browserPane) int {
 	return brwBrowseRows
 }
 
-// paneLen reports how many entries a pane holds.
+// paneLen reports how many entries a pane holds. With no recents the
+// left pane holds the getting-started checklist instead, and its steps
+// are what the selection moves over.
 func (b *Browser) paneLen(p browserPane) int {
 	if p == browserPaneRecent {
+		if b.onboarding() {
+			return len(b.stepList())
+		}
 		return len(b.recents)
 	}
 	return len(b.listing)
@@ -518,6 +536,10 @@ func (b *Browser) toggleFocus() {
 func (b *Browser) activate() {
 	switch b.focus {
 	case browserPaneRecent:
+		if b.onboarding() {
+			b.activateStep()
+			return
+		}
 		if b.recentSel >= len(b.recents) {
 			return
 		}
@@ -709,6 +731,7 @@ var browserKeys = []ebiten.Key{
 	ebiten.KeyHome, ebiten.KeyEnd,
 	ebiten.KeyEnter, ebiten.KeyNumpadEnter, ebiten.KeyBackspace,
 	ebiten.KeyTab, ebiten.KeyDelete, ebiten.KeyS,
+	ebiten.KeyF1, ebiten.KeySlash,
 	ebiten.KeyEscape, ebiten.KeyQ,
 }
 
@@ -763,16 +786,37 @@ func (b *Browser) handleKey(k ebiten.Key) error {
 		if b.settings != nil {
 			b.settings()
 		}
+	case ebiten.KeyF1, ebiten.KeySlash:
+		b.helpOpen = true
 	}
 	return nil
 }
 
-// browserWheelSteps splits an accumulated wheel delta into whole
-// notches and the remainder to carry into the next frame, so a trackpad
-// producing fractional deltas still scrolls smoothly.
-func browserWheelSteps(acc float64) (steps int, rem float64) {
-	steps = int(acc)
-	return steps, acc - float64(steps)
+// browserBindings resolves this screen's control table. It is the single
+// source of both the footer hint and the ?/F1 overlay.
+func (b *Browser) browserBindings() []helpBinding {
+	leave := helpBinding{Group: "session", Keys: "esc", Hint: "esc quit", Desc: "Quit guitarTutor"}
+	if b.sh != nil && b.sh.Depth() > 1 {
+		leave = helpBinding{Group: "session", Keys: "esc", Hint: "esc back", Desc: "Go back to where you came from"}
+	}
+	return []helpBinding{
+		{Group: "choosing", Keys: "up / down", Hint: "up/dn select", Desc: "Move the selection"},
+		{Group: "choosing", Keys: "page up / down", Desc: "Move the selection a screenful at a time"},
+		{Group: "choosing", Keys: "home / end", Desc: "Jump to the first or last entry"},
+		{Group: "choosing", Keys: "tab", Hint: "tab switch pane", Desc: "Switch between recent pieces and the folder listing"},
+		{Group: "choosing", Keys: "click", Desc: "Select an entry; click it again to open it"},
+
+		{Group: "opening", Keys: "enter", Hint: "enter open", Desc: "Open the selected piece, or go into the selected folder"},
+		{Group: "opening", Keys: "backspace", Hint: "backspace up a folder", Desc: "Go up to the parent folder"},
+		{Group: "opening", Keys: "drag and drop", Desc: "Drop a piece on the window to open it, or a folder to browse it"},
+		{Group: "opening", Keys: "del", Hint: "del forget recent", Desc: "Forget the selected recent piece"},
+
+		{Group: "session", Keys: "S", Hint: "s settings", Off: b.settings == nil,
+			Desc: "Audio devices, latency calibration, SoundFont and count-in"},
+		{Group: "session", Keys: "? or F1", Hint: "? help", Desc: "This key-binding list"},
+		leave,
+		{Group: "session", Keys: "Q", Desc: "Quit guitarTutor"},
+	}
 }
 
 // hitTest maps a cursor position to the pane and entry index under it.
@@ -820,15 +864,14 @@ func (b *Browser) click(p browserPane, i int) {
 
 // handleMouse reads the pointer once per frame: hover highlighting,
 // wheel scrolling of the pane under the cursor, and clicks.
-func (b *Browser) handleMouse() {
-	x, y := ebiten.CursorPosition()
-	p, i, ok := b.hitTest(x, y)
+func (b *Browser) handleMouse(pt pointer) {
+	p, i, ok := b.hitTest(int(pt.x), int(pt.y))
 	b.hoverOK, b.hoverPane, b.hoverIdx = ok, p, i
 
-	if _, dy := ebiten.Wheel(); dy != 0 {
-		b.wheelAcc += dy
+	if pt.wheel != 0 {
+		b.wheelAcc += pt.wheel
 		var steps int
-		steps, b.wheelAcc = browserWheelSteps(b.wheelAcc)
+		steps, b.wheelAcc = wheelSteps(b.wheelAcc)
 		if steps != 0 {
 			target := b.focus
 			if ok {
@@ -837,7 +880,7 @@ func (b *Browser) handleMouse() {
 			b.scrollBy(target, -steps*3)
 		}
 	}
-	if ok && inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
+	if ok && pt.pressed {
 		b.click(p, i)
 	}
 }
@@ -889,6 +932,15 @@ func (b *Browser) handleKeys(fires func(ebiten.Key) bool) error {
 // errQuit when the user leaves the screen; import failures are held for
 // display instead of being returned, so a bad file cannot end the app.
 func (b *Browser) Update() error {
+	b.ptr = readPointer()
+	// The overlay is modal: while it is up, a key or click dismisses it
+	// and reaches nothing underneath.
+	if b.helpOpen {
+		if helpDismissed(b.ptr) {
+			b.helpOpen = false
+		}
+		return nil
+	}
 	queued := b.queuedEdits()
 	if fsys := ebiten.DroppedFiles(); fsys != nil {
 		b.handleDrop(fsys)
@@ -899,73 +951,35 @@ func (b *Browser) Update() error {
 	if err := b.handleKeys(browserKeyFiresNow); err != nil {
 		return err
 	}
-	if b.queuedEdits() != queued {
+	if b.queuedEdits() != queued || b.helpOpen {
 		return nil
 	}
-	b.handleMouse()
+	b.handleMouse(b.ptr)
 	return nil
 }
 
-// hintLine is the one-line key summary under the title. The settings
-// hint appears only once an opener has been installed, and the last key
-// is honest about whether leaving quits or goes back.
-func (b *Browser) hintLine() string {
-	parts := []string{
-		"up/dn select", "enter open", "backspace up a folder",
-		"tab switch pane", "del forget recent",
-	}
-	if b.settings != nil {
-		parts = append(parts, "s settings")
-	}
-	leave := "esc quit"
-	if b.sh != nil && b.sh.Depth() > 1 {
-		leave = "esc back"
-	}
-	return strings.Join(append(parts, leave), "   ")
-}
-
-// browserTruncate shortens a string to max characters, keeping the
-// front — the right choice for names.
-func browserTruncate(s string, max int) string {
-	if max <= 0 {
-		return ""
-	}
-	if len(s) <= max {
-		return s
-	}
-	if max <= 3 {
-		return s[:max]
-	}
-	return s[:max-3] + "..."
-}
-
-// browserEllipsize shortens a string to max characters, keeping the
-// tail — the right choice for paths, where the last folders identify it.
-func browserEllipsize(s string, max int) string {
-	if max <= 0 {
-		return ""
-	}
-	if len(s) <= max {
-		return s
-	}
-	if max <= 3 {
-		return s[len(s)-max:]
-	}
-	return "..." + s[len(s)-(max-3):]
-}
+// hintLine is the one-line key summary in the footer, built from the
+// same table as the overlay. The settings hint appears only once an
+// opener has been installed, and the leave key is honest about whether
+// it quits or goes back.
+func (b *Browser) hintLine() string { return hintLineOf(b.browserBindings()) }
 
 // Draw paints the start screen. It reads only fields the methods above
 // set, so nothing here decides anything.
 func (b *Browser) Draw(screen *ebiten.Image) {
 	screen.Fill(colBG)
-
-	drawTextScaled(screen, "guitarTutor", brwRecentX, 22, 2.2, colNote)
-	drawText(screen, b.hintLine(), brwRecentX, 74, colBrwDim)
-	drawText(screen, "drop a Guitar Pro, MusicXML or MIDI file on this window to open it", brwRecentX, 94, colBarline)
+	drawHeader(screen, "guitarTutor", "a practice companion for guitarists", colDim)
+	drawText(screen, "drop a Guitar Pro, MusicXML or MIDI file on this window to open it",
+		uiPadX, uiBodyTop+8, colBarline)
 
 	b.drawRecents(screen)
 	b.drawBrowse(screen)
 	b.drawStatus(screen)
+	drawFooter(screen, b.hintLine())
+
+	if b.helpOpen {
+		drawHelpOverlay(screen, "START SCREEN KEYS", b.browserBindings(), "")
+	}
 }
 
 // drawPaneFrame paints a pane's background, title and focus underline.
@@ -974,9 +988,14 @@ func (b *Browser) drawPaneFrame(screen *ebiten.Image, p browserPane, x, w float3
 	if p == browserPaneBrowse {
 		rowH = brwBrowseRowH
 	}
+	if p == browserPaneRecent && b.onboarding() {
+		// The checklist is three lines, not eleven: a pane sized for a
+		// full recents list would be mostly empty box.
+		rows = len(b.stepList()) + 1
+	}
 	h := float32(rows * rowH)
-	vector.DrawFilledRect(screen, x-8, brwListTop-8, w+16, h+16, colBrwPanel, false)
-	col := colBrwDim
+	vector.DrawFilledRect(screen, x-8, brwListTop-8, w+16, h+16, colPanel, false)
+	col := colDim
 	if b.focus == p {
 		col = colSounding
 	}
@@ -989,25 +1008,24 @@ func (b *Browser) drawPaneFrame(screen *ebiten.Image, p browserPane, x, w float3
 func (b *Browser) rowBG(p browserPane, i int) (color.RGBA, bool) {
 	if b.selection(p) == i && b.paneLen(p) > 0 {
 		if b.focus == p {
-			return colBrwSel, true
+			return colFocus, true
 		}
-		return colBrwSelDim, true
+		return colFocusDim, true
 	}
 	if b.hoverOK && b.hoverPane == p && b.hoverIdx == i {
-		return colBrwHover, true
+		return colHover, true
 	}
 	return color.RGBA{}, false
 }
 
 func (b *Browser) drawRecents(screen *ebiten.Image) {
-	b.drawPaneFrame(screen, browserPaneRecent, brwRecentX, brwRecentW, "RECENT PIECES")
-	if len(b.recents) == 0 {
-		drawText(screen, "No recent pieces yet.", brwRecentX+4, brwListTop+8, colBrwDim)
-		drawText(screen, "Browse on the right, or drop a file", brwRecentX+4, brwListTop+32, colBarline)
-		drawText(screen, "onto this window.", brwRecentX+4, brwListTop+50, colBarline)
+	if b.onboarding() {
+		b.drawPaneFrame(screen, browserPaneRecent, brwRecentX, brwRecentW, "GETTING STARTED")
+		b.drawSteps(screen)
 		return
 	}
-	pathChars := (brwRecentW - 16) / brwCharW
+	b.drawPaneFrame(screen, browserPaneRecent, brwRecentX, brwRecentW, "RECENT PIECES")
+	pathChars := fitChars(brwRecentW - 16)
 	for row := 0; row < brwRecentRows; row++ {
 		i := b.recentTop + row
 		if i >= len(b.recents) {
@@ -1021,21 +1039,21 @@ func (b *Browser) drawRecents(screen *ebiten.Image) {
 		nameCol := colNote
 		sub := e.parent
 		if e.missing {
-			nameCol = colBrwMissing
+			nameCol = colMissing
 			sub = "missing - press Del to forget"
 		}
-		drawTextScaled(screen, browserTruncate(e.name, brwRecentNameChars), brwRecentX+4, float64(y), brwNameScale, nameCol)
-		drawText(screen, browserEllipsize(sub, pathChars), brwRecentX+4, float64(y)+21, colBrwDim)
+		drawTextScaled(screen, truncate(e.name, brwRecentNameChars), brwRecentX+4, float64(y), brwNameScale, nameCol)
+		drawText(screen, ellipsize(sub, pathChars), brwRecentX+4, float64(y)+21, colDim)
 	}
 	if len(b.recents) > brwRecentRows {
 		drawText(screen, fmt.Sprintf("%d-%d of %d", b.recentTop+1,
-			browserMin(b.recentTop+brwRecentRows, len(b.recents)), len(b.recents)),
+			min(b.recentTop+brwRecentRows, len(b.recents)), len(b.recents)),
 			brwRecentX+4, brwListTop+brwRecentRows*brwRecentRowH+12, colBarline)
 	}
 }
 
 func (b *Browser) drawBrowse(screen *ebiten.Image) {
-	title := "BROWSE   " + browserEllipsize(b.dir, (brwBrowseW-80)/brwCharW)
+	title := "BROWSE   " + ellipsize(b.dir, fitChars(brwBrowseW-80))
 	b.drawPaneFrame(screen, browserPaneBrowse, brwBrowseX, brwBrowseW, title)
 
 	if b.dirErr != "" {
@@ -1043,7 +1061,7 @@ func (b *Browser) drawBrowse(screen *ebiten.Image) {
 		drawText(screen, "press Backspace to go back up", brwBrowseX+4, brwListTop+28, colBarline)
 		return
 	}
-	nameChars := (brwBrowseW - 16) / brwCharW
+	nameChars := fitChars(brwBrowseW - 16)
 	for row := 0; row < brwBrowseRows; row++ {
 		i := b.browseTop + row
 		if i >= len(b.listing) {
@@ -1063,14 +1081,14 @@ func (b *Browser) drawBrowse(screen *ebiten.Image) {
 				label += "/"
 			}
 		}
-		drawText(screen, browserTruncate(label, nameChars), brwBrowseX+4, float64(y), col)
+		drawText(screen, truncate(label, nameChars), brwBrowseX+4, float64(y), col)
 	}
 	if len(b.listing) == 0 {
-		drawText(screen, "No pieces or folders here.", brwBrowseX+4, brwListTop+8, colBrwDim)
+		drawText(screen, "No pieces or folders here.", brwBrowseX+4, brwListTop+8, colDim)
 	}
 	if len(b.listing) > brwBrowseRows {
 		drawText(screen, fmt.Sprintf("%d-%d of %d", b.browseTop+1,
-			browserMin(b.browseTop+brwBrowseRows, len(b.listing)), len(b.listing)),
+			min(b.browseTop+brwBrowseRows, len(b.listing)), len(b.listing)),
 			brwBrowseX+4, brwListTop+brwBrowseRows*brwBrowseRowH+12, colBarline)
 	}
 }
@@ -1079,10 +1097,10 @@ func (b *Browser) drawBrowse(screen *ebiten.Image) {
 // the panes.
 func (b *Browser) drawStatus(screen *ebiten.Image) {
 	const maxWarn = 4
-	width := (screenW - 2*brwRecentX) / brwCharW
+	width := fitChars(screenW - 2*brwRecentX)
 	y := float64(brwStatusY)
 	if b.errMsg != "" {
-		drawText(screen, browserEllipsize(b.errMsg, width), brwRecentX, y, colMiss)
+		drawText(screen, ellipsize(b.errMsg, width), brwRecentX, y, colMiss)
 		y += 20
 	}
 	for i, w := range b.warns {
@@ -1090,14 +1108,7 @@ func (b *Browser) drawStatus(screen *ebiten.Image) {
 			drawText(screen, fmt.Sprintf("... and %d more warnings", len(b.warns)-maxWarn), brwRecentX, y, colClose)
 			break
 		}
-		drawText(screen, browserTruncate("warning: "+w, width), brwRecentX, y, colClose)
+		drawText(screen, truncate("warning: "+w, width), brwRecentX, y, colClose)
 		y += 18
 	}
-}
-
-func browserMin(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

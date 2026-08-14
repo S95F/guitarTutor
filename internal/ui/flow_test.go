@@ -1,0 +1,485 @@
+package ui
+
+// Cross-screen tests: the first-run checklist, the settings screen's
+// mouse, the file picker, and re-opening a piece in place. These are the
+// paths that used to dead-end — the ones where the only way forward was
+// to quit and retype a command line.
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/hajimehoshi/ebiten/v2"
+)
+
+// ---- first-run checklist -------------------------------------------------
+
+// TestChecklistReplacesAnEmptyRecentsPane.
+func TestChecklistReplacesAnEmptyRecentsPane(t *testing.T) {
+	sh := NewShell(Services{Prefs: &settingsFakePrefs{}, Audio: newSettingsAudio()}, nil)
+	b := NewBrowser(sh)
+	if !b.onboarding() {
+		t.Fatal("no recents should mean the checklist is showing")
+	}
+	steps := b.stepList()
+	if len(steps) != 3 {
+		t.Fatalf("checklist has %d steps, want 3 (interface, calibration, open a piece)", len(steps))
+	}
+	for i, s := range steps {
+		if s.title == "" || s.detail == "" {
+			t.Errorf("step %d has no title or detail: %+v", i, s)
+		}
+	}
+}
+
+// TestChecklistTicksOffAsTheConfigurationFills is the point of the
+// checklist over a static leaflet: it reports what is actually done.
+func TestChecklistTicksOffAsTheConfigurationFills(t *testing.T) {
+	pr := &settingsFakePrefs{}
+	audio := newSettingsAudio()
+	sh := NewShell(Services{Prefs: pr, Audio: audio}, nil)
+	b := NewBrowser(sh)
+
+	if b.stepList()[0].done {
+		t.Error("with no capture device chosen, step 1 should be outstanding")
+	}
+
+	pr.SetDevices("cap-focus", "play-focus")
+	steps := b.stepList()
+	if !steps[0].done {
+		t.Error("choosing a capture device should tick step 1 off")
+	}
+	if steps[1].done {
+		t.Error("an unmeasured pair should leave the calibration step outstanding")
+	}
+
+	audio.offsets = map[string]settingsOffset{"cap-focus|play-focus": {frames: 480, ok: true}}
+	if !b.stepList()[1].done {
+		t.Error("a stored calibration should tick step 2 off")
+	}
+}
+
+// TestChecklistWithoutAnAudioBackendStatesTheFactInstead: a step nobody
+// can take is not a step. It becomes a statement, with no action.
+func TestChecklistWithoutAnAudioBackendStatesTheFactInstead(t *testing.T) {
+	sh := NewShell(Services{Prefs: &settingsFakePrefs{}}, nil)
+	b := NewBrowser(sh)
+	steps := b.stepList()
+	if len(steps) != 2 {
+		t.Fatalf("with no backend the checklist has %d steps, want 2", len(steps))
+	}
+	if steps[0].act != nil {
+		t.Error("the playback-only notice should have nothing to activate")
+	}
+	if !strings.Contains(strings.ToLower(steps[0].title), "playback") {
+		t.Errorf("first step should explain the machine is playback only, got %q", steps[0].title)
+	}
+}
+
+// TestChecklistStepsAreActivatable: Enter on a configuration step opens
+// settings, and Enter on the last one moves to the folder listing.
+func TestChecklistStepsAreActivatable(t *testing.T) {
+	sh := NewShell(Services{Prefs: &settingsFakePrefs{}, Audio: newSettingsAudio()}, nil)
+	b := NewBrowser(sh)
+	opened := 0
+	b.SetSettingsOpener(func() { opened++ })
+
+	b.focus = browserPaneRecent
+	b.setSelection(browserPaneRecent, 0)
+	if err := b.handleKey(ebiten.KeyEnter); err != nil {
+		t.Fatalf("Enter on step 1: %v", err)
+	}
+	if opened != 1 {
+		t.Errorf("step 1 opened settings %d times, want 1", opened)
+	}
+
+	b.setSelection(browserPaneRecent, len(b.stepList())-1)
+	_ = b.handleKey(ebiten.KeyEnter)
+	if b.focus != browserPaneBrowse {
+		t.Error(`the "open a piece" step should move the focus to the folder listing`)
+	}
+}
+
+// TestChecklistGivesWayToRecents: once a piece has been opened the pane
+// goes back to being what its title says.
+func TestChecklistGivesWayToRecents(t *testing.T) {
+	pr := &browserFakePrefs{recents: []string{filepath.Join(t.TempDir(), "song.gp")}}
+	sh := NewShell(Services{Opener: &browserFakeOpener{}, Prefs: pr}, nil)
+	b := NewBrowser(sh)
+	if b.onboarding() {
+		t.Error("with a recent piece the checklist should be gone")
+	}
+	if b.stepList() != nil {
+		t.Error("a screen that is not onboarding should build no steps")
+	}
+}
+
+// ---- settings: cursor placement and mouse --------------------------------
+
+// TestSettingsOpensOnTheFirstUnconfiguredRow: the checklist says "choose
+// your audio interface" and the screen it opens should already be there.
+func TestSettingsOpensOnTheFirstUnconfiguredRow(t *testing.T) {
+	audio := newSettingsAudio()
+	s, pr := newSettingsFixture(t, audio)
+	if got, want := s.rows[s.cur], srCapture; got != want {
+		t.Errorf("with no device chosen the cursor sits on row %v, want %v", got, want)
+	}
+
+	// With a device chosen but never measured, calibration is next.
+	pr.SetDevices("cap-focus", "play-focus")
+	s = NewSettings(s.sh)
+	if got, want := s.rows[s.cur], srCalibrate; got != want {
+		t.Errorf("with an unmeasured pair the cursor sits on row %v, want %v", got, want)
+	}
+
+	// Fully configured: leave the cursor at the top.
+	audio.offsets = map[string]settingsOffset{"cap-focus|play-focus": {frames: 480, ok: true}}
+	s = NewSettings(s.sh)
+	if s.cur != 0 {
+		t.Errorf("with everything configured the cursor should stay at the top, got row %d", s.cur)
+	}
+}
+
+// settingsRowItem finds the display-list entry for a row kind.
+func settingsRowItem(t *testing.T, s *Settings, kind settingsRow) settingsItem {
+	t.Helper()
+	want := s.rowIndex(kind)
+	if want < 0 {
+		t.Fatalf("row %v is not present on this screen", kind)
+	}
+	for _, it := range s.items() {
+		if it.kind == siRow && it.row == want {
+			return it
+		}
+	}
+	t.Fatalf("row %v has no display-list entry", kind)
+	return settingsItem{}
+}
+
+// TestSettingsClickSelectsTheWholeRow: a setting is a line, and the line
+// is the target — not just its label.
+func TestSettingsClickSelectsTheWholeRow(t *testing.T) {
+	s, _ := newSettingsFixture(t, newSettingsAudio())
+	it := settingsRowItem(t, s, srCountIn)
+	band := it.band()
+	s.handleMouse(pointer{x: band.x + band.w - 200, y: band.y + band.h/2, down: true, pressed: true})
+	if got := s.rows[s.cur]; got != srCountIn {
+		t.Errorf("clicking the count-in row selected %v", got)
+	}
+}
+
+// TestSettingsButtonsAdjustTheirOwnRow, wherever the cursor happened to
+// be: pressing a row's button should not need the row selected first.
+func TestSettingsButtonsAdjustTheirOwnRow(t *testing.T) {
+	s, pr := newSettingsFixture(t, newSettingsAudio())
+	s.cur = 0
+
+	it := settingsRowItem(t, s, srCountIn)
+	if len(it.buttons) != 2 {
+		t.Fatalf("the count-in row has %d buttons, want 2", len(it.buttons))
+	}
+	plus := it.buttons[1]
+	s.handleMouse(pointer{x: plus.r.x + plus.r.w/2, y: plus.r.y + plus.r.h/2, down: true, pressed: true})
+	if s.countIn != 1 {
+		t.Errorf("the + button set the count-in to %d, want 1", s.countIn)
+	}
+	if pr.countIn != 1 {
+		t.Errorf("the change did not reach preferences (%d)", pr.countIn)
+	}
+	if got := s.rows[s.cur]; got != srCountIn {
+		t.Errorf("pressing a row's button left the cursor on %v", got)
+	}
+}
+
+// TestSettingsDeviceButtonsCycle covers the two pickers.
+func TestSettingsDeviceButtonsCycle(t *testing.T) {
+	s, pr := newSettingsFixture(t, newSettingsAudio())
+	it := settingsRowItem(t, s, srCapture)
+	before := s.capIdx
+	next := it.buttons[1]
+	s.handleMouse(pointer{x: next.r.x + 2, y: next.r.y + 2, down: true, pressed: true})
+	if s.capIdx == before {
+		t.Error("the capture > button did not move the selection")
+	}
+	if capID, _ := pr.Devices(); capID != s.capture[s.capIdx].ID {
+		t.Errorf("preferences hold %q, screen shows %q", capID, s.capture[s.capIdx].ID)
+	}
+}
+
+// TestSettingsSoundFontRowOffersBrowseOnlyWithAPicker: the row used to
+// be able to clear a SoundFont and never choose one.
+func TestSettingsSoundFontRowOffersBrowseOnlyWithAPicker(t *testing.T) {
+	s, _ := newSettingsFixture(t, newSettingsAudio())
+	if got := len(settingsRowItem(t, s, srSoundFont).buttons); got != 1 {
+		t.Errorf("with no picker wired the soundfont row has %d buttons, want just clear", got)
+	}
+
+	asked := 0
+	s.SetFilePicker(func([]string, func(string)) { asked++ })
+	it := settingsRowItem(t, s, srSoundFont)
+	if len(it.buttons) != 2 {
+		t.Fatalf("with a picker wired the row has %d buttons, want browse and clear", len(it.buttons))
+	}
+	browse := it.buttons[0]
+	s.handleMouse(pointer{x: browse.r.x + 2, y: browse.r.y + 2, down: true, pressed: true})
+	if asked != 1 {
+		t.Errorf("the browse button asked for a file %d times, want 1", asked)
+	}
+}
+
+// TestSettingsOnCloseRunsOnce: it is how the practice view learns that
+// what it was built from has changed.
+func TestSettingsOnCloseRunsOnce(t *testing.T) {
+	s, _ := newSettingsFixture(t, nil)
+	closes := 0
+	s.SetOnClose(func() { closes++ })
+	s.Close()
+	s.Close()
+	if closes != 1 {
+		t.Errorf("the close hook ran %d times, want exactly 1", closes)
+	}
+}
+
+// ---- file picker ---------------------------------------------------------
+
+// pickerFixture builds a picker over a temp tree holding one .sf2 and one
+// file that must not be listed.
+func pickerFixture(t *testing.T) (*FilePicker, string, *string) {
+	t.Helper()
+	dir := t.TempDir()
+	for _, name := range []string{"grand.sf2", "notes.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(dir, "more"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	p := NewFilePicker(nil, "CHOOSE", []string{".sf2"}, func(s string) { got = s })
+	p.setDir(dir)
+	return p, dir, &got
+}
+
+// TestFilePickerListsOnlyWhatItWasAskedFor.
+func TestFilePickerListsOnlyWhatItWasAskedFor(t *testing.T) {
+	p, dir, _ := pickerFixture(t)
+	var names []string
+	for _, e := range p.listing {
+		names = append(names, e.name)
+	}
+	for _, want := range []string{"..", "more", "grand.sf2"} {
+		if !containsString(names, want) {
+			t.Errorf("listing %v is missing %q", names, want)
+		}
+	}
+	if containsString(names, "notes.txt") {
+		t.Errorf("listing %v includes a file the picker was not asked for", names)
+	}
+	if p.dir != dir {
+		t.Errorf("picker is in %q, want %q", p.dir, dir)
+	}
+}
+
+// TestFilePickerChoosesAFile.
+func TestFilePickerChoosesAFile(t *testing.T) {
+	p, dir, got := pickerFixture(t)
+	for i, e := range p.listing {
+		if e.name == "grand.sf2" {
+			p.setSel(i)
+		}
+	}
+	if !p.activate() {
+		t.Fatal("choosing a file should finish the picker")
+	}
+	if want := filepath.Join(dir, "grand.sf2"); *got != want {
+		t.Errorf("picker returned %q, want %q", *got, want)
+	}
+}
+
+// TestFilePickerDescendsWithoutChoosing.
+func TestFilePickerDescendsWithoutChoosing(t *testing.T) {
+	p, dir, got := pickerFixture(t)
+	for i, e := range p.listing {
+		if e.name == "more" {
+			p.setSel(i)
+		}
+	}
+	if p.activate() {
+		t.Fatal("entering a folder should not finish the picker")
+	}
+	if p.dir != filepath.Join(dir, "more") {
+		t.Errorf("picker is in %q, want the subfolder", p.dir)
+	}
+	if *got != "" {
+		t.Errorf("nothing was chosen, but the callback got %q", *got)
+	}
+	p.goParent()
+	if p.dir != dir {
+		t.Errorf("backspace left the picker in %q, want %q", p.dir, dir)
+	}
+}
+
+// TestFilePickerCancelsWithoutCallingBack: escape must not look like a
+// choice, or cancelling would silently set a SoundFont.
+func TestFilePickerCancelsWithoutCallingBack(t *testing.T) {
+	p, _, got := pickerFixture(t)
+	if !p.handleKey(ebiten.KeyEscape) {
+		t.Fatal("escape should finish the picker")
+	}
+	if *got != "" {
+		t.Errorf("cancelling reported a choice of %q", *got)
+	}
+}
+
+func containsString(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
+}
+
+// ---- reopening a piece ---------------------------------------------------
+
+// flowOpener hands back a distinct screen from every Open, so a test can
+// tell a replaced screen from the one it replaced. browserFakeOpener
+// returns an empty struct value, and two of those compare equal.
+type flowOpener struct {
+	opened []string
+	closed int
+	err    error
+}
+
+func (o *flowOpener) Open(path string) (Screen, []string, error) {
+	o.opened = append(o.opened, path)
+	if o.err != nil {
+		return nil, nil, o.err
+	}
+	return &shellPlainScreen{}, nil, nil
+}
+
+func (o *flowOpener) CloseCurrent() { o.closed++ }
+
+// TestReopenPieceReplacesInPlace: reloading a piece must swap the
+// practice screen, not stack a second one on top of it — otherwise
+// leaving the reloaded piece would land on the stale one underneath.
+func TestReopenPieceReplacesInPlace(t *testing.T) {
+	op := &flowOpener{}
+	sh := NewShell(Services{Opener: op, Prefs: &browserFakePrefs{}}, &shellPlainScreen{})
+	if _, err := sh.OpenPiece("song.gp"); err != nil {
+		t.Fatalf("OpenPiece: %v", err)
+	}
+	_ = sh.Update() // apply the queued push
+	if sh.Depth() != 2 {
+		t.Fatalf("depth %d after opening a piece, want 2", sh.Depth())
+	}
+	first := sh.stack[1]
+
+	if _, err := sh.ReopenPiece("song.gp"); err != nil {
+		t.Fatalf("ReopenPiece: %v", err)
+	}
+	_ = sh.Update()
+	if sh.Depth() != 2 {
+		t.Errorf("depth %d after reopening, want it unchanged at 2", sh.Depth())
+	}
+	if sh.stack[1] == first {
+		t.Error("reopening did not put a freshly built screen on the stack")
+	}
+	if len(op.opened) != 2 {
+		t.Errorf("the opener was asked %d times, want 2", len(op.opened))
+	}
+}
+
+// TestReopenPieceLeavesTheStackAloneOnFailure: a load that fails must
+// not take the screen the user is looking at away with it.
+func TestReopenPieceLeavesTheStackAloneOnFailure(t *testing.T) {
+	op := &flowOpener{}
+	sh := NewShell(Services{Opener: op, Prefs: &browserFakePrefs{}}, &shellPlainScreen{})
+	if _, err := sh.OpenPiece("song.gp"); err != nil {
+		t.Fatalf("OpenPiece: %v", err)
+	}
+	_ = sh.Update()
+	current := sh.stack[len(sh.stack)-1]
+
+	op.err = os.ErrNotExist
+	if _, err := sh.ReopenPiece("song.gp"); err == nil {
+		t.Fatal("ReopenPiece should report the load failure")
+	}
+	_ = sh.Update()
+	if sh.Depth() != 2 || sh.stack[len(sh.stack)-1] != current {
+		t.Error("a failed reload changed the screen stack")
+	}
+}
+
+// ---- help on every screen ------------------------------------------------
+
+// TestEveryScreenHasACompleteControlTable: pressing ? used to do nothing
+// on two screens out of three. Every table now has to be complete enough
+// to render, and to produce a footer hint that fits the window.
+func TestEveryScreenHasACompleteControlTable(t *testing.T) {
+	app := newApp(t, 4)
+	brw := NewBrowser(NewShell(Services{Prefs: &settingsFakePrefs{}}, nil))
+	set, _ := newSettingsFixture(t, newSettingsAudio())
+
+	for _, c := range []struct {
+		name string
+		rows []helpBinding
+		hint string
+	}{
+		{"practice", app.helpRows(), app.hintLine()},
+		{"start screen", brw.browserBindings(), brw.hintLine()},
+		{"settings", set.settingsBindings(), set.hintLine()},
+	} {
+		if len(c.rows) == 0 {
+			t.Errorf("%s has no control table", c.name)
+			continue
+		}
+		for i, b := range c.rows {
+			if b.Group == "" || b.Keys == "" || b.Desc == "" {
+				t.Errorf("%s row %d is incomplete: %+v", c.name, i, b)
+			}
+		}
+		if c.hint == "" {
+			t.Errorf("%s has an empty footer hint", c.name)
+		}
+		if w := uiPadX + textW(c.hint); w > screenW {
+			t.Errorf("%s footer hint is %.0f px wide, past the %d px window", c.name, w, screenW)
+		}
+		if len(helpSections(c.rows)) == 0 {
+			t.Errorf("%s help overlay has no sections", c.name)
+		}
+	}
+}
+
+// TestHelpSectionsKeepTableOrderAndGroupContiguously.
+func TestHelpSectionsKeepTableOrderAndGroupContiguously(t *testing.T) {
+	rows := []helpBinding{
+		{Group: "a", Keys: "1"}, {Group: "a", Keys: "2"},
+		{Group: "b", Keys: "3"}, {Group: "a", Keys: "4"},
+	}
+	got := helpSections(rows)
+	if len(got) != 3 {
+		t.Fatalf("got %d sections, want 3 — a group that reappears starts a new one", len(got))
+	}
+	if got[0].Name != "a" || len(got[0].Rows) != 2 || got[2].Name != "a" {
+		t.Errorf("sections came out as %+v", got)
+	}
+}
+
+// TestHintLineDropsUnavailableBindings: the footer has no room to
+// explain itself, so a key that does nothing right now is left out —
+// while the overlay still lists it, greyed.
+func TestHintLineDropsUnavailableBindings(t *testing.T) {
+	rows := []helpBinding{
+		{Keys: "A", Hint: "A here"},
+		{Keys: "B", Hint: "B gone", Off: true},
+		{Keys: "C", Desc: "no hint at all"},
+	}
+	if got, want := hintLineOf(rows), "A here"; got != want {
+		t.Errorf("hintLineOf = %q, want %q", got, want)
+	}
+}

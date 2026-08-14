@@ -45,8 +45,56 @@ func runShell() error {
 
 	sh, browser := ui.NewBrowserShell(svc)
 	opener.shell = sh
-	browser.SetSettingsOpener(func() { sh.Show(ui.NewSettings(sh)) })
+	browser.SetSettingsOpener(func() { opener.showSettings(nil) })
 	return sh.Run()
+}
+
+// openTimeSettings is the subset of the configuration that a piece reads
+// when it is opened and cannot pick up afterwards: the engine takes its
+// count-in and its synthesis voice at construction, and the live session
+// binds its devices when the stream opens. Comparing one of these across
+// a visit to the settings screen is how the practice view learns that
+// what it is showing no longer matches what is configured.
+type openTimeSettings struct {
+	soundFont string
+	countIn   int
+	captureID string
+	playID    string
+}
+
+// openTimeSnapshot reads the current values of those settings.
+func (o *shellOpener) openTimeSnapshot() openTimeSettings {
+	capID, playID := o.prefs.Devices()
+	return openTimeSettings{
+		soundFont: o.prefs.SoundFont(),
+		countIn:   o.prefs.CountIn(),
+		captureID: capID,
+		playID:    playID,
+	}
+}
+
+// showSettings opens the settings screen. When a practice screen asked
+// for it, that screen is told on the way back whether anything it was
+// built from has changed, so it can offer to re-open the piece instead of
+// silently going on with the old configuration. app may be nil: the start
+// screen has no piece to reconcile.
+func (o *shellOpener) showSettings(app *ui.App) {
+	if o.shell == nil {
+		return
+	}
+	st := ui.NewSettings(o.shell)
+	st.SetFilePicker(func(exts []string, chosen func(string)) {
+		o.shell.Show(ui.NewFilePicker(o.shell, "CHOOSE A SOUNDFONT", exts, chosen))
+	})
+	if app != nil {
+		before := o.openTimeSnapshot()
+		st.SetOnClose(func() {
+			if o.openTimeSnapshot() != before {
+				app.MarkSettingsChanged()
+			}
+		})
+	}
+	o.shell.Show(st)
 }
 
 // --- Prefs -------------------------------------------------------------
@@ -193,7 +241,7 @@ func (p *shellPrefs) Path() string {
 // running. The guard lives here, on the object that owns the device, and
 // not on the settings screen: the shell rebuilds that screen on every
 // visit, so a per-screen flag guards nothing across visits.
-var errCalibrationBusy = errors.New("a calibration is already running on this device — wait for it to finish")
+var errCalibrationBusy = errors.New("a calibration is already running on this device; wait for it to finish")
 
 // The settings screen discovers cancellation by type-asserting for this
 // method set, so dropping it would not break the build — it would silently
@@ -332,6 +380,15 @@ func (o *shellOpener) Open(path string) (ui.Screen, []string, error) {
 	}
 	app := ui.New(eng, sc, display)
 	app.SetCountIn(countIn)
+	// Settings and a reload are reachable from inside the piece, so
+	// changing a device or a SoundFont no longer means quitting back to
+	// the start screen and opening the file again.
+	app.SetSettingsOpener(func() { o.showSettings(app) })
+	app.SetReloader(func() {
+		if _, err := o.shell.ReopenPiece(path); err != nil {
+			app.SetLiveWarning("could not re-open the piece: " + err.Error())
+		}
+	})
 	// The engine takes CountInBeats at construction, so a change mid-piece
 	// cannot apply to the running engine — report that honestly rather
 	// than let the view claim otherwise, and persist it for the re-open.
@@ -391,7 +448,7 @@ func (o *shellOpener) warnOnSplitDevices(app *ui.App) {
 		return
 	}
 	app.SetLiveWarning(fmt.Sprintf(
-		"capture and playback are different devices (%s / %s) — their clocks drift apart over a session and timing scores will wander",
+		"capture and playback are different devices (%s / %s): their clocks drift apart over a session and timing scores wander",
 		capName, playName))
 }
 

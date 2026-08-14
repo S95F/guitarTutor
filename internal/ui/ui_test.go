@@ -732,7 +732,7 @@ func TestHelpOverlayOpenClose(t *testing.T) {
 // order - this is what stops the overlay drifting from the hint line.
 func TestHelpGroupsCoverTable(t *testing.T) {
 	a := newApp(t, 1)
-	var flat []practiceBinding
+	var flat []helpBinding
 	seen := map[string]bool{}
 	for _, g := range a.helpGroups() {
 		if g.Name == "" {

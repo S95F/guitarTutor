@@ -260,7 +260,7 @@ func TestBrowserListingFilters(t *testing.T) {
 		"notes.txt", "cover.png", "song.gp.bak", "noext",
 		".hidden.gp", ".config/",
 	)
-	got, err := browserReadListing(dir)
+	got, err := browserReadListing(dir, browserSupported)
 	if err != nil {
 		t.Fatalf("browserReadListing: %v", err)
 	}
@@ -742,14 +742,14 @@ func TestBrowserWheelSteps(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		acc += 0.3
 		var steps int
-		steps, acc = browserWheelSteps(acc)
+		steps, acc = wheelSteps(acc)
 		total += steps
 	}
 	if total != 1 {
 		t.Errorf("four 0.3 notches produced %d steps, want 1", total)
 	}
-	if steps, rem := browserWheelSteps(-2.5); steps != -2 || rem > -0.49 || rem < -0.51 {
-		t.Errorf("browserWheelSteps(-2.5) = %d, %v; want -2 and about -0.5", steps, rem)
+	if steps, rem := wheelSteps(-2.5); steps != -2 || rem > -0.49 || rem < -0.51 {
+		t.Errorf("wheelSteps(-2.5) = %d, %v; want -2 and about -0.5", steps, rem)
 	}
 }
 
@@ -864,13 +864,22 @@ func TestBrowserStartsOnTheLastPiecesFolder(t *testing.T) {
 	}
 }
 
-// TestBrowserStartsInBrowseWithNoRecents: a first run has nothing to
-// select on the left, so the focus starts on the right.
-func TestBrowserStartsInBrowseWithNoRecents(t *testing.T) {
+// TestBrowserStartsOnTheChecklistWithNoRecents: a first run has no
+// pieces to list, so the left pane holds the getting-started checklist
+// and the focus stays on it. Landing in a folder listing instead would
+// drop a brand-new user into the one part of the screen that assumes
+// they already know what they are looking for.
+func TestBrowserStartsOnTheChecklistWithNoRecents(t *testing.T) {
 	sh := NewShell(Services{Opener: &browserFakeOpener{}, Prefs: &browserFakePrefs{}}, nil)
 	b := NewBrowser(sh)
-	if b.focus != browserPaneBrowse {
-		t.Error("with no recents, focus should start on the browse pane")
+	if !b.onboarding() {
+		t.Fatal("with no recents the screen should be onboarding")
+	}
+	if b.focus != browserPaneRecent {
+		t.Error("focus should start on the checklist")
+	}
+	if b.paneLen(browserPaneRecent) == 0 {
+		t.Error("the checklist pane reports nothing to select")
 	}
 	if b.dir == "" {
 		t.Error("no start directory was chosen")
@@ -923,23 +932,23 @@ func TestBrowserNilPrefs(t *testing.T) {
 // TestBrowserTextShortening pins the two truncation helpers: names keep
 // their front, paths keep their tail.
 func TestBrowserTextShortening(t *testing.T) {
-	if got := browserTruncate("abcdefghij", 6); got != "abc..." {
-		t.Errorf("browserTruncate = %q, want %q", got, "abc...")
+	if got := truncate("abcdefghij", 6); got != "abc..." {
+		t.Errorf("truncate = %q, want %q", got, "abc...")
 	}
-	if got := browserTruncate("abc", 6); got != "abc" {
-		t.Errorf("browserTruncate on a short string = %q", got)
+	if got := truncate("abc", 6); got != "abc" {
+		t.Errorf("truncate on a short string = %q", got)
 	}
-	if got := browserEllipsize("/home/me/music/song.gp", 12); got != "...c/song.gp" {
-		t.Errorf("browserEllipsize = %q, want %q", got, "...c/song.gp")
+	if got := ellipsize("/home/me/music/song.gp", 12); got != "...c/song.gp" {
+		t.Errorf("ellipsize = %q, want %q", got, "...c/song.gp")
 	}
-	if got := browserEllipsize("/home/me/music/song.gp", 40); got != "/home/me/music/song.gp" {
-		t.Errorf("browserEllipsize with room to spare = %q", got)
+	if got := ellipsize("/home/me/music/song.gp", 40); got != "/home/me/music/song.gp" {
+		t.Errorf("ellipsize with room to spare = %q", got)
 	}
-	if got := browserEllipsize("abc", 0); got != "" {
-		t.Errorf("browserEllipsize with no room = %q", got)
+	if got := ellipsize("abc", 0); got != "" {
+		t.Errorf("ellipsize with no room = %q", got)
 	}
-	if got := browserTruncate("abcdef", 2); got != "ab" {
-		t.Errorf("browserTruncate with no room for the marker = %q", got)
+	if got := truncate("abcdef", 2); got != "ab" {
+		t.Errorf("truncate with no room for the marker = %q", got)
 	}
 }
 

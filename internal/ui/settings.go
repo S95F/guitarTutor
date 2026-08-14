@@ -247,6 +247,14 @@ type Settings struct {
 
 	pick func(exts []string, chosen func(string))
 
+	// onClose runs when the Shell pops this screen. It is how whatever
+	// opened settings finds out that the user is done with them —
+	// notably the practice view, which must then decide whether the
+	// piece it is showing was built from settings that have since
+	// changed. Settings itself cannot answer that: it does not know what
+	// a piece was opened with.
+	onClose func()
+
 	// run is the calibration this screen started, or nil. The pointer is
 	// game-loop-owned (startCalibration, resetCalibration and Close are the
 	// only writers, and all three run on the loop); the value it points at
@@ -259,6 +267,13 @@ type Settings struct {
 	// or count-in change during a run — so a locked key is visibly ignored
 	// rather than silently dropped.
 	notice string
+
+	// helpOpen is the ?/F1 key-binding overlay; while it is up nothing
+	// else on the screen reacts.
+	helpOpen bool
+	// ptr is this frame's mouse, sampled once by Update so every decision
+	// below takes it as a value and can be driven from a test.
+	ptr pointer
 
 	// mu guards the file picker's mailbox, which the picker's completion
 	// callback may write from any goroutine.
@@ -295,7 +310,37 @@ func NewSettings(sh *Shell) *Settings {
 	}
 	s.rebuild()
 	s.refreshOffset()
+	s.focusFirstUnconfigured()
 	return s
+}
+
+// focusFirstUnconfigured puts the cursor on the first setting that still
+// needs attention: a capture device that has never been chosen, then a
+// device pair that has never been measured. It is what makes the start
+// screen's getting-started checklist land somewhere useful — the step
+// says "choose your audio interface", and the screen it opens is already
+// sitting on that row. With everything configured the cursor stays at the
+// top, which is where someone who came to change something expects it.
+func (s *Settings) focusFirstUnconfigured() {
+	if !s.hasDevices() {
+		return
+	}
+	capID, playID := s.selectedIDs()
+	var wantCap string
+	if p := s.prefs(); p != nil {
+		wantCap, _ = p.Devices()
+	}
+	if wantCap == "" {
+		if i := s.rowIndex(srCapture); i >= 0 {
+			s.cur = i
+		}
+		return
+	}
+	if _, ok := s.audio().CalibratedOffset(capID, playID); !ok {
+		if i := s.rowIndex(srCalibrate); i >= 0 {
+			s.cur = i
+		}
+	}
 }
 
 // SetFilePicker installs the hook the SoundFont row uses to browse for a
@@ -719,6 +764,13 @@ const settingsCloseGrace = 300 * time.Millisecond
 // is free before the next screen asks for it. Calling it twice, or with no
 // run in flight, does nothing.
 func (s *Settings) Close() {
+	if s.onClose != nil {
+		fn := s.onClose
+		// Cleared before the call so a handler that somehow leads back
+		// here cannot run twice; Close is documented as at-most-once.
+		s.onClose = nil
+		fn()
+	}
 	run := s.run
 	s.run = nil
 	s.lastPhase = calIdle
@@ -731,6 +783,10 @@ func (s *Settings) Close() {
 	case <-time.After(settingsCloseGrace):
 	}
 }
+
+// SetOnClose installs a callback the Shell's teardown runs when this
+// screen is popped. It runs on the game loop, so it must not block.
+func (s *Settings) SetOnClose(fn func()) { s.onClose = fn }
 
 // resetCalibration drops the displayed result of the last run. A run
 // still in flight is left alone: it owns the device until it returns.
@@ -1023,15 +1079,279 @@ func (s *Settings) configText() string {
 	return "config file: " + s.configPath
 }
 
-// ---- Screen --------------------------------------------------------------
+// ---- layout ---------------------------------------------------------------
+
+// The screen is laid out as a display list before anything is drawn.
+//
+// Laying it out first — rather than drawing straight down the page with a
+// running cursor, as this screen used to — is what lets the mouse find a
+// row exactly where it was drawn. The blocks between the rows are not
+// fixed height: a split-device warning wraps to as many lines as it
+// needs, and a running calibration replaces a hint line with a progress
+// bar. A hit test that recomputed those offsets separately would agree
+// with the drawing only until one of them changed. Draw renders the list
+// and the hit test reads the same list, so neither can go out of true.
+
+// Layout metrics. They sit on the shared page margins in theme.go, so
+// this screen lines up with the start screen and the practice view.
+const (
+	settingsLeft   = uiPadX
+	settingsValueX = 300.0
+	settingsLineH  = uiLineH
+	settingsRowH   = uiRowH
+	// settingsWrap is how many characters of a note fit beside the value
+	// column before it has to wrap.
+	settingsWrap   = 128
+	settingsBtnH   = 20.0
+	settingsBtnPad = 8.0
+	settingsBtnGap = 6.0
+)
+
+type settingsItemKind int
+
+const (
+	siSection settingsItemKind = iota
+	siNote
+	siRow
+	siProgress
+)
+
+// A settingsButton is one clickable affordance on a row. The keyboard
+// reaches the same actions through adjust and activate; these exist so a
+// mouse user does not have to guess that left and right cycle a device.
+type settingsButton struct {
+	label string
+	r     rect
+	act   func(*Settings)
+}
+
+// A settingsItem is one entry of the display list.
+type settingsItem struct {
+	kind settingsItemKind
+	y    float64
+	text string
+	col  color.RGBA
+	// row is the index into s.rows for siRow, and -1 otherwise.
+	row     int
+	label   string
+	buttons []settingsButton
+	prog    float64
+}
+
+// band is the full-width rectangle a row occupies, which is what a click
+// anywhere along the line lands in.
+func (it settingsItem) band() rect {
+	return rect{settingsLeft - 8, it.y - 5, screenW - 2*settingsLeft + 16, settingsRowH - 6}
+}
+
+// itemsBuilder accumulates the display list and owns the layout cursor.
+type itemsBuilder struct {
+	out []settingsItem
+	y   float64
+	row int // index into s.rows, advanced as each focusable row is added
+}
+
+func (b *itemsBuilder) section(title string) {
+	b.out = append(b.out, settingsItem{kind: siSection, y: b.y, text: title, row: -1})
+	b.y += uiSectionH
+}
+
+func (b *itemsBuilder) note(text string, col color.RGBA) {
+	for _, line := range wrapText(text, settingsWrap) {
+		b.out = append(b.out, settingsItem{kind: siNote, y: b.y, text: line, col: col, row: -1})
+		b.y += settingsLineH
+	}
+	b.y += 4
+}
+
+func (b *itemsBuilder) progress(f float64) {
+	b.out = append(b.out, settingsItem{kind: siProgress, y: b.y, prog: f, row: -1})
+	b.y += settingsLineH
+}
+
+// addRow adds a focusable line with its buttons laid out right to left,
+// so the rightmost button sits on the page margin whatever the labels are.
+func (b *itemsBuilder) addRow(label, value string, col color.RGBA, btns ...settingsButton) {
+	x := screenW - uiPadX
+	for i := len(btns) - 1; i >= 0; i-- {
+		w := textW(btns[i].label) + 2*settingsBtnPad
+		x -= w
+		btns[i].r = rect{x, b.y - 4, w, settingsBtnH}
+		x -= settingsBtnGap
+	}
+	b.out = append(b.out, settingsItem{
+		kind: siRow, y: b.y, text: value, col: col,
+		row: b.row, label: label, buttons: btns,
+	})
+	b.row++
+	b.y += settingsRowH
+}
+
+// items builds the whole screen. The order and the conditions match what
+// rebuild put in s.rows, which is what keeps the cursor index and the
+// drawn rows in step.
+func (s *Settings) items() []settingsItem {
+	b := &itemsBuilder{y: uiBodyTop + 8}
+
+	backend := "audio backend: none"
+	if a := s.audio(); a != nil {
+		backend = "audio backend: " + a.BackendName()
+	}
+	b.note(backend, colBarline)
+
+	b.section("AUDIO DEVICES")
+	if s.hasDevices() {
+		b.addRow("capture", deviceText(s.capture, s.capIdx), colHUD,
+			settingsButton{label: "<", act: func(s *Settings) { s.adjustRow(srCapture, -1) }},
+			settingsButton{label: ">", act: func(s *Settings) { s.adjustRow(srCapture, +1) }})
+		b.addRow("playback", deviceText(s.playback, s.playIdx), colHUD,
+			settingsButton{label: "<", act: func(s *Settings) { s.adjustRow(srPlayback, -1) }},
+			settingsButton{label: ">", act: func(s *Settings) { s.adjustRow(srPlayback, +1) }})
+		if w, ok := s.splitDeviceWarning(); ok {
+			b.note(w, colClose)
+		}
+	} else {
+		for _, l := range s.audioUnavailableText() {
+			b.note(l, colClose)
+		}
+	}
+
+	b.section("LATENCY CALIBRATION")
+	if s.hasDevices() {
+		sn := s.calSnapshot()
+		txt, col := s.calibrationText(sn)
+		running := sn.Phase == calRunning && s.snapIsCurrent(sn)
+		label := "calibrate now"
+		if running {
+			label = "measuring..."
+		}
+		b.addRow("round-trip offset", txt, col,
+			settingsButton{label: label, act: func(s *Settings) { s.startCalibration() }})
+		if running {
+			b.progress(sn.Progress)
+		} else {
+			b.note("takes a few seconds: make the output audible to the input first", colBarline)
+		}
+	} else {
+		b.note("unavailable without a capture and playback device", colBarline)
+	}
+
+	// An input a running measurement is holding off was ignored on
+	// purpose; say so where the user is looking rather than swallowing
+	// the key.
+	if s.notice != "" {
+		b.note(s.notice, colClose)
+	}
+
+	b.section("INSTRUMENT")
+	sfButtons := []settingsButton{{label: "clear", act: func(s *Settings) { s.clearSoundFont() }}}
+	if s.pick != nil {
+		sfButtons = append([]settingsButton{
+			{label: "browse", act: func(s *Settings) { s.chooseSoundFont() }},
+		}, sfButtons...)
+	}
+	b.addRow("soundfont", ellipsize(s.soundFontText(), 60), colHUD, sfButtons...)
+	if s.pick == nil {
+		b.note("no file chooser is wired in this build; -sf2 on the command line still works", colBarline)
+	}
+
+	b.section("PRACTICE")
+	b.addRow("count-in beats", fmt.Sprintf("%d  (0-%d)", s.countIn, maxCountIn), colHUD,
+		settingsButton{label: "-", act: func(s *Settings) { s.adjustRow(srCountIn, -1) }},
+		settingsButton{label: "+", act: func(s *Settings) { s.adjustRow(srCountIn, +1) }})
+
+	return b.out
+}
+
+// adjustRow focuses a row and applies a step to it, which is what a click
+// on one of its buttons means: the mouse both moves the cursor and acts,
+// where the keyboard needs two presses.
+func (s *Settings) adjustRow(kind settingsRow, d int) {
+	if i := s.rowIndex(kind); i >= 0 {
+		s.cur = i
+	}
+	s.adjust(d)
+}
+
+// rowIndex finds a row kind's position in s.rows, or -1 when the row is
+// not present in this configuration.
+func (s *Settings) rowIndex(kind settingsRow) int {
+	for i, r := range s.rows {
+		if r == kind {
+			return i
+		}
+	}
+	return -1
+}
+
+// ---- input ----------------------------------------------------------------
+
+// settingsBindings resolves this screen's control table, the source of
+// both the footer hint and the ?/F1 overlay.
+func (s *Settings) settingsBindings() []helpBinding {
+	leave := helpBinding{Group: "session", Keys: "esc", Hint: "esc back", Desc: "Go back to where you came from"}
+	if s.sh != nil && s.sh.Depth() <= 1 {
+		leave = helpBinding{Group: "session", Keys: "esc", Hint: "esc quit", Desc: "Quit guitarTutor"}
+	}
+	return []helpBinding{
+		{Group: "moving", Keys: "up / down", Hint: "up/dn select", Desc: "Move between settings"},
+		{Group: "moving", Keys: "click", Desc: "Select a setting, or press one of its buttons"},
+
+		{Group: "changing", Keys: "left / right", Hint: "left/right adjust", Desc: "Step the selected setting"},
+		{Group: "changing", Keys: "enter", Hint: "enter action", Desc: "Act on the selected setting: cycle it, browse, or calibrate"},
+
+		{Group: "session", Keys: "? or F1", Hint: "? help", Desc: "This key-binding list"},
+		leave,
+	}
+}
+
+// hintLine is the footer summary, from the same table as the overlay.
+func (s *Settings) hintLine() string { return hintLineOf(s.settingsBindings()) }
+
+// handleMouse applies one frame of pointer input: a click on a row's
+// button acts on it, and a click anywhere else along the row selects it.
+// Taking the whole band rather than only the label is deliberate — a
+// setting is a line, and the line is the target.
+func (s *Settings) handleMouse(p pointer) {
+	if !p.pressed {
+		return
+	}
+	for _, it := range s.items() {
+		if it.kind != siRow {
+			continue
+		}
+		for _, btn := range it.buttons {
+			if p.over(btn.r) {
+				btn.act(s)
+				return
+			}
+		}
+		if p.over(it.band()) {
+			s.cur = it.row
+			return
+		}
+	}
+}
+
+// ---- Screen ---------------------------------------------------------------
 
 // Update handles navigation and adjustment. Escape returns errQuit, which
 // tells the Shell this screen is finished.
 func (s *Settings) Update() error {
+	s.ptr = readPointer()
 	s.syncSettings()
+	if s.helpOpen {
+		if helpDismissed(s.ptr) {
+			s.helpOpen = false
+		}
+		return nil
+	}
 	switch {
 	case inpututil.IsKeyJustPressed(ebiten.KeyEscape):
 		return errQuit
+	case helpKeyPressed():
+		s.helpOpen = true
+		return nil
 	case inpututil.IsKeyJustPressed(ebiten.KeyUp):
 		s.moveCursor(-1)
 	case inpututil.IsKeyJustPressed(ebiten.KeyDown):
@@ -1043,155 +1363,64 @@ func (s *Settings) Update() error {
 	case inpututil.IsKeyJustPressed(ebiten.KeyEnter), inpututil.IsKeyJustPressed(ebiten.KeyKPEnter):
 		s.activate()
 	}
+	s.handleMouse(s.ptr)
 	return nil
 }
 
-const (
-	settingsLeft   = 32.0  // left margin for labels
-	settingsValueX = 300.0 // column where a row's value starts
-	settingsLineH  = 18.0  // one line of body text
-	settingsRowH   = 26.0  // one focusable row
-)
-
-// Draw paints the screen. It is a pure projection of the state the
-// methods above maintain: it makes no decisions and mutates nothing
-// except a local layout cursor.
+// Draw paints the screen from the display list. It is a pure projection
+// of the state the methods above maintain: it makes no decisions and
+// mutates nothing.
 func (s *Settings) Draw(dst *ebiten.Image) {
 	dst.Fill(colBG)
-	drawTextScaled(dst, "SETTINGS", settingsLeft, 18, 2, colNote)
+	drawHeader(dst, "SETTINGS", "changes are saved as you make them", colDim)
 
-	back := "esc back"
-	if s.sh != nil && s.sh.Depth() <= 1 {
-		back = "esc quit"
-	}
-	help := "up/dn select   left/right adjust   enter action   " + back
-	drawText(dst, help, settingsLeft, screenH-24, colBarline)
-
-	y := 64.0
-	row := 0 // index into s.rows, advanced as each focusable row is drawn
-
-	// --- audio devices ---
-	backend := "audio backend: none"
-	if a := s.audio(); a != nil {
-		backend = "audio backend: " + a.BackendName()
-	}
-	drawText(dst, backend, settingsLeft, y, colBarline)
-	y += settingsLineH + 6
-	s.sectionHead(dst, &y, "AUDIO DEVICES")
-
-	if s.hasDevices() {
-		s.drawRow(dst, &y, row, "capture", deviceText(s.capture, s.capIdx), colHUD)
-		row++
-		s.drawRow(dst, &y, row, "playback", deviceText(s.playback, s.playIdx), colHUD)
-		row++
-		if w, ok := s.splitDeviceWarning(); ok {
-			for _, l := range wrapText(w, 132) {
-				drawText(dst, l, settingsValueX, y, colClose)
-				y += settingsLineH
-			}
-			y += 4
-		}
-	} else {
-		for _, l := range s.audioUnavailableText() {
-			drawText(dst, l, settingsValueX, y, colClose)
-			y += settingsLineH
-		}
-		y += 8
-	}
-
-	// --- latency calibration ---
-	s.sectionHead(dst, &y, "LATENCY CALIBRATION")
-	if s.hasDevices() {
-		sn := s.calSnapshot()
-		txt, col := s.calibrationText(sn)
-		s.drawRow(dst, &y, row, "round-trip offset", txt, col)
-		row++
-		if sn.Phase == calRunning && s.snapIsCurrent(sn) {
+	for _, it := range s.items() {
+		switch it.kind {
+		case siSection:
+			y := it.y
+			drawSection(dst, &y, it.text)
+		case siNote:
+			drawText(dst, it.text, settingsValueX, it.y, it.col)
+		case siProgress:
 			const barW, barH = 320, 8
 			x0 := float32(settingsValueX)
-			vector.StrokeRect(dst, x0, float32(y), barW, barH, 1, colString, false)
-			vector.DrawFilledRect(dst, x0+1, float32(y)+1, (barW-2)*float32(sn.Progress), barH-2, colSounding, false)
-			y += float64(barH) + 10
-		} else {
-			drawText(dst, "enter: calibrate now (takes a few seconds)", settingsValueX, y, colBarline)
-			y += settingsLineH + 2
+			vector.StrokeRect(dst, x0, float32(it.y), barW, barH, 1, colString, false)
+			vector.DrawFilledRect(dst, x0+1, float32(it.y)+1, (barW-2)*float32(it.prog), barH-2, colSounding, false)
+		case siRow:
+			s.drawItemRow(dst, it)
 		}
-	} else {
-		drawText(dst, "unavailable without a capture and playback device", settingsValueX, y, colBarline)
-		y += settingsLineH + 6
 	}
 
-	// An input the run is holding off was ignored on purpose; say so where
-	// the user is looking rather than swallowing the key.
-	if s.notice != "" {
-		for _, l := range wrapText(s.notice, 132) {
-			drawText(dst, l, settingsValueX, y, colClose)
-			y += settingsLineH
-		}
-		y += 4
-	}
-
-	// --- soundfont ---
-	s.sectionHead(dst, &y, "INSTRUMENT")
-	s.drawRow(dst, &y, row, "soundfont", s.soundFontText(), colHUD)
-	row++
-	hint := "left: clear to built-in"
-	if s.pick != nil {
-		hint = "right/enter: browse for .sf2    left: clear to built-in"
-	}
-	drawText(dst, hint, settingsValueX, y, colBarline)
-	y += settingsLineH + 6
-
-	// --- count-in ---
-	s.sectionHead(dst, &y, "PRACTICE")
-	s.drawRow(dst, &y, row, "count-in beats", fmt.Sprintf("%d  (0-%d)", s.countIn, maxCountIn), colHUD)
-
-	// --- footer ---
 	fy := screenH - 68.0
 	drawText(dst, s.configText(), settingsLeft, fy, colBarline)
 	if s.saveErr != nil {
 		drawText(dst, "SAVE FAILED: "+s.saveErr.Error(), settingsLeft, fy+settingsLineH, colMiss)
-	} else {
-		drawText(dst, "changes are saved as you make them", settingsLeft, fy+settingsLineH, colBarline)
+	}
+	drawFooter(dst, s.hintLine())
+
+	if s.helpOpen {
+		drawHelpOverlay(dst, "SETTINGS KEYS", s.settingsBindings(), "")
 	}
 }
 
-// sectionHead draws a section title and advances the layout cursor.
-func (s *Settings) sectionHead(dst *ebiten.Image, y *float64, title string) {
-	drawText(dst, title, settingsLeft, *y, colInferred)
-	vector.StrokeLine(dst, settingsLeft, float32(*y)+16, screenW-settingsLeft, float32(*y)+16, 1, colBarline, false)
-	*y += settingsLineH + 8
-}
-
-// drawRow draws one focusable row and advances the layout cursor. The
-// focused row gets a highlight band and a caret.
-func (s *Settings) drawRow(dst *ebiten.Image, y *float64, idx int, label, value string, col color.RGBA) {
-	if idx == s.cur {
-		vector.DrawFilledRect(dst, settingsLeft-8, float32(*y)-5, screenW-2*settingsLeft+16, settingsRowH-6, colLoop, false)
-		drawText(dst, ">", settingsLeft-8, *y, colSounding)
+// drawItemRow paints one focusable row: the highlight band when it holds
+// the cursor, the label, the value, and the row's buttons.
+func (s *Settings) drawItemRow(dst *ebiten.Image, it settingsItem) {
+	col := it.col
+	if it.row == s.cur {
+		band := it.band()
+		vector.DrawFilledRect(dst, float32(band.x), float32(band.y), float32(band.w), float32(band.h), colFocus, false)
+		drawText(dst, ">", settingsLeft-8, it.y, colSounding)
 		col = colNote
 	}
-	drawText(dst, label, settingsLeft+8, *y, colHUD)
-	drawText(dst, value, settingsValueX, *y, col)
-	*y += settingsRowH
-}
-
-// wrapText breaks s into lines of at most width characters, on spaces.
-// basicfont is fixed-width, so a character count is a pixel count.
-func wrapText(s string, width int) []string {
-	words := strings.Fields(s)
-	if len(words) == 0 {
-		return nil
-	}
-	var out []string
-	line := words[0]
-	for _, w := range words[1:] {
-		if len(line)+1+len(w) > width {
-			out = append(out, line)
-			line = w
-			continue
+	drawText(dst, it.label, settingsLeft+8, it.y, colHUD)
+	drawText(dst, it.text, settingsValueX, it.y, col)
+	for _, btn := range it.buttons {
+		fill, edge, tc := colPanel, colPanelEdge, colHUD
+		if s.ptr.over(btn.r) {
+			fill, edge, tc = colHover, colDim, colNote
 		}
-		line += " " + w
+		drawPanel(dst, btn.r, fill, edge)
+		drawText(dst, btn.label, centreX(btn.label, btn.r.x, btn.r.w), btn.r.y+4, tc)
 	}
-	return append(out, line)
 }

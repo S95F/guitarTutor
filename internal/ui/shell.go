@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"fmt"
+
 	"github.com/hajimehoshi/ebiten/v2"
 )
 
@@ -185,9 +187,44 @@ func (s *Shell) Depth() int { return len(s.stack) }
 // screen, recording it as recently used. The returned warnings are the
 // importer's; the error is for the caller to display.
 func (s *Shell) OpenPiece(path string) ([]string, error) {
-	sc, warns, err := s.svc.Opener.Open(path)
+	sc, warns, err := s.loadPiece(path)
 	if err != nil {
 		return warns, err
+	}
+	s.Show(sc)
+	return warns, nil
+}
+
+// ReopenPiece loads a piece again and puts the fresh screen where the
+// current one is, rather than stacking a second copy on top of it. It is
+// what the practice view's reload does after a setting that is only read
+// at open time — the audio device, the SoundFont, the count-in — has
+// changed underneath a piece already playing.
+//
+// A load that fails leaves the stack alone: the caller still has the
+// screen it had, and gets the error to show on it. That is why the
+// replacement is queued only after Open has succeeded, and why this is
+// not simply a Pop followed by an OpenPiece — the stack edits are applied
+// in the order they were queued, so a pop queued first would take the
+// current screen away even when nothing arrived to replace it.
+func (s *Shell) ReopenPiece(path string) ([]string, error) {
+	sc, warns, err := s.loadPiece(path)
+	if err != nil {
+		return warns, err
+	}
+	s.Replace(sc)
+	return warns, nil
+}
+
+// loadPiece opens a piece through the Opener and records it as recently
+// used, without touching the screen stack.
+func (s *Shell) loadPiece(path string) (Screen, []string, error) {
+	if s.svc.Opener == nil {
+		return nil, nil, errNoOpener
+	}
+	sc, warns, err := s.svc.Opener.Open(path)
+	if err != nil {
+		return nil, warns, err
 	}
 	if s.svc.Prefs != nil {
 		s.svc.Prefs.AddRecent(path)
@@ -195,9 +232,12 @@ func (s *Shell) OpenPiece(path string) ([]string, error) {
 		// surfaces persistence problems.
 		_ = s.svc.Prefs.Save()
 	}
-	s.Show(sc)
-	return warns, nil
+	return sc, warns, nil
 }
+
+// errNoOpener is what a build with no importer wired reports rather than
+// panicking on a nil interface.
+var errNoOpener = fmt.Errorf("no importer is available in this build")
 
 // Update advances the top screen and applies any stack changes it made.
 func (s *Shell) Update() error {

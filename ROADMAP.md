@@ -122,11 +122,15 @@ Everything so far treats the command line as the front door: the practice *view*
 
 **The shell** (`internal/ui`)
 
-- [ ] **Start screen / piece browser**: recently-played list from config, a folder view over the formats we import (`.gtab .mid .gp .musicxml .mxl`), and drag-and-drop onto the window (Ebitengine exposes dropped files). Launching with a file argument still goes straight to practice — the CLI never becomes second-class
-- [ ] **In-app settings**, replacing flags-only configuration: audio device pickers (capture and playback, with the same-interface steering the `devices` command prints today), SoundFont chooser, backing-track chooser with an offset nudge, count-in beats, and a calibration button that runs the existing `internal/latency` wizard in-window with a live meter
-- [ ] Deferred from Phase 1: fixed-BPM entry (not just relative scale), track **solo** alongside mute, in-app count-in toggle, loop points draggable on the tab rather than bar-quantized only
+- [x] **Start screen / piece browser**: recently-played list from config, a folder view over the formats we import (`.gtab .mid .gp .musicxml .mxl`), and drag-and-drop onto the window (Ebitengine exposes dropped files). Launching with a file argument still goes straight to practice — the CLI never becomes second-class
+- [x] **In-app settings**, replacing flags-only configuration: audio device pickers (capture and playback, with the same-interface steering the `devices` command prints today), SoundFont chooser, count-in beats, and a calibration button that runs the existing `internal/latency` wizard in-window with a live meter. **Still missing: the backing-track chooser and its offset nudge, which remain `-backing` / `-backing-offset` on the command line**
+- [x] Deferred from Phase 1: fixed-BPM entry (not just relative scale), track **solo** alongside mute, in-app count-in toggle, loop points draggable on the tab rather than bar-quantized only (drag either end on the tab or the timeline; snaps to the beat, shift for tick-exact)
 - [ ] Deferred from Phase 2: split-device warning surfaced in the UI (not just docs), hot-unplug recovery with a clear banner instead of a dead stream, buffer-size selector
-- [ ] A pause/help overlay listing the key bindings — today they live in a HUD line and the README
+- [x] Mouse throughout, not only on the start screen: a transport bar and state toggles, click or drag the tab and a whole-piece timeline to seek, drag the loop ends, wheel to zoom, click a track to mute and right-click to solo, and clickable rows and buttons in settings
+- [x] A getting-started checklist in place of an empty recents pane on the first run, each step reporting whether it is actually done
+- [x] Settings reachable from inside a piece (**S**), with a **F5** reload offered when a setting that is only read at open time has changed underneath it
+- [x] A SoundFont file chooser, so the setting can be changed rather than only cleared
+- [x] A pause/help overlay listing the key bindings — on every screen, generated from the same table as each screen's footer hint so the two cannot drift apart
 
 **Ports and polish**
 

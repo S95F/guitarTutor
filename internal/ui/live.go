@@ -244,8 +244,8 @@ func lerpRGBA(c0, c1 color.RGBA, t float64) color.RGBA {
 // Only called when a.live.
 func (a *App) drawLiveHUD(screen *ebiten.Image) {
 	const meterW, meterH = 180, 10
-	x0 := float32(screenW - meterW - 24)
-	y0 := float32(18)
+	x0 := float32(screenW - meterW - uiPadX)
+	y0 := float32(ptTracksY + 6)
 
 	drawText(screen, "in", float64(x0)-22, float64(y0)-3, colHUD)
 	vector.StrokeRect(screen, x0, y0, meterW, meterH, 1, colString, false)
@@ -266,10 +266,9 @@ func (a *App) drawLiveHUD(screen *ebiten.Image) {
 
 	st := a.stats
 	s := fmt.Sprintf("hit %d  close %d  miss %d  |  %.0f%%", st.Hit, st.Close, st.Miss, st.Accuracy()*100)
-	drawText(screen, s, screenW-24-float64(7*len(s)), 36, colHUD)
+	drawTextRight(screen, s, screenW-uiPadX, float64(y0)+18, colHUD)
 	if a.dropped > 0 {
-		w := fmt.Sprintf("dropped %d samples", a.dropped)
-		drawText(screen, w, screenW-24-float64(7*len(w)), 54, colMiss)
+		drawTextRight(screen, fmt.Sprintf("dropped %d samples", a.dropped), screenW-uiPadX, float64(y0)+34, colMiss)
 	}
 }
 
@@ -278,28 +277,27 @@ func (a *App) drawLiveHUD(screen *ebiten.Image) {
 // invalidates every verdict below it. The text is scaled up when it fits
 // and drawn plain when it does not, so a long message is never clipped.
 func (a *App) drawWarning(screen *ebiten.Image) {
-	const h = 56
-	x, y := float32(40), float32(tabTop-116)
-	w := float32(screenW - 80)
+	x, y := float32(uiPadX+16), float32(ptWarnY)
+	const h = ptWarnH
+	w := float32(screenW - 2*(uiPadX+16))
 	vector.DrawFilledRect(screen, x, y, w, h, colWarnBG, false)
 	vector.StrokeRect(screen, x, y, w, h, 2, colMiss, false)
 
 	msg := a.warnMsg
 	scale := 2.0
-	if float64(7*len(msg))*scale > float64(w)-32 {
+	if textWScaled(msg, scale) > float64(w)-32 {
 		scale = 1
 	}
-	tw := float64(7*len(msg)) * scale
-	drawTextScaled(screen, msg, float64(x)+(float64(w)-tw)/2, float64(y)+12, scale, colMiss)
+	drawTextScaled(screen, msg, centreXScaled(msg, float64(x), float64(w), scale), float64(y)+12, scale, colMiss)
 
 	const hint = "press D to dismiss"
-	drawText(screen, hint, float64(x)+(float64(w)-float64(7*len(hint)))/2, float64(y)+40, colHUD)
+	drawText(screen, hint, centreX(hint, float64(x), float64(w)), float64(y)+40, colHUD)
 }
 
-// drawLegend paints the verdict color legend above the help line.
+// drawLegend paints the verdict color legend under the timeline.
 func (a *App) drawLegend(screen *ebiten.Image) {
-	y := float64(screenH - 44)
-	x := 16.0
+	y := a.legendY()
+	x := uiPadX
 	for _, e := range []struct {
 		s   string
 		col color.RGBA
@@ -323,7 +321,7 @@ func (a *App) drawTuner(screen *ebiten.Image) {
 	if !a.tunerSounding {
 		s := "listening..."
 		scale := 3.0
-		drawTextScaled(screen, s, (screenW-float64(7*len(s))*scale)/2, 280, scale, colString)
+		drawTextScaled(screen, s, centreXScaled(s, 0, screenW, scale), 300, scale, colString)
 		return
 	}
 	n := a.tunerNote
@@ -334,12 +332,12 @@ func (a *App) drawTuner(screen *ebiten.Image) {
 	}
 	name := fmt.Sprintf("%s %+.0fc", keyName(n.Key), n.Cents)
 	scale := 6.0
-	drawTextScaled(screen, name, (screenW-float64(7*len(name))*scale)/2, 200, scale, col)
+	drawTextScaled(screen, name, centreXScaled(name, 0, screenW, scale), 250, scale, col)
 
 	// Cents bar: -50 .. +50, center line, in-tune zone shaded.
 	const barW, barH = 500, 20
 	x0 := float32((screenW - barW) / 2)
-	y0 := float32(360)
+	y0 := float32(370)
 	cx := x0 + barW/2
 	zone := float32(5.0 / 50.0 * barW / 2)
 	vector.DrawFilledRect(screen, cx-zone, y0, 2*zone, barH, colTuneZone, false)
