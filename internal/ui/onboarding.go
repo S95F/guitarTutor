@@ -128,5 +128,5 @@ func (b *Browser) drawSteps(screen *ebiten.Image) {
 		drawTextSmall(screen, truncateW(st.detail, brwRecentW-40), brwRecentX+34, float64(y)+19, colDim)
 	}
 	y := float64(brwListTop + len(steps)*brwRecentRowH + 14)
-	drawText(screen, "your pieces will be listed here once you have opened one", brwRecentX+4, y, colBarline)
+	drawTextSmall(screen, "your pieces will be listed here once you have opened one", brwRecentX+4, y, colHint)
 }

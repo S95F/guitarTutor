@@ -12,9 +12,11 @@ import (
 	"fmt"
 	"image/color"
 	"math"
+	"strings"
 	"sync"
 
 	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/hajimehoshi/ebiten/v2/text/v2"
 	"github.com/hajimehoshi/ebiten/v2/vector"
 
 	"github.com/S95F/guitarTutor/internal/pitch"
@@ -39,6 +41,11 @@ type feed struct {
 	status        func() (levelDB float64, dropped int64)
 	waitCtl       bool
 	warning       string
+	// warnPosted records that SetLiveWarning was called at all since the
+	// last drain, which is the only thing that tells a condition still
+	// being asserted from one that has just happened again — the message
+	// text is identical in both cases. syncLive clears it.
+	warnPosted bool
 }
 
 // liveUI is the App's Phase 2 state: the mailbox plus the game-loop-owned
@@ -61,12 +68,16 @@ type liveUI struct {
 	verdicts      map[noteKey]practice.Verdict
 
 	// Live warning banner. warnMsg is the game-loop copy of the message
-	// the app layer last set; warnShown goes false when the user
-	// dismisses it and true again only when the message itself changes,
-	// so a condition that keeps re-reporting the same text (a dead
-	// stream polled every frame) stays dismissed.
+	// the app layer last set and warnShown goes false when the user
+	// dismisses it; see syncLive for what brings a dismissed banner back.
 	warnMsg   string
 	warnShown bool
+	// warnAsserted is whether the previous drain saw a SetLiveWarning
+	// call. A condition that is merely still true re-posts on every
+	// frame, so this stays true for as long as it holds; a condition
+	// that has happened again posts after a run of frames that did not,
+	// and that lapse is what re-raises a dismissed banner.
+	warnAsserted bool
 }
 
 // OfferResults queues verdicts for the next frame. Safe from any
@@ -113,12 +124,20 @@ func (a *App) SetWaitControl(enabled bool) {
 // capture and playback device that are not the same clock, a hot-unplugged
 // interface, a stream that died mid-session. The practice view only
 // displays it — the app layer decides what is worth warning about, and
-// clears the banner by setting "". A message different from the one
-// showing raises the banner again even if the previous one was dismissed;
-// re-setting the same text does not. Safe from any goroutine.
+// clears the banner by setting "".
+//
+// Two shapes of caller share this one entry point, and the banner has to
+// tell them apart (see syncLive): a condition that is polled re-posts the
+// same text on every frame for as long as it holds, while an event —
+// a failed reload, a device that would not open — posts once and then
+// says nothing until it happens again. Anything polled must therefore
+// keep posting every frame while the condition holds; a gap is read as
+// the condition having gone away and come back.
+//
+// Safe from any goroutine.
 func (a *App) SetLiveWarning(msg string) {
 	a.feed.mu.Lock()
-	a.feed.warning = msg
+	a.feed.warning, a.feed.warnPosted = msg, true
 	a.feed.mu.Unlock()
 }
 
@@ -139,13 +158,28 @@ func (a *App) syncLive() {
 	a.tunerNote, a.tunerSounding = a.feed.tunerNote, a.feed.tunerSounding
 	status := a.feed.status
 	a.waitCtl = a.feed.waitCtl
-	warn := a.feed.warning
+	warn, posted := a.feed.warning, a.feed.warnPosted
+	a.feed.warnPosted = false
 	a.feed.mu.Unlock()
 
-	// Only a change in the message re-raises a dismissed banner.
-	if warn != a.warnMsg {
+	// What re-raises a banner the user has dismissed.
+	//
+	// A different message always does. The hard case is the same message
+	// twice, which is two different events wearing the same text: the
+	// reload prompt fails, the user dismisses the banner and presses F5
+	// again, and the identical error must come back — the key the prompt
+	// is telling them to press has to do something visible — while a
+	// dead stream that re-reports itself sixty times a second must stay
+	// dismissed. The text cannot separate them, but the frame pattern
+	// can: the polled condition posts on every frame, so a post that
+	// follows a frame with no post at all is a fresh occurrence.
+	switch {
+	case warn != a.warnMsg:
 		a.warnMsg, a.warnShown = warn, warn != ""
+	case posted && !a.warnAsserted && warn != "":
+		a.warnShown = true
 	}
+	a.warnAsserted = posted
 
 	if len(rs) > 0 && a.verdicts == nil {
 		a.verdicts = make(map[noteKey]practice.Verdict)
@@ -271,38 +305,193 @@ func (a *App) drawLiveHUD(screen *ebiten.Image) {
 	}
 }
 
+// The live-warning banner's interior. The banner is a fixed rectangle
+// (ptWarnY/ptWarnH in transport.go) wedged between the track strip and
+// the first string, so it cannot grow to fit its contents: the contents
+// have to be fitted to it, in both directions.
+const (
+	// warnInsetX is how far inside the page margin the banner's own edges
+	// sit, and warnPadX the inset from those edges to its text.
+	warnInsetX = 16.0
+	warnPadX   = 16.0
+	// warnBorderW is the StrokeRect width. The stroke is centred on the
+	// rectangle's edge, so it eats half that much off the interior at
+	// the top and bottom — which is exactly what the dismiss hint's
+	// descenders used to be drawn into.
+	warnBorderW = 2.0
+	// warnScale is the size the message is drawn at when it fits on one
+	// line: a warning that invalidates every verdict below it should be
+	// the largest thing on the screen when it can be.
+	warnScale = 2.0
+	// warnMinGapY is the smallest space allowed between the message
+	// block and the hint. It only sets how many message lines are
+	// affordable; any space left over beyond it is shared out evenly.
+	warnMinGapY = 2.0
+	warnHint    = "press D to dismiss"
+)
+
+// warnRect is the banner's outline. The drawing and the interior layout
+// both read it so they cannot drift apart.
+func warnRect() rect {
+	x := uiPadX + warnInsetX
+	return rect{x, ptWarnY, screenW - 2*x, ptWarnH}
+}
+
+// A warnLayout is the banner's interior, worked out from the faces' own
+// metrics rather than from guessed pixel offsets. Both drawWarning and
+// the layout tests read it, which is the only way a test can see what a
+// window would show.
+type warnLayout struct {
+	// inner is the region inside the border and the side padding; every
+	// line is centred in it and must fit its width.
+	inner rect
+	// lines is the message as it will actually be drawn: wrapped to
+	// inner.w, and cut to the number of lines the fixed height affords
+	// with the last one ellipsized so the loss is visible.
+	lines []string
+	// heading is true when the whole message fitted on one line and is
+	// drawn at warnScale in the medium face; false when it had to wrap,
+	// in which case the lines are body text. The distinction matters for
+	// measurement: wrapTextW and truncateW measure the body face, Go
+	// Medium is wider, and a line measured one way and drawn the other
+	// overflows the box it was fitted to.
+	heading bool
+	// lineH is one message line's full box height (ascent + descent).
+	lineH float64
+	// msgY is the top of the first message line and hintY the top of the
+	// hint, both absolute.
+	msgY, hintY float64
+}
+
+// lineHeightOf is the vertical room one line drawn with f occupies.
+// text/v2 puts the baseline an ascent below the y passed to Draw, so a
+// descender's ink reaches ascent+descent below it — the measurement the
+// banner's interior has to be built from, since its height is fixed.
+func lineHeightOf(f *text.GoTextFace) float64 {
+	m := f.Metrics()
+	return m.HAscent + m.HDescent
+}
+
+// width is how wide s will be drawn in this layout's face.
+func (l warnLayout) width(s string) float64 {
+	if l.heading {
+		return textWScaled(s, warnScale)
+	}
+	return textW(s)
+}
+
+// warnLayoutFor fits msg and the dismiss hint into the banner.
+//
+// The message is drawn large on one line when it fits that way. When it
+// does not — a real split-device message names two Windows devices and
+// runs some 1380 pixels even at scale 1, which used to be drawn straight
+// across the window with its head and its tail clipped off both edges —
+// it wraps to the banner's inner width instead, and is cut to the number
+// of lines the fixed height affords. The vertical slack that is left is
+// shared evenly above the message, between it and the hint, and below
+// the hint, so the hint's descenders clear the bottom border instead of
+// being drawn on it.
+func warnLayoutFor(msg string) warnLayout {
+	r := warnRect()
+	l := warnLayout{inner: rect{
+		r.x + warnPadX, r.y + warnBorderW,
+		r.w - 2*warnPadX, r.h - 2*warnBorderW,
+	}}
+
+	// The hint and a wrapped message are both body text, so one line
+	// height serves for both.
+	bodyH := lineHeightOf(faceOf(srcBody, fontBody))
+	headH := lineHeightOf(faceOf(srcMedium, fontBody*warnScale))
+	// What is left for the message once the hint and the smallest
+	// acceptable gap are reserved.
+	budget := l.inner.h - bodyH - warnMinGapY
+
+	if textWScaled(msg, warnScale) <= l.inner.w && headH <= budget {
+		l.heading, l.lineH, l.lines = true, headH, []string{msg}
+	} else {
+		l.lineH = bodyH
+		maxLines := int(budget / bodyH)
+		if maxLines < 1 {
+			maxLines = 1
+		}
+		lines := wrapTextW(msg, l.inner.w)
+		if len(lines) > maxLines {
+			// Fold everything that did not fit back into the last line
+			// so truncateW ellipsizes it: a message that simply stopped
+			// mid-sentence reads as the whole warning.
+			tail := strings.Join(lines[maxLines-1:], " ")
+			lines = append(lines[:maxLines-1], tail)
+		}
+		for i, s := range lines {
+			// A single word wider than the banner survives wrapping
+			// intact, so every line is fitted to the width, not just the
+			// folded one.
+			lines[i] = truncateW(s, l.inner.w)
+		}
+		l.lines = lines
+	}
+
+	gap := (l.inner.h - (float64(len(l.lines))*l.lineH + bodyH)) / 3
+	l.msgY = l.inner.y + gap
+	l.hintY = l.msgY + float64(len(l.lines))*l.lineH + gap
+	return l
+}
+
 // drawWarning paints the live-warning banner across the top of the tab —
 // deliberately in the way, because a split device pair or a dead stream
 // invalidates every verdict below it. The text is scaled up when it fits
-// and drawn plain when it does not, so a long message is never clipped.
+// on one line and wrapped to the banner's width when it does not, so a
+// long message is never clipped by the window's edges.
 func (a *App) drawWarning(screen *ebiten.Image) {
-	x, y := float32(uiPadX+16), float32(ptWarnY)
-	const h = ptWarnH
-	w := float32(screenW - 2*(uiPadX+16))
-	vector.DrawFilledRect(screen, x, y, w, h, colWarnBG, false)
-	vector.StrokeRect(screen, x, y, w, h, 2, colMiss, false)
+	r := warnRect()
+	vector.DrawFilledRect(screen, float32(r.x), float32(r.y), float32(r.w), float32(r.h), colWarnBG, false)
+	vector.StrokeRect(screen, float32(r.x), float32(r.y), float32(r.w), float32(r.h), warnBorderW, colMiss, false)
 
-	msg := a.warnMsg
-	scale := 2.0
-	if textWScaled(msg, scale) > float64(w)-32 {
-		scale = 1
+	l := warnLayoutFor(a.warnMsg)
+	y := l.msgY
+	for _, s := range l.lines {
+		if l.heading {
+			drawTextScaled(screen, s, centreXScaled(s, l.inner.x, l.inner.w, warnScale), y, warnScale, colMiss)
+		} else {
+			drawText(screen, s, centreX(s, l.inner.x, l.inner.w), y, colMiss)
+		}
+		y += l.lineH
 	}
-	drawTextScaled(screen, msg, centreXScaled(msg, float64(x), float64(w), scale), float64(y)+12, scale, colMiss)
+	drawText(screen, warnHint, centreX(warnHint, l.inner.x, l.inner.w), l.hintY, colHUD)
+}
 
-	const hint = "press D to dismiss"
-	drawText(screen, hint, centreX(hint, float64(x), float64(w)), float64(y)+40, colHUD)
+// legendItems is the verdict colour key drawn under the timeline.
+var legendItems = []struct {
+	s   string
+	col color.RGBA
+}{{"legend:", colHUD}, {"hit", colHit}, {"close", colClose}, {"miss", colMiss}}
+
+// legendGap is the space between one legend item and the next. It has to
+// be a gap rather than a stride: the row used to advance by 7 pixels per
+// character plus two cells, the bitmap font's arithmetic, which under a
+// proportional face left the four items 15.7, 19.8 and 15.7 pixels apart
+// — visibly ragged beside every other shaper-measured row, and wrong by
+// however much a wider or non-ASCII label measures.
+const legendGap = 14.0
+
+// legendXs is where each legend item starts. Drawing and the spacing
+// test read the same function, so the row cannot go ragged again without
+// the test saying so.
+func legendXs() []float64 {
+	xs := make([]float64, len(legendItems))
+	x := uiPadX
+	for i, e := range legendItems {
+		xs[i] = x
+		x += textW(e.s) + legendGap
+	}
+	return xs
 }
 
 // drawLegend paints the verdict color legend under the timeline.
 func (a *App) drawLegend(screen *ebiten.Image) {
 	y := a.legendY()
-	x := uiPadX
-	for _, e := range []struct {
-		s   string
-		col color.RGBA
-	}{{"legend:", colHUD}, {"hit", colHit}, {"close", colClose}, {"miss", colMiss}} {
-		drawText(screen, e.s, x, y, e.col)
-		x += float64(7 * (len(e.s) + 2))
+	for i, x := range legendXs() {
+		drawText(screen, legendItems[i].s, x, y, legendItems[i].col)
 	}
 }
 

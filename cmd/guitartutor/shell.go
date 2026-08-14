@@ -95,16 +95,32 @@ func (o *shellOpener) showSettings(app *ui.App) {
 	// callback only posts to the settings screen's mailbox, so calling it
 	// from the dialog goroutine is safe — and it is ALWAYS called, with
 	// "" on cancel, because the row's busy guard re-arms on the outcome.
-	// A real pick is also persisted here, directly: the user can find a
-	// dialog that outlived its settings screen (escape while it floated
-	// behind the window) and their choice must land in the config rather
-	// than in a dead screen's mailbox (verification follow-up).
+	//
+	// The "one dialog at a time" guard has to live HERE, not only on the
+	// screen: showSettings builds a fresh Settings on every visit, so a
+	// screen-local flag was reset by leaving and re-entering settings
+	// while a dialog still floated, and two dialogs could then both write
+	// the config with whichever the user answered last winning.
+	//
+	// A real pick is persisted directly rather than only posted, because
+	// the dialog can outlive the screen that opened it (Escape while it
+	// sits behind the window) — and the practice view is told, so the
+	// piece still playing the old voice offers its reload instead of
+	// silently disagreeing with the config.
 	st.SetFilePicker(func(exts []string, chosen func(string)) {
+		if !o.sfDialog.CompareAndSwap(false, true) {
+			chosen("") // already open; re-arm the row rather than stack a second
+			return
+		}
 		go func() {
+			defer o.sfDialog.Store(false)
 			path := pickSoundFont()
 			if path != "" {
 				o.prefs.SetSoundFont(path)
 				_ = o.prefs.Save()
+				if app != nil {
+					app.MarkSettingsChanged()
+				}
 			}
 			chosen(path)
 		}()
@@ -112,9 +128,18 @@ func (o *shellOpener) showSettings(app *ui.App) {
 	if app != nil {
 		before := o.openTimeSnapshot()
 		st.SetOnClose(func() {
-			if o.openTimeSnapshot() != before {
-				app.MarkSettingsChanged()
+			after := o.openTimeSnapshot()
+			if after == before {
+				return
 			}
+			// The view keeps its own mirror of the count-in, and it is
+			// the value the next press of C writes back — so a count-in
+			// changed here has to reach it, or C would restore the
+			// open-time value over what the user just chose.
+			if after.countIn != before.countIn {
+				app.SyncCountIn(after.countIn)
+			}
+			app.MarkSettingsChanged()
 		})
 	}
 	o.shell.Show(st)
@@ -357,6 +382,11 @@ func (a *shellAudio) CalibrateContext(ctx context.Context, captureID, playbackID
 type shellOpener struct {
 	prefs *shellPrefs
 	shell *ui.Shell
+
+	// sfDialog is true while a SoundFont dialog is open. It lives on the
+	// opener rather than the settings screen because the screen is
+	// rebuilt on every visit, and the dialog can outlive it.
+	sfDialog atomic.Bool
 
 	otoOnce sync.Once
 	otoCtx  *oto.Context

@@ -40,10 +40,15 @@ var (
 	colPanelEdge = color.RGBA{46, 46, 60, 255}    // pane and control border
 	colHover     = color.RGBA{38, 40, 52, 255}    // control under the cursor
 	colFocus     = color.RGBA{38, 66, 104, 255}   // focused row or selection
-	colFocusDim  = color.RGBA{34, 38, 48, 255}    // selection in an unfocused pane
 	colDim       = color.RGBA{132, 132, 148, 255} // secondary text
-	colOn        = color.RGBA{46, 96, 66, 255}    // an engaged toggle's fill
-	colOnEdge    = color.RGBA{80, 200, 130, 255}  // an engaged toggle's border
+	// colHint is the quietest colour anything READABLE may use. colBarline
+	// (60,60,72) is a rule and border colour: against colBG it measures
+	// 1.72:1, far under the 4.5:1 body-text floor, and the footer hint —
+	// the one line teaching every shortcut on every screen — was drawn in
+	// it. This is 4.57:1, still clearly subordinate to colDim.
+	colHint   = color.RGBA{124, 124, 138, 255}
+	colOn     = color.RGBA{46, 96, 66, 255}   // an engaged toggle's fill
+	colOnEdge = color.RGBA{80, 200, 130, 255} // an engaged toggle's border
 )
 
 // centreX is the x that centres body text within [x, x+w). The width is
@@ -75,7 +80,7 @@ func drawHeader(dst *ebiten.Image, title, status string, statusCol color.RGBA) {
 
 // drawFooter paints the one-line key hint at the bottom of every screen.
 func drawFooter(dst *ebiten.Image, hint string) {
-	drawText(dst, hint, uiPadX, uiFooterY, colBarline)
+	drawText(dst, hint, uiPadX, uiFooterY, colHint)
 }
 
 // drawSection paints a section heading with its rule and advances the
@@ -149,7 +154,7 @@ type chipState struct {
 // chip metrics. The height fits a body-size label over a small key hint;
 // widths are computed per chip from the longer of the two strings.
 const (
-	chipH    = 36.0
+	chipH    = 36.0 // shared with the transport icon buttons: one row, one height
 	chipPadX = 11.0
 	chipGap  = 8.0
 )

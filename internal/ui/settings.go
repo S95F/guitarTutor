@@ -240,6 +240,12 @@ type Settings struct {
 	// back in restores it.
 	capMissing  bool
 	playMissing bool
+	// capChosen / playChosen record that Prefs holds EXACTLY the device
+	// shown. Without them the rows could not tell a device the user picked
+	// from the system default they were handed on first run, and claimed
+	// both were "<- selected" — see deviceText.
+	capChosen  bool
+	playChosen bool
 
 	countIn   int
 	soundFont string
@@ -429,8 +435,49 @@ func (s *Settings) refreshMissing() {
 	if p := s.prefs(); p != nil {
 		wantCap, wantPlay = p.Devices()
 	}
-	s.capMissing = wantCap != "" && s.capIdx >= 0 && s.capIdx < len(s.capture) && s.capture[s.capIdx].ID != wantCap
-	s.playMissing = wantPlay != "" && s.playIdx >= 0 && s.playIdx < len(s.playback) && s.playback[s.playIdx].ID != wantPlay
+	s.capChosen = deviceIsSaved(s.capture, s.capIdx, wantCap)
+	s.playChosen = deviceIsSaved(s.playback, s.playIdx, wantPlay)
+	s.capMissing = wantCap != "" && !s.capChosen && s.capIdx >= 0 && s.capIdx < len(s.capture)
+	s.playMissing = wantPlay != "" && !s.playChosen && s.playIdx >= 0 && s.playIdx < len(s.playback)
+}
+
+// deviceIsSaved reports whether the entry the picker is showing is the one
+// Prefs holds — as opposed to a fallback for a saved device that is not
+// connected, or the system default nobody has chosen yet.
+func deviceIsSaved(opts []DeviceOption, idx int, saved string) bool {
+	return saved != "" && idx >= 0 && idx < len(opts) && opts[idx].ID == saved
+}
+
+// deviceState is what a picker may honestly say about the entry it shows.
+type deviceState int
+
+const (
+	devChosen   deviceState = iota // Prefs holds this exact device
+	devFallback                    // Prefs holds another device, not connected
+	devUnchosen                    // Prefs holds nothing at all
+)
+
+// devState reads the state off the pair of flags refreshMissing keeps.
+func devState(chosen, missing bool) deviceState {
+	switch {
+	case chosen:
+		return devChosen
+	case missing:
+		return devFallback
+	}
+	return devUnchosen
+}
+
+// deviceStateOf answers for one of the two picker rows; any other row is
+// not a device and never unchosen.
+func (s *Settings) deviceStateOf(r settingsRow) deviceState {
+	switch r {
+	case srCapture:
+		return devState(s.capChosen, s.capMissing)
+	case srPlayback:
+		return devState(s.playChosen, s.playMissing)
+	}
+	return devChosen
 }
 
 // resolveDevice finds id in opts, falling back to the system default and
@@ -595,6 +642,11 @@ func (s *Settings) adjust(d int) {
 // forward, calibration starts, the SoundFont row browses (or clears when
 // no picker is installed), and the count-in steps up, wrapping past 8
 // back to 0 so Enter alone can reach every value.
+//
+// The one exception is a picker whose device has never been chosen. There
+// Enter COMMITS what is shown instead of stepping past it, because that is
+// what the row promises ("press enter to use it") and because stepping
+// would store a device the first-run user never looked at.
 func (s *Settings) activate() {
 	r, ok := s.focused()
 	if !ok {
@@ -604,6 +656,13 @@ func (s *Settings) activate() {
 		return
 	}
 	switch r {
+	case srCapture, srPlayback:
+		s.notice = ""
+		if s.deviceStateOf(r) == devUnchosen {
+			s.commitDevices()
+			return
+		}
+		s.adjust(+1)
 	case srCountIn:
 		s.notice = ""
 		if s.countIn >= maxCountIn {
@@ -1047,7 +1106,16 @@ func (s *Settings) framesText(frames int) string {
 
 // deviceText renders one picker's value: position in the list, name, and
 // the system-default and selected markers.
-func deviceText(opts []DeviceOption, idx int) string {
+//
+// The selected marker used to be unconditional, so on first run the row
+// read "[1/3] Microphone (...) (system default) <- selected" for a device
+// Prefs had never been told about. The application only opens the live
+// capture path when the STORED capture ID is non-empty (cmd/guitartutor:
+// captureID == "" falls back to playback-only), so the user who came from
+// the checklist step "choose your audio interface", read that line and
+// pressed Escape got no scoring at all and nothing to explain it. An entry
+// nobody has chosen therefore says so, and says which key chooses it.
+func deviceText(opts []DeviceOption, idx int, st deviceState) string {
 	if idx < 0 || idx >= len(opts) {
 		return "none available"
 	}
@@ -1056,6 +1124,12 @@ func deviceText(opts []DeviceOption, idx int) string {
 	if o.Default {
 		s += "  (system default)"
 	}
+	if st == devUnchosen {
+		return s + "  <- not chosen yet: press enter to use it"
+	}
+	// A fallback IS what a piece will use, so it is honestly the selection;
+	// the note beside the row is what says it is standing in for something
+	// (audit C3).
 	return s + "  <- selected"
 }
 
@@ -1082,6 +1156,23 @@ func (s *Settings) audioUnavailableText() []string {
 	default:
 		return []string{"The audio backend reported no playback devices."}
 	}
+}
+
+// soundFontNote is the line under the SoundFont row, with the colour to
+// draw it in. It covers the two states in which the row cannot do what it
+// looks like it can: no file dialog in this build, and a dialog already
+// open. The second matters most — the dialog is unowned, so on Windows it
+// can sit BEHIND the game window, and the row is then the only thing that
+// can tell the user where their missing dialog went instead of leaving
+// them clicking a button that swallows everything.
+func (s *Settings) soundFontNote() (string, color.RGBA) {
+	switch {
+	case s.sfBusy:
+		return "a file dialog is open: finish or cancel it, it may be sitting behind this window", colClose
+	case s.pick == nil:
+		return "no file dialog is available in this build; -sf2 on the command line still works", colBarline
+	}
+	return "", colBarline
 }
 
 // soundFontText renders the SoundFont row's value.
@@ -1126,6 +1217,24 @@ func (s *Settings) calibrationText(sn calSnap) (string, color.RGBA) {
 	return s.storedCalibrationText()
 }
 
+// saveErrLine renders the footer's save failure, and whether there is one.
+//
+// A real one is a wrapped os.Rename error carrying two full paths and the
+// operating system's message — several times the width of the window, and
+// it used to be drawn unbounded straight off the right edge. There is no
+// room to wrap it: the config-file line sits directly above and the key
+// hints directly below, so it is cut to one. What is cut is the FRONT,
+// because the reason ("There is not enough space on the disk.") is the
+// last thing in a wrapped path error and the only part that says what to
+// do about it; the label is kept so the line still announces itself.
+func (s *Settings) saveErrLine() (string, bool) {
+	if s.saveErr == nil {
+		return "", false
+	}
+	const label = "SAVE FAILED: "
+	return label + ellipsizeW(s.saveErr.Error(), settingsFooterW-textW(label)), true
+}
+
 // configText renders the footer's config-file location.
 func (s *Settings) configText() string {
 	if s.configPath == "" {
@@ -1156,10 +1265,27 @@ const (
 	settingsRowH   = uiRowH
 	// settingsWrap is the pixel width a note may occupy beside the value
 	// column before it wraps.
-	settingsWrap   = screenW - settingsValueX - uiPadX
-	settingsBtnH   = 20.0
+	settingsWrap = screenW - settingsValueX - uiPadX
+	// settingsBtnH was 20, which is four pixels short of a body line: the
+	// label's descenders were drawn through the bottom border (the g of
+	// "measuring...") and every label sat about 2px low. 22 clears both
+	// borders and still leaves 4px between the buttons of adjacent rows at
+	// the 26px row pitch.
+	settingsBtnH   = 22.0
 	settingsBtnPad = 8.0
 	settingsBtnGap = 6.0
+	// settingsValueGap is the clearance a row's value keeps from the
+	// leftmost button beside it, or from the right page margin.
+	settingsValueGap = 12.0
+	// settingsFooterW is the width of the footer's own lines, margin to
+	// margin.
+	settingsFooterW = screenW - 2*settingsLeft
+	// settingsNoticeLines and settingsSfNoteLines are the heights, in body
+	// lines, of the two FIXED bands below the calibration and SoundFont
+	// rows. See reserveNote: what those bands say changes with what the
+	// user just did, and none of it may move a row.
+	settingsNoticeLines = 2
+	settingsSfNoteLines = 1
 )
 
 type settingsItemKind int
@@ -1178,6 +1304,12 @@ type settingsButton struct {
 	label string
 	r     rect
 	act   func(*Settings)
+	// disabled draws the button as unavailable. A control whose click is
+	// swallowed must look swallowed: the SoundFont browse kept its idle
+	// look while an OS dialog was already up, and since that dialog is
+	// unparented and can sit BEHIND the game window, the user's response
+	// was to click it again.
+	disabled bool
 }
 
 // A settingsItem is one entry of the display list.
@@ -1191,7 +1323,17 @@ type settingsItem struct {
 	label   string
 	buttons []settingsButton
 	prog    float64
+	// valueW is how much room the value has before it reaches this row's
+	// own buttons; see addRow.
+	valueW float64
 }
+
+// valueText is the row's value clipped to the room it actually has. A
+// calibration failure carries the backend's error, which for a failed
+// store is a path plus an OS message — around 1150px of text, drawn
+// straight under the row's opaque buttons and off the right edge of the
+// page before it was bounded.
+func (it settingsItem) valueText() string { return truncateW(it.text, it.valueW) }
 
 // band is the full-width rectangle a row occupies, which is what a click
 // anywhere along the line lands in.
@@ -1219,9 +1361,41 @@ func (b *itemsBuilder) note(text string, col color.RGBA) {
 	b.y += 4
 }
 
+// reserveNote emits at most lines lines of text into a band of FIXED
+// height, whether or not there is anything to say.
+//
+// A band whose height follows its contents moves every row below it. That
+// is how a REFUSED click could hit something: clicking "+" on the count-in
+// during a calibration posts the lock notice, which as an ordinary note
+// pushed the rows below it down ~40px, so the identical second click —
+// same pixel, user has not moved the mouse — landed on the SoundFont row's
+// "clear" and discarded their SoundFont without a word. Nothing a band
+// says may change where a row is drawn.
+func (b *itemsBuilder) reserveNote(lines int, text string, col color.RGBA) {
+	top := b.y
+	if text != "" {
+		wrapped := wrapTextW(text, settingsWrap)
+		if len(wrapped) > lines {
+			// More than the band holds: fold the rest into the last line
+			// and cut it there, rather than let it run out of the band.
+			wrapped[lines-1] = truncateW(strings.Join(wrapped[lines-1:], " "), settingsWrap)
+			wrapped = wrapped[:lines]
+		}
+		for i, l := range wrapped {
+			b.out = append(b.out, settingsItem{
+				kind: siNote, y: top + float64(i)*settingsLineH, text: l, col: col, row: -1,
+			})
+		}
+	}
+	b.y = top + float64(lines)*settingsLineH + 4
+}
+
+// progress advances exactly as far as the one-line note it replaces while
+// a measurement runs, so pressing "calibrate now" does not shift the rows
+// below the bar either.
 func (b *itemsBuilder) progress(f float64) {
 	b.out = append(b.out, settingsItem{kind: siProgress, y: b.y, prog: f, row: -1})
-	b.y += settingsLineH
+	b.y += settingsLineH + 4
 }
 
 // addRow adds a focusable line with its buttons laid out right to left,
@@ -1234,9 +1408,17 @@ func (b *itemsBuilder) addRow(label, value string, col color.RGBA, btns ...setti
 		btns[i].r = rect{x, b.y - 4, w, settingsBtnH}
 		x -= settingsBtnGap
 	}
+	// The value gets what the buttons leave. The budget is computed here,
+	// where the buttons were actually placed, so Draw cannot work it out
+	// differently — the same reason the hit test reads this list.
+	right := screenW - uiPadX
+	if len(btns) > 0 {
+		right = btns[0].r.x
+	}
 	b.out = append(b.out, settingsItem{
 		kind: siRow, y: b.y, text: value, col: col,
 		row: b.row, label: label, buttons: btns,
+		valueW: right - settingsValueGap - settingsValueX,
 	})
 	b.row++
 	b.y += settingsRowH
@@ -1256,10 +1438,10 @@ func (s *Settings) items() []settingsItem {
 
 	b.section("AUDIO DEVICES")
 	if s.hasDevices() {
-		b.addRow("capture", deviceText(s.capture, s.capIdx), colHUD,
+		b.addRow("capture", deviceText(s.capture, s.capIdx, s.deviceStateOf(srCapture)), colHUD,
 			settingsButton{label: "<", act: func(s *Settings) { s.adjustRow(srCapture, -1) }},
 			settingsButton{label: ">", act: func(s *Settings) { s.adjustRow(srCapture, +1) }})
-		b.addRow("playback", deviceText(s.playback, s.playIdx), colHUD,
+		b.addRow("playback", deviceText(s.playback, s.playIdx, s.deviceStateOf(srPlayback)), colHUD,
 			settingsButton{label: "<", act: func(s *Settings) { s.adjustRow(srPlayback, -1) }},
 			settingsButton{label: ">", act: func(s *Settings) { s.adjustRow(srPlayback, +1) }})
 		if s.capMissing {
@@ -1287,7 +1469,10 @@ func (s *Settings) items() []settingsItem {
 			label = "measuring..."
 		}
 		b.addRow("round-trip offset", txt, col,
-			settingsButton{label: label, act: func(s *Settings) { s.startCalibration() }})
+			settingsButton{label: label, act: func(s *Settings) {
+				s.focusRow(srCalibrate)
+				s.startCalibration()
+			}})
 		if running {
 			b.progress(sn.Progress)
 		} else {
@@ -1299,22 +1484,31 @@ func (s *Settings) items() []settingsItem {
 
 	// An input a running measurement is holding off was ignored on
 	// purpose; say so where the user is looking rather than swallowing
-	// the key.
-	if s.notice != "" {
-		b.note(s.notice, colClose)
-	}
+	// the key. The band is there whether or not there is a notice, so
+	// saying it cannot move what the user is about to click.
+	b.reserveNote(settingsNoticeLines, s.notice, colClose)
 
 	b.section("INSTRUMENT")
-	sfButtons := []settingsButton{{label: "clear", act: func(s *Settings) { s.clearSoundFont() }}}
+	sfButtons := []settingsButton{{label: "clear", act: func(s *Settings) {
+		s.focusRow(srSoundFont)
+		s.clearSoundFont()
+	}}}
 	if s.pick != nil {
-		sfButtons = append([]settingsButton{
-			{label: "browse", act: func(s *Settings) { s.chooseSoundFont() }},
-		}, sfButtons...)
+		browse := settingsButton{label: "browse", act: func(s *Settings) {
+			s.focusRow(srSoundFont)
+			s.chooseSoundFont()
+		}}
+		if s.sfBusy {
+			// The click is already a no-op (chooseSoundFont refuses while
+			// a dialog is up); this is the half that was missing — the
+			// button now looks like what it does.
+			browse.label, browse.disabled = "waiting…", true
+		}
+		sfButtons = append([]settingsButton{browse}, sfButtons...)
 	}
 	b.addRow("soundfont", ellipsizeW(s.soundFontText(), 430), colHUD, sfButtons...)
-	if s.pick == nil {
-		b.note("no file dialog is available in this build; -sf2 on the command line still works", colBarline)
-	}
+	sfNote, sfCol := s.soundFontNote()
+	b.reserveNote(settingsSfNoteLines, sfNote, sfCol)
 
 	b.section("PRACTICE")
 	b.addRow("count-in beats", fmt.Sprintf("%d  (0-%d)", s.countIn, maxCountIn), colHUD,
@@ -1324,13 +1518,23 @@ func (s *Settings) items() []settingsItem {
 	return b.out
 }
 
+// focusRow puts the keyboard cursor on a row. EVERY row button calls it
+// before acting: the device and count-in buttons went through adjustRow
+// and did, but calibrate, browse and clear acted directly, so clicking one
+// of them left the highlight — and the arrow keys — on whatever row the
+// cursor happened to be on, and the next Right adjusted a setting the user
+// was not looking at.
+func (s *Settings) focusRow(kind settingsRow) {
+	if i := s.rowIndex(kind); i >= 0 {
+		s.cur = i
+	}
+}
+
 // adjustRow focuses a row and applies a step to it, which is what a click
 // on one of its buttons means: the mouse both moves the cursor and acts,
 // where the keyboard needs two presses.
 func (s *Settings) adjustRow(kind settingsRow, d int) {
-	if i := s.rowIndex(kind); i >= 0 {
-		s.cur = i
-	}
+	s.focusRow(kind)
 	s.adjust(d)
 }
 
@@ -1454,8 +1658,8 @@ func (s *Settings) Draw(dst *ebiten.Image) {
 
 	fy := screenH - 68.0
 	drawText(dst, s.configText(), settingsLeft, fy, colBarline)
-	if s.saveErr != nil {
-		drawText(dst, "SAVE FAILED: "+s.saveErr.Error(), settingsLeft, fy+settingsLineH, colMiss)
+	if line, ok := s.saveErrLine(); ok {
+		drawText(dst, line, settingsLeft, fy+settingsLineH, colMiss)
 	}
 	drawFooter(dst, s.hintLine())
 
@@ -1475,13 +1679,26 @@ func (s *Settings) drawItemRow(dst *ebiten.Image, it settingsItem) {
 		col = colNote
 	}
 	drawText(dst, it.label, settingsLeft+8, it.y, colHUD)
-	drawText(dst, it.text, settingsValueX, it.y, col)
+	drawText(dst, it.valueText(), settingsValueX, it.y, col)
 	for _, btn := range it.buttons {
 		fill, edge, tc := colPanel, colPanelEdge, colHUD
-		if s.ptr.over(btn.r) {
+		switch {
+		case btn.disabled:
+			// The same greying drawChip uses, so "you cannot press this"
+			// reads the same wherever it appears.
+			fill, edge, tc = colBG, colBarline, colBarline
+		case s.ptr.over(btn.r):
 			fill, edge, tc = colHover, colDim, colNote
 		}
 		drawPanel(dst, btn.r, fill, edge)
-		drawText(dst, btn.label, centreX(btn.label, btn.r.x, btn.r.w), btn.r.y+4, tc)
+		drawText(dst, btn.label, centreX(btn.label, btn.r.x, btn.r.w), settingsBtnTextY(btn.r), tc)
 	}
 }
+
+// settingsBtnTextY centres one body line vertically inside a button. The
+// label used to be drawn at a flat r.y+4, which is right for exactly one
+// button height and was wrong for the one in use: the ink of a descender
+// (the g of "measuring...") came down through the bottom border and every
+// label sat about 2px low. Deriving it from the rect keeps the two in step
+// whatever the height becomes.
+func settingsBtnTextY(r rect) float64 { return r.y + (r.h-uiTextH)/2 }

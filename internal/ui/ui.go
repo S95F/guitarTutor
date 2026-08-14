@@ -688,6 +688,25 @@ func (a *App) SetCountIn(beats int) {
 	a.countInStale = false
 }
 
+// SyncCountIn updates the count-in the user has chosen — after the
+// settings screen changed it underneath a running piece — WITHOUT
+// touching engineCountIn, which still records what the engine was built
+// with. Keeping those apart is the point: the view now offers the right
+// value on the next toggle, and the pending comparison still knows the
+// running engine does not have it, so the F5 prompt stays up.
+//
+// Without this the view kept its open-time mirror, and the next press of
+// C wrote that stale value straight back over what the user had just
+// chosen in settings.
+func (a *App) SyncCountIn(beats int) {
+	if beats > 0 {
+		a.countInBeats, a.countInOn = beats, true
+	} else {
+		a.countInBeats, a.countInOn = defaultCountInBeats, false
+	}
+	a.countInStale = a.CountInBeats() != a.engineCountIn
+}
+
 // CountInBeats reports the count-in the user wants for the next Play: the
 // configured number of beats, or 0 once C has switched it off. The
 // integrator can read this when re-opening the piece, or persist it.
@@ -764,6 +783,13 @@ type practiceBinding struct {
 	// means always. W needs a live detector, so it is gated: without one
 	// it is dropped from the hint line and greyed in the overlay.
 	Enabled func(a *App) bool
+	// Reword replaces Hint and Desc when what a key DOES depends on how
+	// the view is hosted. Escape is the case: under the shell it returns
+	// to the start screen, but `guitartutor play song.gp` has nothing
+	// behind it, so the same key ends the process — and saying "go back"
+	// there, one line above "Q quit", promises a screen that does not
+	// exist.
+	Reword func(a *App) (hint, desc string)
 }
 
 // enabled resolves the optional gate.
@@ -804,7 +830,14 @@ var practiceBindings = []practiceBinding{
 		Enabled: func(a *App) bool { return a.reload != nil }},
 	{Group: "session", Keys: "? or F1", Hint: "? help", Desc: "This key-binding list"},
 	{Group: "session", Keys: "D", Desc: "Dismiss the warning banner"},
-	{Group: "session", Keys: "esc", Hint: "esc back", Desc: "Leave this piece and go back"},
+	{Group: "session", Keys: "esc", Hint: "esc back", Desc: "Leave this piece and go back",
+		Reword: func(a *App) (string, string) {
+			if a.quitAll == nil {
+				// Nothing hosts this view, so finishing it ends the run.
+				return "esc quit", "Leave the piece — with nothing behind it, this quits"
+			}
+			return "esc back", "Leave this piece and go back"
+		}},
 	{Group: "session", Keys: "Q", Hint: "Q quit", Desc: "Quit guitarTutor"},
 }
 
@@ -813,14 +846,14 @@ var practiceBindings = []practiceBinding{
 func (a *App) helpRows() []helpBinding {
 	out := make([]helpBinding, len(practiceBindings))
 	for i, b := range practiceBindings {
-		out[i] = helpBinding{Group: b.Group, Keys: b.Keys, Hint: b.Hint, Desc: b.Desc, Off: !b.enabled(a)}
+		hint, desc := b.Hint, b.Desc
+		if b.Reword != nil {
+			hint, desc = b.Reword(a)
+		}
+		out[i] = helpBinding{Group: b.Group, Keys: b.Keys, Hint: hint, Desc: desc, Off: !b.enabled(a)}
 	}
 	return out
 }
-
-// helpGroups slices the resolved table into the overlay's sections, in
-// table order.
-func (a *App) helpGroups() []helpSection { return helpSections(a.helpRows()) }
 
 // hintLine is the one-line footer summary, built from the same table as
 // the overlay so the two cannot drift apart.
@@ -887,7 +920,7 @@ func (a *App) drawTab(screen *ebiten.Image) {
 		}
 		x := tickToX(bar.Start)
 		vector.StrokeLine(screen, x, tabTop-14, x, float32(tabTop+(nStr-1)*stringGap+14), 1, colBarline, false)
-		drawTextSmall(screen, fmt.Sprintf("%d", bi+1), float64(x)+4, tabTop-32, colBarline)
+		drawTextSmall(screen, fmt.Sprintf("%d", bi+1), float64(x)+4, tabTop-32, colHint)
 
 		for _, beat := range bar.Beats {
 			for _, n := range beat.Notes {
@@ -937,9 +970,6 @@ func (a *App) drawTab(screen *ebiten.Image) {
 	// Playhead.
 	vector.StrokeLine(screen, phX, tabTop-24, phX, float32(tabTop+(nStr-1)*stringGap+24), 2, colPlayhead, false)
 
-	if a.eng.Waiting() {
-		a.drawStateChip(screen, "WAITING", a.pulseCol(), a.stateChipY())
-	}
 }
 
 // drawHUD paints everything around the notation: the header, the
@@ -950,8 +980,15 @@ func (a *App) drawHUD(screen *ebiten.Image, l practiceLayout) {
 	a.drawTrackStrip(screen, l, a.ptr)
 	a.drawTimeline(screen, l, a.ptr)
 
+	// Both transport-state chips are drawn here rather than inside
+	// drawTab, so the tuner does not hide them: wait mode halting the
+	// piece is exactly the moment a user checking their tuning needs to
+	// be told why everything stopped, and COUNT-IN was already surviving
+	// the tuner while WAITING was not.
 	if in, left := a.eng.CountingIn(); in {
 		a.drawStateChip(screen, fmt.Sprintf("COUNT-IN %d", left), colCountIn, a.stateChipY())
+	} else if a.eng.Waiting() {
+		a.drawStateChip(screen, "WAITING", a.pulseCol(), a.stateChipY())
 	}
 	if a.live {
 		a.drawLiveHUD(screen)
@@ -969,10 +1006,16 @@ func (a *App) drawHUD(screen *ebiten.Image, l practiceLayout) {
 // pieceTitle is the header's left-hand text: the piece's own title, or a
 // neutral fallback for a score that carries none.
 func (a *App) pieceTitle() string {
-	if a.sc.Title != "" {
-		return truncateWScaled(a.sc.Title, 520, uiTitleScl)
+	if a.sc.Title == "" {
+		return "guitarTutor"
 	}
-	return "guitarTutor"
+	// The budget is what the header actually has left: the full width
+	// less both margins, the status line sharing the row, and a gap. A
+	// fixed 520 clipped ordinary transcription titles while 400-odd
+	// pixels of the same line sat empty.
+	const gap = 32.0
+	budget := screenW - 2*uiPadX - textW(a.statusLine()) - gap
+	return truncateWScaled(a.sc.Title, budget, uiTitleScl)
 }
 
 // statusLine is the header's right-hand text: what the transport is
@@ -1010,7 +1053,7 @@ func (a *App) drawBPMEntry(screen *ebiten.Image) {
 	vector.StrokeRect(screen, float32(r.x), float32(r.y), float32(r.w), float32(r.h), 2, colSounding, false)
 	drawText(screen, "target BPM", r.x+16, r.y+12, colHUD)
 	drawTextScaled(screen, a.bpmDigits+"_", r.x+16, r.y+30, 2, colNote)
-	drawText(screen, "enter apply    esc or click away to cancel", r.x+16, r.y+64, colBarline)
+	drawText(screen, "enter apply    esc or click away to cancel", r.x+16, r.y+64, colHint)
 }
 
 // drawHelp paints the full key-binding list over everything else, from

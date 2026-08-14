@@ -8,6 +8,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -508,17 +509,23 @@ func TestSettingsDeviceSelection(t *testing.T) {
 // currently in use.
 func TestSettingsDeviceTextMarksDefaultAndSelection(t *testing.T) {
 	capture, playback := settingsDevices()
-	got := deviceText(capture, 1)
+	got := deviceText(capture, 1, devChosen)
 	for _, want := range []string{"Microphone (Realtek(R) Audio)", "system default", "selected", "[2/2]"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("deviceText = %q, want it to contain %q", got, want)
 		}
 	}
-	if got := deviceText(playback, 1); strings.Contains(got, "system default") {
+	if got := deviceText(playback, 1, devChosen); strings.Contains(got, "system default") {
 		t.Errorf("non-default device marked as the system default: %q", got)
 	}
-	if got := deviceText(nil, -1); got == "" {
+	if got := deviceText(nil, -1, devUnchosen); got == "" {
 		t.Error("deviceText on an empty list must still say something")
+	}
+	// A fallback for an unplugged device IS what a piece will use, so it
+	// keeps the selected marker; the note beside the row carries the
+	// caveat (audit C3).
+	if got := deviceText(capture, 1, devFallback); !strings.Contains(got, "selected") {
+		t.Errorf("fallback text = %q, want it to still say what is in use", got)
 	}
 }
 
@@ -1269,5 +1276,380 @@ func TestSettingsDeviceInterfaceName(t *testing.T) {
 		if got := deviceInterfaceName(c.in); got != c.want {
 			t.Errorf("deviceInterfaceName(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// ---- layout: nothing paints outside the room it was given ----------------
+//
+// The display list is the whole of the screen's geometry (see items), so
+// these read it the way Draw and the hit test do rather than opening a
+// window.
+
+// settingsNoteLines returns every note line the screen is showing, which
+// is how a test reads what it is telling the user.
+func settingsNoteLines(s *Settings) []string {
+	var out []string
+	for _, it := range s.items() {
+		if it.kind == siNote {
+			out = append(out, it.text)
+		}
+	}
+	return out
+}
+
+// settingsSays reports whether any note line mentions want.
+func settingsSays(s *Settings, want string) bool {
+	return strings.Contains(strings.Join(settingsNoteLines(s), " "), want)
+}
+
+// settingsRowTops renders where every row sits, as one comparable string:
+// what a test asserts about is usually that something did NOT move.
+func settingsRowTops(s *Settings) string {
+	var b strings.Builder
+	for _, it := range s.items() {
+		if it.kind == siRow {
+			fmt.Fprintf(&b, "%d@%.0f ", it.row, it.y)
+		}
+	}
+	return b.String()
+}
+
+// settingsPressAt builds a click in the middle of a rect.
+func settingsPressAt(r rect) pointer {
+	return pointer{x: r.x + r.w/2, y: r.y + r.h/2, down: true, pressed: true}
+}
+
+// TestSettingsRowValueIsBoundedByItsButtons: a row's value used to be
+// drawn unbounded from the value column, so a calibration failure carrying
+// a path and an OS message (~1150px) painted straight under the row's own
+// opaque buttons and off the right edge of the page.
+func TestSettingsRowValueIsBoundedByItsButtons(t *testing.T) {
+	audio := newSettingsAudio()
+	audio.calErr = errors.New(`measured 4096 frames but could not save it: appconfig: writing ` +
+		`C:\Users\p\AppData\Roaming\guitarTutor\config.json.tmp: There is not enough space on the disk.`)
+	s, _ := newSettingsFixture(t, audio)
+	if !s.startCalibration() {
+		t.Fatal("startCalibration refused")
+	}
+	settingsWaitPhase(t, s, calFailed)
+	defer s.Close()
+
+	it := settingsRowItem(t, s, srCalibrate)
+	if len(it.buttons) == 0 {
+		t.Fatal("the calibration row has no buttons to be bounded by")
+	}
+	if raw := textW(it.text); raw <= it.valueW {
+		t.Fatalf("the fixture failure measures %.0fpx and already fits %.0fpx: it cannot show the overflow", raw, it.valueW)
+	}
+	if got := textW(it.valueText()); got > it.valueW {
+		t.Errorf("the row paints %.0fpx of value into %.0fpx of room", got, it.valueW)
+	}
+	// Every row, not just this one: the budget stops clear of the row's own
+	// leftmost button, or of the page margin when it has none.
+	for _, row := range s.items() {
+		if row.kind != siRow {
+			continue
+		}
+		if row.valueW <= 0 {
+			t.Errorf("row %d was given no room at all for its value", row.row)
+			continue
+		}
+		limit := screenW - uiPadX
+		if len(row.buttons) > 0 {
+			limit = row.buttons[0].r.x
+		}
+		if right := settingsValueX + row.valueW; right > limit {
+			t.Errorf("row %d may paint out to %.0f, past %.0f", row.row, right, limit)
+		}
+		if w := textW(row.valueText()); w > row.valueW {
+			t.Errorf("row %d paints %.0fpx into %.0fpx of room", row.row, w, row.valueW)
+		}
+	}
+}
+
+// TestSettingsSaveErrorFitsTheFooter: the failure line is a wrapped
+// os.Rename error with two full paths, which used to be drawn unbounded
+// off the right edge of the window. It is cut to the page width, keeping
+// the label and the OS reason at the end — the only part that says what
+// went wrong.
+func TestSettingsSaveErrorFitsTheFooter(t *testing.T) {
+	s, p := newSettingsFixture(t, nil)
+	p.saveErr = errors.New(`appconfig: rename C:\Users\p\AppData\Roaming\guitarTutor\config.json.tmp ` +
+		`C:\Users\p\AppData\Roaming\guitarTutor\config.json: The process cannot access the file ` +
+		`because it is being used by another process.`)
+
+	if _, ok := s.saveErrLine(); ok {
+		t.Fatal("the footer announced a failure before anything was saved")
+	}
+	s.cur = len(s.rows) - 1
+	s.adjust(+1) // any change saves, and this save fails
+
+	line, ok := s.saveErrLine()
+	if !ok {
+		t.Fatal("a failed save left the footer with nothing to say")
+	}
+	if raw := textW("SAVE FAILED: " + p.saveErr.Error()); raw <= settingsFooterW {
+		t.Fatalf("the fixture error measures %.0fpx and already fits %.0fpx", raw, settingsFooterW)
+	}
+	if w := textW(line); w > settingsFooterW {
+		t.Errorf("the footer line measures %.0fpx, past the %.0fpx page width: %q", w, settingsFooterW, line)
+	}
+	if !strings.HasPrefix(line, "SAVE FAILED:") {
+		t.Errorf("footer line = %q, want it to announce itself", line)
+	}
+	if !strings.HasSuffix(line, "used by another process.") {
+		t.Errorf("footer line = %q, want the OS reason at the end to survive the cut", line)
+	}
+	// A successful save takes the line away again.
+	p.saveErr = nil
+	s.adjust(+1)
+	if got, ok := s.saveErrLine(); ok {
+		t.Errorf("footer still shows %q after a successful save", got)
+	}
+}
+
+// TestSettingsRefusedClickLeavesTheControlsWhereTheyWere: posting a notice
+// used to insert an ordinary note between the rows, pushing everything
+// below it down ~40px. So during a calibration, clicking "+" on the
+// count-in (refused, notice appears) and clicking again WITHOUT MOVING put
+// the second click on a different control entirely — in the worst case the
+// SoundFont row's "clear", which discarded the user's SoundFont silently.
+func TestSettingsRefusedClickLeavesTheControlsWhereTheyWere(t *testing.T) {
+	audio := newSettingsBlockingAudio()
+	p := &settingsFakePrefs{soundFont: `C:\sf2\ChateauGrand.sf2`}
+	sh := NewShell(Services{Prefs: p, Audio: audio}, settingsStubScreen{})
+	s := NewSettings(sh)
+	defer s.Close()
+
+	idle := settingsRowTops(s)
+	if !s.startCalibration() {
+		t.Fatal("startCalibration refused")
+	}
+	<-audio.started
+	if running := settingsRowTops(s); running != idle {
+		t.Errorf("starting a measurement moved the rows:\n got %s\nwant %s", running, idle)
+	}
+
+	plus := settingsRowItem(t, s, srCountIn).buttons[1]
+	click := settingsPressAt(plus.r)
+
+	s.handleMouse(click) // refused: the count-in is locked mid-run
+	if s.notice == "" {
+		t.Fatal("the refused click was swallowed silently")
+	}
+	if !settingsSays(s, "locked") {
+		t.Error("the notice never reached the screen")
+	}
+	if got := settingsRowTops(s); got != idle {
+		t.Errorf("posting a notice moved the rows:\n got %s\nwant %s", got, idle)
+	}
+	if got := settingsRowItem(t, s, srCountIn).buttons[1]; got.r != plus.r {
+		t.Errorf("the button under the cursor moved to %+v from %+v", got.r, plus.r)
+	}
+
+	// The user clicks the same pixel again without moving the mouse. It
+	// must still mean the count-in, and nothing else.
+	s.handleMouse(click)
+	if s.soundFont == "" {
+		t.Error(`the second click reached the SoundFont row's "clear" and discarded the SoundFont`)
+	}
+	if s.countIn != 0 {
+		t.Errorf("count-in = %d: a locked row accepted the click after all", s.countIn)
+	}
+
+	// A notice far longer than its band still moves nothing.
+	s.notice = strings.Repeat("a refusal nobody would ever write this long ", 20)
+	if got := settingsRowTops(s); got != idle {
+		t.Errorf("an over-long notice moved the rows:\n got %s\nwant %s", got, idle)
+	}
+	close(audio.release)
+}
+
+// TestSettingsButtonLabelsSitInsideTheirButtons: the label used to be
+// drawn at a flat r.y+4 in a 20px button, so a body line's ink (y+2.43 to
+// y+16.10 for a Go Regular 14 ascender/descender) came down through the
+// bottom border — the g of "measuring..." was cut by it — and every label
+// sat about 2px low.
+func TestSettingsButtonLabelsSitInsideTheirButtons(t *testing.T) {
+	// Where a body line's ink actually falls below the y drawText is given.
+	const inkTop, inkBottom = 2.43, 16.10
+
+	s, _ := newSettingsFixture(t, newSettingsAudio())
+	s.SetFilePicker(func([]string, func(string)) {})
+
+	var prev *settingsButton
+	for _, it := range s.items() {
+		if it.kind != siRow {
+			continue
+		}
+		for i := range it.buttons {
+			btn := it.buttons[i]
+			if btn.r.h < uiTextH+4 {
+				t.Errorf("%q: a %.0fpx button cannot hold an %.0fpx line with air above and below",
+					btn.label, btn.r.h, uiTextH)
+			}
+			ty := settingsBtnTextY(btn.r)
+			if top := ty + inkTop; top < btn.r.y+1 {
+				t.Errorf("%q: ink starts %.2fpx into the button, through the top border",
+					btn.label, top-btn.r.y)
+			}
+			if bottom := ty + inkBottom; bottom > btn.r.y+btn.r.h-1 {
+				t.Errorf("%q: ink reaches %.2fpx of a %.0fpx button, through the bottom border",
+					btn.label, bottom-btn.r.y, btn.r.h)
+			}
+			// Taller buttons must still fit the 26px row pitch.
+			if prev != nil && prev.r.y+prev.r.h > btn.r.y {
+				t.Errorf("%q (bottom %.0f) touches %q (top %.0f) on the next row",
+					prev.label, prev.r.y+prev.r.h, btn.label, btn.r.y)
+			}
+		}
+		if n := len(it.buttons); n > 0 {
+			last := it.buttons[n-1]
+			prev = &last
+		}
+	}
+}
+
+// TestSettingsBrowseSaysADialogIsOpen: sfBusy already refused a second
+// dialog, but the button was drawn exactly as when idle and swallowed
+// every click without a word — and the dialog is unowned, so on Windows it
+// can be sitting behind the game window, which is precisely when the user
+// clicks again.
+func TestSettingsBrowseSaysADialogIsOpen(t *testing.T) {
+	s, _ := newSettingsFixture(t, newSettingsAudio())
+	asked := 0
+	var done func(string)
+	s.SetFilePicker(func(_ []string, chosen func(string)) { asked++; done = chosen })
+
+	idle := settingsRowItem(t, s, srSoundFont).buttons[0]
+	if idle.label != "browse" || idle.disabled {
+		t.Fatalf("the idle browse button = %+v, want an enabled \"browse\"", idle)
+	}
+	tops := settingsRowTops(s)
+
+	s.handleMouse(settingsPressAt(idle.r))
+	if asked != 1 {
+		t.Fatalf("the browse button asked for a file %d times, want 1", asked)
+	}
+
+	busy := settingsRowItem(t, s, srSoundFont).buttons[0]
+	if !busy.disabled {
+		t.Error("the browse button is still drawn as if it could be pressed")
+	}
+	if busy.label == "browse" {
+		t.Error("the browse button still says \"browse\" while its dialog is up")
+	}
+	if !settingsSays(s, "dialog is open") {
+		t.Errorf("nothing on the screen says where the dialog went: %q", settingsNoteLines(s))
+	}
+	if got := settingsRowTops(s); got != tops {
+		t.Errorf("saying the dialog is open moved the rows:\n got %s\nwant %s", got, tops)
+	}
+	// Clicking the waiting button stays a no-op.
+	s.handleMouse(settingsPressAt(busy.r))
+	if asked != 1 {
+		t.Errorf("a click on the waiting button opened another dialog (%d)", asked)
+	}
+
+	done("") // the user cancelled: the row re-arms
+	s.syncSettings()
+	if got := settingsRowItem(t, s, srSoundFont).buttons[0]; got.disabled || got.label != "browse" {
+		t.Errorf("after the dialog closed the button = %+v, want an enabled \"browse\"", got)
+	}
+	if settingsSays(s, "dialog is open") {
+		t.Error("the screen still claims a dialog is open after it closed")
+	}
+}
+
+// TestSettingsRowButtonsTakeTheCursor: the device and count-in buttons went
+// through adjustRow and focused their row, but calibrate, browse and clear
+// acted directly — so a click on one of them left the blue highlight and
+// the arrow keys on a different row, and the next Right adjusted something
+// the user was not looking at.
+func TestSettingsRowButtonsTakeTheCursor(t *testing.T) {
+	s, _ := newSettingsFixture(t, newSettingsAudio())
+	s.SetFilePicker(func([]string, func(string)) {})
+	defer s.Close()
+
+	for _, c := range []struct {
+		name string
+		kind settingsRow
+		btn  int
+	}{
+		{"capture >", srCapture, 1},
+		{"count-in +", srCountIn, 1},
+		{"soundfont browse", srSoundFont, 0},
+		{"soundfont clear", srSoundFont, 1},
+		{"calibrate now", srCalibrate, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			want := s.rowIndex(c.kind)
+			// Park the cursor somewhere else, the way a user who has just
+			// adjusted another setting leaves it.
+			s.cur = (want + 1) % len(s.rows)
+			it := settingsRowItem(t, s, c.kind)
+			if c.btn >= len(it.buttons) {
+				t.Fatalf("row %v has %d buttons", c.kind, len(it.buttons))
+			}
+			s.handleMouse(settingsPressAt(it.buttons[c.btn].r))
+			if s.cur != want {
+				t.Errorf("after pressing %s the cursor is on row %d (%v), want row %d (%v)",
+					c.name, s.cur, s.rows[s.cur], want, c.kind)
+			}
+		})
+	}
+	settingsWaitPhase(t, s, calDone)
+}
+
+// TestSettingsDeviceRowAdmitsNothingIsChosenYet: deviceText appended
+// "<- selected" to whatever resolveDevice landed on, including the
+// system-default fallback used when Prefs has never been written. A
+// first-run user opened Settings from the checklist step "choose your
+// audio interface", read that the device was selected, pressed Escape —
+// and got no live scoring, because the application only opens the capture
+// path when the STORED capture ID is non-empty.
+func TestSettingsDeviceRowAdmitsNothingIsChosenYet(t *testing.T) {
+	s, p := newSettingsFixture(t, newSettingsAudio())
+	if capID, _ := p.Devices(); capID != "" {
+		t.Fatalf("the fixture already holds a capture device (%q)", capID)
+	}
+
+	it := settingsRowItem(t, s, srCapture)
+	if strings.Contains(it.text, "selected") {
+		t.Errorf("a device nobody has chosen claims to be selected: %q", it.text)
+	}
+	for _, want := range []string{"system default", "not chosen yet", "enter"} {
+		if !strings.Contains(it.text, want) {
+			t.Errorf("first-run capture row = %q, want it to mention %q", it.text, want)
+		}
+	}
+
+	// Enter commits the device SHOWN rather than stepping past it, so the
+	// row's own promise holds — and only then does it claim the selection.
+	s.cur = s.rowIndex(srCapture)
+	shown := s.capture[s.capIdx].ID
+	s.activate()
+	if capID, _ := p.Devices(); capID != shown {
+		t.Errorf("enter stored %q, want the device the row was showing (%q)", capID, shown)
+	}
+	if p.saves != 1 {
+		t.Errorf("saves = %d, want the choice written once", p.saves)
+	}
+	it = settingsRowItem(t, s, srCapture)
+	if !strings.Contains(it.text, "<- selected") {
+		t.Errorf("after choosing it the capture row = %q, want the selected marker", it.text)
+	}
+	if strings.Contains(it.text, "not chosen") {
+		t.Errorf("after choosing it the capture row still disowns it: %q", it.text)
+	}
+	// The same commit wrote the playback ID, so that row is honest too.
+	if got := settingsRowItem(t, s, srPlayback).text; !strings.Contains(got, "<- selected") {
+		t.Errorf("playback row = %q, want the pair's commit reflected", got)
+	}
+	// A second Enter cycles as before, now that there is a choice on file.
+	before := s.capIdx
+	s.activate()
+	if s.capIdx == before {
+		t.Error("enter on an already-chosen picker no longer steps to the next device")
 	}
 }

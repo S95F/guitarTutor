@@ -710,12 +710,23 @@ func (b *Browser) browserBindings() []helpBinding {
 	if b.sh != nil && b.sh.Depth() > 1 {
 		leave = helpBinding{Group: "session", Keys: "esc", Hint: "esc back", Desc: "Go back to where you came from"}
 	}
+	// The left pane holds the checklist until a piece has been opened, and
+	// two of these rows mean something different there: Enter runs a
+	// setup step rather than opening a recent, and Delete does nothing at
+	// all. A first-run footer that advertises "del forget recent" is
+	// teaching a key that cannot work on the only screen the user has
+	// seen, so the table answers to the state it is describing.
+	enterDesc := "Open the selected recent piece"
+	if b.onboarding() {
+		enterDesc = "Do the selected setup step"
+	}
 	return []helpBinding{
 		{Group: "opening", Keys: "O", Hint: "O open a file", Off: b.openDialog == nil,
 			Desc: "Choose a piece with the system's own file dialog"},
-		{Group: "opening", Keys: "enter", Hint: "enter open", Desc: "Open the selected recent piece"},
+		{Group: "opening", Keys: "enter", Hint: "enter open", Desc: enterDesc},
 		{Group: "opening", Keys: "drag and drop", Desc: "Drop a piece on the window to open it; drop a folder to browse it in the file dialog"},
-		{Group: "opening", Keys: "del", Hint: "del forget recent", Desc: "Forget the selected recent piece"},
+		{Group: "opening", Keys: "del", Hint: "del forget recent", Off: b.onboarding(),
+			Desc: "Forget the selected recent piece"},
 
 		{Group: "choosing", Keys: "up / down", Hint: "up/dn select", Desc: "Move the selection"},
 		{Group: "choosing", Keys: "page up / down", Desc: "Move the selection a screenful at a time"},
@@ -843,7 +854,18 @@ func (b *Browser) handleKeys(fires func(ebiten.Key) bool) error {
 // display instead of being returned, so a bad file cannot end the app.
 func (b *Browser) Update() error {
 	b.ptr = readPointer()
+	// The one-action-per-frame baseline is taken BEFORE the dialog
+	// mailbox is drained, because draining it can open a piece — and a
+	// piece opened that way has to stop the rest of the frame exactly
+	// like one opened by Enter. Sampling afterwards folded the dialog's
+	// own push into the baseline, so a key edge in the same frame could
+	// stack a second stack edit, and an Escape there had the Shell build
+	// a practice screen it discarded without releasing its audio.
+	queued := b.queuedEdits()
 	b.drainDialog()
+	if b.queuedEdits() != queued {
+		return nil
+	}
 	// The overlay is modal: while it is up, a key or click dismisses it
 	// and reaches nothing underneath.
 	if b.helpOpen {
@@ -852,7 +874,6 @@ func (b *Browser) Update() error {
 		}
 		return nil
 	}
-	queued := b.queuedEdits()
 	if fsys := ebiten.DroppedFiles(); fsys != nil {
 		b.handleDrop(fsys)
 	}
@@ -907,7 +928,12 @@ func (b *Browser) rowBG(i int) (color.RGBA, bool) {
 
 func (b *Browser) drawRecents(screen *ebiten.Image) {
 	if b.onboarding() {
-		drawPaneFrame(screen, brwRecentX, brwRecentW, len(b.stepList())+1, "GETTING STARTED")
+		// The same height as the recents pane it stands in for, and as
+		// the open card beside it: a checklist panel sized to its own
+		// three rows left the two columns of a two-column screen up to
+		// 280px apart, which reads as a layout fault rather than a
+		// compact list.
+		drawPaneFrame(screen, brwRecentX, brwRecentW, brwRecentRows, "GETTING STARTED")
 		b.drawSteps(screen)
 		return
 	}
@@ -934,7 +960,7 @@ func (b *Browser) drawRecents(screen *ebiten.Image) {
 	if len(b.recents) > brwRecentRows {
 		drawTextSmall(screen, fmt.Sprintf("%d–%d of %d", b.top+1,
 			min(b.top+brwRecentRows, len(b.recents)), len(b.recents)),
-			brwRecentX+4, brwListTop+brwRecentRows*brwRecentRowH+12, colBarline)
+			brwRecentX+4, brwListTop+brwRecentRows*brwRecentRowH+12, colHint)
 	}
 }
 
@@ -962,7 +988,7 @@ func (b *Browser) drawOpenCard(screen *ebiten.Image) {
 
 	midY := btn.y + btn.h + 64
 	or := "— or —"
-	drawTextSmall(screen, or, brwCardX+(brwCardW-textWSmall(or))/2, midY, colBarline)
+	drawTextSmall(screen, or, brwCardX+(brwCardW-textWSmall(or))/2, midY, colHint)
 	drop := "drop a file anywhere on this window"
 	drawText(screen, drop, brwCardX+(brwCardW-textW(drop))/2, midY+26, colHUD)
 	formats := "Guitar Pro (.gp) · MusicXML (.musicxml, .mxl) · MIDI (.mid) · text tab (.gtab)"

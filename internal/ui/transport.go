@@ -44,8 +44,11 @@ const (
 	// ptTabFooting is the matching margin below the last string.
 	ptTabFooting = 26.0
 
-	ptBtnW   = 36.0 // transport button
-	ptBtnH   = 34.0
+	ptBtnW = 36.0 // transport button
+	// ptBtnH matches chipH: the buttons and the toggle chips are one
+	// visual row, and a 2px difference in a row of rounded panels reads
+	// as a rendering fault rather than a design.
+	ptBtnH   = chipH
 	ptBtnGap = 6.0
 
 	// ptGrab is how far either side of a loop edge counts as grabbing it.
@@ -409,7 +412,11 @@ func (a *App) handleMouse(p pointer, shift bool) {
 	}
 	l := a.layout()
 
-	if p.wheel != 0 && p.over(l.tab) {
+	// The wheel zooms the tab only while the tab is the thing on screen.
+	// Gated on the rectangle alone, a scroll over the tuner silently
+	// rezoomed the tablature hidden behind it, and the change only
+	// surfaced on the next press of T.
+	if p.wheel != 0 && !a.tunerView && p.over(l.tab) {
 		a.wheelAcc += p.wheel
 		var steps int
 		steps, a.wheelAcc = wheelSteps(a.wheelAcc)
@@ -682,7 +689,7 @@ func (a *App) drawTrackStrip(dst *ebiten.Image, l practiceLayout, p pointer) {
 		drawTextSmall(dst, a.trackStateText(i), r.x+9, r.y+20, sub)
 	}
 	if n := a.hiddenTracks(l); n > 0 {
-		drawText(dst, a.hiddenTracksHint(len(l.tracks)-n, n), uiPadX, ptTracksY+chipH+4, colBarline)
+		drawText(dst, a.hiddenTracksHint(len(l.tracks)-n, n), uiPadX, ptTracksY+chipH+4, colHint)
 	}
 }
 

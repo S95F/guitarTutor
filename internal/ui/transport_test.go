@@ -649,3 +649,44 @@ func TestHiddenTracksHint(t *testing.T) {
 		}
 	}
 }
+
+// TestWheelDoesNotZoomUnderTheTuner: the wheel branch was gated on the
+// tab's rectangle but not on the tab being the thing on screen, so
+// scrolling over the tuner silently rezoomed the tablature behind it and
+// the change only surfaced on the next press of T.
+func TestWheelDoesNotZoomUnderTheTuner(t *testing.T) {
+	a := newApp(t, 4)
+	tab := a.layout().tab
+	over := pointer{x: 400, y: tab.y + tab.h/2, wheel: 1}
+
+	a.tunerView = true
+	before := a.zoom
+	for i := 0; i < 4; i++ {
+		a.handleMouse(over, false)
+	}
+	if a.zoom != before {
+		t.Errorf("the wheel zoomed the hidden tab to %v", a.zoom)
+	}
+
+	a.tunerView = false
+	a.handleMouse(over, false)
+	if a.zoom <= before {
+		t.Error("with the tab showing the wheel should still zoom")
+	}
+}
+
+// TestTransportRowSharesOneHeight: the icon buttons and the toggle chips
+// are one visual row, and a couple of pixels of difference between two
+// rounded panels side by side reads as a rendering fault.
+func TestTransportRowSharesOneHeight(t *testing.T) {
+	a := newApp(t, 4)
+	l := a.layout()
+	for i, r := range l.transport {
+		if r.h != chipH {
+			t.Errorf("transport button %d is %v tall, chips are %v", i, r.h, chipH)
+		}
+		if got, want := r.y+r.h, l.chips[0].y+l.chips[0].h; got != want {
+			t.Errorf("transport button %d bottom %v, chip bottom %v", i, got, want)
+		}
+	}
+}

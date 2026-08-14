@@ -743,7 +743,11 @@ func TestHelpGroupsCoverTable(t *testing.T) {
 	a := newApp(t, 1)
 	var flat []helpBinding
 	seen := map[string]bool{}
-	for _, g := range a.helpGroups() {
+	// Grouped exactly the way the overlay groups them — through
+	// helpSections, the function drawHelpOverlay itself calls. Asking a
+	// second, App-local helper the same question let the two answers
+	// drift while this test kept passing.
+	for _, g := range helpSections(a.helpRows()) {
 		if g.Name == "" {
 			t.Error("help group with no name")
 		}
@@ -776,13 +780,26 @@ func TestHelpGroupsCoverTable(t *testing.T) {
 func TestHintLineFromTable(t *testing.T) {
 	a := newApp(t, 1)
 	line := a.hintLine()
-	for _, b := range practiceBindings {
-		if b.Hint == "" || !b.enabled(a) {
+	// Compared against the RESOLVED table: a few rows reword themselves
+	// for how the view is hosted (escape quits a standalone window and
+	// goes back under the shell), so the static table is not what the
+	// footer promises.
+	for _, b := range a.helpRows() {
+		if b.Hint == "" || b.Off {
 			continue
 		}
 		if !strings.Contains(line, b.Hint) {
 			t.Errorf("hint line %q is missing %q", line, b.Hint)
 		}
+	}
+	// Standalone: nothing hosts this view, so escape ends the run and
+	// must not promise a screen to go back to.
+	if !strings.Contains(line, "esc quit") {
+		t.Errorf("hint line %q should say esc quits with no shell behind it", line)
+	}
+	a.SetQuitAll(func() {})
+	if !strings.Contains(a.hintLine(), "esc back") {
+		t.Errorf("under a shell the hint line should say esc goes back, got %q", a.hintLine())
 	}
 	if strings.Contains(line, "W wait") {
 		t.Error("hint line offers W with no detector to confirm waits")
@@ -792,9 +809,14 @@ func TestHintLineFromTable(t *testing.T) {
 	if !strings.Contains(a.hintLine(), "W wait") {
 		t.Error("hint line omits W once a detector is present")
 	}
-	// The hint must fit the window: 7px per basicfont cell from x=16.
-	if w := 16 + 7*len(a.hintLine()); w > screenW {
-		t.Errorf("hint line is %dpx wide, past the %dpx window", w, screenW)
+	// The hint must fit the window, measured with the face that draws it
+	// and from the margin it is drawn at. Asserting 7px per byte was the
+	// bitmap-font assumption the typeface change removed from the drawing
+	// code; left here it was checking a width the UI no longer produces —
+	// too generous for wide glyphs, and wrong in the other direction for
+	// any multi-byte rune.
+	if w := uiPadX + textW(a.hintLine()); w > screenW-uiPadX {
+		t.Errorf("hint line ends at %.0fpx, past the %.0fpx margin", w, float64(screenW-uiPadX))
 	}
 }
 

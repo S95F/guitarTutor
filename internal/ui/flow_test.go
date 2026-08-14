@@ -565,3 +565,92 @@ func TestSoundFontBrowseBusyGuard(t *testing.T) {
 		t.Error("an applied outcome should also re-arm the browse")
 	}
 }
+
+// ---- UI re-review follow-ups ----------------------------------------------
+
+// TestChecklistBindingsDescribeTheChecklist: on a first run the left pane
+// is the setup checklist, where Delete does nothing and Enter runs a
+// step. A footer teaching "del forget recent" on the only screen a new
+// user has seen is teaching a key that cannot work there.
+func TestChecklistBindingsDescribeTheChecklist(t *testing.T) {
+	sh := NewShell(Services{Prefs: &settingsFakePrefs{}, Audio: newSettingsAudio()}, nil)
+	b := NewBrowser(sh)
+	if !b.onboarding() {
+		t.Fatal("fixture should be onboarding")
+	}
+	if strings.Contains(b.hintLine(), "del forget recent") {
+		t.Errorf("the checklist footer advertises Delete: %q", b.hintLine())
+	}
+	for _, r := range b.browserBindings() {
+		if r.Keys == "enter" && strings.Contains(strings.ToLower(r.Desc), "recent") {
+			t.Errorf("on the checklist, enter is described as %q", r.Desc)
+		}
+	}
+
+	// With a piece behind you the pane is recents again, and both rows
+	// go back to meaning what they say.
+	pr := &browserFakePrefs{recents: []string{filepath.Join(t.TempDir(), "song.gp")}}
+	b2 := NewBrowser(NewShell(Services{Opener: &browserFakeOpener{}, Prefs: pr}, nil))
+	if !strings.Contains(b2.hintLine(), "del forget recent") {
+		t.Errorf("the recents footer omits Delete: %q", b2.hintLine())
+	}
+}
+
+// TestDialogOpenStopsTheRestOfTheFrame: a piece opened by the file
+// dialog's result has to halt the frame exactly like one opened by
+// Enter. The one-action-per-frame baseline used to be sampled AFTER the
+// mailbox drained, folding the dialog's own push into the baseline — so
+// an Escape in the same frame reached the Shell with a push already
+// queued, and it built a practice screen it discarded without releasing
+// the audio.
+func TestDialogOpenStopsTheRestOfTheFrame(t *testing.T) {
+	op := &flowOpener{}
+	sh := NewShell(Services{Opener: op, Prefs: &browserFakePrefs{}}, nil)
+	b := NewBrowser(sh)
+	b.SetOpenDialog(func(string) {})
+
+	piece := filepath.Join(t.TempDir(), "picked.gtab")
+	if err := os.WriteFile(piece, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b.launchOpenDialog("")
+	b.OfferDialogResult(piece, "")
+
+	// The frame the result lands on: Update must apply the open and stop,
+	// reporting no quit even though a key would otherwise be read.
+	if err := b.Update(); err != nil {
+		t.Fatalf("Update on the drain frame = %v, want nil", err)
+	}
+	if len(op.opened) != 1 {
+		t.Fatalf("the dialog result opened %d pieces, want 1", len(op.opened))
+	}
+	if got := len(sh.pending); got != 1 {
+		t.Errorf("shell holds %d queued edits after the drain frame, want exactly the one push", got)
+	}
+}
+
+// TestCountInSyncsFromSettings: the view keeps its own mirror of the
+// count-in, and that mirror is what the next press of C writes back — so
+// a count-in changed in settings has to reach it, or C restores the
+// open-time value over the user's new choice.
+func TestCountInSyncsFromSettings(t *testing.T) {
+	a := newApp(t, 1)
+	a.SetCountIn(4) // the engine was built with 4
+	a.SetReloader(func() {})
+	var saved []int
+	a.SetCountInApplier(func(b int) bool { saved = append(saved, b); return false })
+
+	a.SyncCountIn(2) // settings changed it to 2 while the piece runs
+	if got := a.CountInBeats(); got != 2 {
+		t.Fatalf("after the settings change the view offers %d, want 2", got)
+	}
+	if !a.countInStale || a.reloadPrompt() == "" {
+		t.Error("2 differs from the engine's 4, so the reload should still be offered")
+	}
+
+	a.toggleCountIn() // off
+	a.toggleCountIn() // back on: must restore 2, not the open-time 4
+	if len(saved) != 2 || saved[0] != 0 || saved[1] != 2 {
+		t.Errorf("applier saw %v, want [0 2] — the settings value, not the open-time one", saved)
+	}
+}
