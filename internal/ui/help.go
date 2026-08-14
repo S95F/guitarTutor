@@ -93,40 +93,68 @@ func helpDismissed(p pointer) bool {
 	return helpKeyPressed() || inpututil.IsKeyJustPressed(ebiten.KeyEscape) || p.pressed
 }
 
-// Overlay layout.
+// Overlay layout. The practice table is the biggest — 24 rows in seven
+// groups — and it has to clear the dismiss line at the bottom of a 720
+// pixel window, so these are tight by necessity: a row is one pixel
+// taller than a line of body text, and a heading gets a shade less than
+// a full line. Anything more generous and the longest table runs off the
+// screen; anything less and rows touch.
 const (
-	helpX      = 200.0
+	helpX = 200.0
+	// helpKeysX and helpDescX are the two columns. The gap between them
+	// fits the widest key label in the tables ("drag and drop").
 	helpKeysX  = 220.0
 	helpDescX  = 420.0
-	helpTopY   = 74.0
-	helpRowH   = 16.0
-	helpGroupH = 26.0
+	helpTopY   = 72.0
+	helpRowH   = 17.0
+	helpHeadH  = 16.0 // a group heading's own line
+	helpGroupH = 9.0  // extra air between groups
 )
+
+// helpCard is the panel the table sits on, centred in the window.
+func helpCard() rect {
+	return rect{160, 12, screenW - 320, screenH - 24}
+}
 
 // drawHelpOverlay paints a resolved table over everything else. footnote
 // is an optional line under the table for anything the rows cannot say —
-// the practice view uses it to explain its track marks.
+// the practice view uses it to explain its track chips.
 func drawHelpOverlay(dst *ebiten.Image, title string, rows []helpBinding, footnote string) {
+	// A dimmed screen behind an opaque card, rather than one translucent
+	// wash over everything. A wash alone never quite hides bright things:
+	// at any alpha low enough to read as an overlay, the title and the
+	// lit chips underneath still ghost through the table, and a modal
+	// that owns the whole keyboard should not look half-there. The card
+	// also matches the rounded panels every other screen is built from.
 	vector.DrawFilledRect(dst, 0, 0, screenW, screenH, colHelpDim, false)
-	drawTextScaled(dst, title, helpX, 26, uiTitleScl, colNote)
+	drawPanel(dst, helpCard(), colPanel, colPanelEdge)
+	drawTextScaled(dst, title, helpX, 24, uiTitleScl, colNote)
 
 	y := helpTopY
 	for _, g := range helpSections(rows) {
 		drawText(dst, strings.ToUpper(g.Name), helpX, y, colSounding)
-		y += uiLineH
+		y += helpHeadH
 		for _, b := range g.Rows {
 			col, desc := colNote, b.Desc
 			if b.Off {
 				col, desc = colBarline, b.Desc+"  (not available now)"
 			}
 			drawText(dst, b.Keys, helpKeysX, y, col)
-			drawText(dst, desc, helpDescX, y, col)
+			drawText(dst, truncateW(desc, screenW-uiPadX-helpDescX), helpDescX, y, col)
 			y += helpRowH
 		}
-		y += helpGroupH - helpRowH
+		y += helpGroupH
 	}
 	if footnote != "" {
-		drawText(dst, footnote, helpX, y+4, colHUD)
+		drawText(dst, footnote, helpX, y+6, colHUD)
+		y += 6 + uiTextH
 	}
-	drawText(dst, "esc, F1, ? or a click closes this", helpX, screenH-40, colHUD)
+	// The dismiss line sits at the foot of the window, but never on top
+	// of a table that ran long: it flows instead once the content
+	// reaches it.
+	dismissY := screenH - 40.0
+	if y+8 > dismissY {
+		dismissY = y + 8
+	}
+	drawText(dst, "esc, F1, ? or a click closes this", helpX, dismissY, colHUD)
 }

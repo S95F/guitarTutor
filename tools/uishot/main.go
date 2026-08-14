@@ -8,7 +8,7 @@
 //
 //	go run ./tools/uishot -screen practice -o practice.png
 //
-// screens: start, settings, practice, practice-live
+// screens: start, settings, practice, practice-live, help, tuner
 package main
 
 import (
@@ -38,7 +38,7 @@ const (
 )
 
 func main() {
-	which := flag.String("screen", "practice", "start, settings, practice or practice-live")
+	which := flag.String("screen", "practice", "start, settings, practice, practice-live, help or tuner")
 	out := flag.String("o", "shot.png", "output PNG")
 	piece := flag.String("piece", "testdata/fixture_riff.gtab", "piece for the practice screens")
 	flag.Parse()
@@ -90,6 +90,16 @@ func build(which, piece string) (ui.Screen, error) {
 
 	switch which {
 	case "practice":
+		return app, nil
+	case "help":
+		app.SetWaitControl(true)
+		app.SetHelpOpen(true)
+		return app, nil
+	case "tuner":
+		app.SetLiveStatus(func() (float64, int64) { return -18, 0 })
+		app.SetWaitControl(true)
+		app.OfferTuner(pitch.Note{Key: 45, Cents: -17}, true)
+		app.SetTunerView(true)
 		return app, nil
 	case "practice-live":
 		app.SetLiveStatus(func() (float64, int64) { return -14, 0 })

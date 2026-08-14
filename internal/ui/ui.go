@@ -84,7 +84,9 @@ var (
 	colTuneZone = color.RGBA{40, 90, 55, 255}    // tuner in-tune band
 
 	// Phase 5 overlays.
-	colHelpDim = color.RGBA{10, 10, 14, 240} // help overlay backdrop
+	// colHelpDim is the help overlay backdrop: near-opaque, and
+	// alpha-premultiplied like every other translucent colour here.
+	colHelpDim = color.RGBA{4, 4, 6, 200}    // help overlay backdrop, behind the card
 	colWarnBG  = color.RGBA{58, 18, 18, 240} // live-warning banner fill
 )
 
@@ -403,6 +405,17 @@ func (a *App) reloadPrompt() string {
 	}
 	return "settings changed: press F5 to re-open this piece with them"
 }
+
+// SetTunerView opens or closes the tuner overlay, and SetHelpOpen the
+// key-binding overlay. The T and ?/F1 keys do the same; these exist so a
+// caller can put the view into a known state without synthesizing key
+// presses — which is what the screenshot tool needs in order to render
+// the overlays for review, and what an integrator would need to drive
+// the tuner from a menu of their own.
+func (a *App) SetTunerView(on bool) { a.tunerView = on }
+
+// SetHelpOpen raises or lowers the key-binding overlay. See SetTunerView.
+func (a *App) SetHelpOpen(on bool) { a.helpOpen = on }
 
 // openHelp raises the key-binding overlay.
 func (a *App) openHelp() { a.helpOpen = true }

@@ -181,9 +181,18 @@ func drawChip(dst *ebiten.Image, r rect, c chipState, hover bool) {
 	drawPanel(dst, r, fill, edge)
 	drawText(dst, c.label, centreX(c.label, r.x, r.w), r.y+3, text)
 	if c.key != "" {
-		kc := colBarline
-		if hover && !c.disabled {
-			kc = colDim
+		// The key hint is quieter than the label but still has to be
+		// READ — teaching the shortcut is its whole job, and at
+		// colBarline it disappeared into the panel entirely, and into
+		// the fill of an engaged chip completely.
+		kc := colDim
+		switch {
+		case c.disabled:
+			kc = colBarline
+		case hover:
+			kc = colNote
+		case c.on:
+			kc = colHUD
 		}
 		drawTextSmall(dst, c.key, r.x+(r.w-textWSmall(c.key))/2, r.y+20, kc)
 	}

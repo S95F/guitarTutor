@@ -673,7 +673,13 @@ func (a *App) drawTrackStrip(dst *ebiten.Image, l practiceLayout, p pointer) {
 		}
 		label := truncateW(fmt.Sprintf("%d %s", i+1, name), r.w-18)
 		drawText(dst, label, r.x+9, r.y+3, col)
-		drawTextSmall(dst, a.trackStateText(i), r.x+9, r.y+20, colBarline)
+		// Dim, but legible: this line is the only thing that tells a
+		// muted track from one silenced by another track's solo.
+		sub := colDim
+		if muted {
+			sub = colBarline
+		}
+		drawTextSmall(dst, a.trackStateText(i), r.x+9, r.y+20, sub)
 	}
 	if n := a.hiddenTracks(l); n > 0 {
 		drawText(dst, a.hiddenTracksHint(len(l.tracks)-n, n), uiPadX, ptTracksY+chipH+4, colBarline)
