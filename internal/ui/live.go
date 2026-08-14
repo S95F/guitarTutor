@@ -249,7 +249,7 @@ func verdictColor(v practice.Verdict) color.RGBA {
 // waitingKeys returns the note keys the engine is waiting on this frame,
 // or nil when not waiting.
 func (a *App) waitingKeys() map[noteKey]bool {
-	evs, ok := a.eng.WaitingOn()
+	evs, _, ok := a.eng.WaitingOn()
 	if !ok || len(evs) == 0 {
 		return nil
 	}

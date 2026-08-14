@@ -488,7 +488,7 @@ func (o *shellOpener) Open(path string) (ui.Screen, []string, error) {
 	o.CloseCurrent()
 
 	if captureID != "" {
-		session, err := setupListen(eng, app, display, "", "", o.prefs.snapshot())
+		session, err := setupListen(eng, app, "", "", o.prefs.snapshot())
 		if err != nil {
 			// Losing live input must not stop practice: fall back to
 			// playback and tell the user in the view.

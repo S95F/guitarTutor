@@ -126,25 +126,24 @@ func buildGP(t *testing.T, entries ...[2]string) []byte {
 // gpifDoc wraps GPIF body fragments in the document frame: one track in
 // standard tuning and a 120 BPM tick-0 tempo automation.
 func gpifDoc(masterBars, bars, voices, beats, notes, rhythms string) string {
+	return gpifDocTracks("0", trackXML(0, "G", ""), masterBars, bars, voices, beats, notes, rhythms)
+}
+
+// gpifDocTracks is gpifDoc with a caller-supplied <Tracks> block and
+// master-track id list, for the multi-track cases (percussion filtering
+// and the filtered-index bug).
+func gpifDocTracks(masterTracks, tracks, masterBars, bars, voices, beats, notes, rhythms string) string {
 	return `<?xml version="1.0" encoding="UTF-8"?>
 <GPIF>
   <GPRevision>7.0.0</GPRevision>
   <Score><Title>Test</Title></Score>
   <MasterTrack>
-    <Tracks>0</Tracks>
+    <Tracks>` + masterTracks + `</Tracks>
     <Automations>
       <Automation><Type>Tempo</Type><Bar>0</Bar><Position>0</Position><Value>120 2</Value></Automation>
     </Automations>
   </MasterTrack>
-  <Tracks>
-    <Track id="0">
-      <Name>G</Name>
-      <Staves><Staff><Properties>
-        <Property name="Tuning"><Pitches>40 45 50 55 59 64</Pitches></Property>
-        <Property name="CapoFret"><Fret>0</Fret></Property>
-      </Properties></Staff></Staves>
-    </Track>
-  </Tracks>
+  <Tracks>` + tracks + `</Tracks>
   <MasterBars>` + masterBars + `</MasterBars>
   <Bars>` + bars + `</Bars>
   <Voices>` + voices + `</Voices>
@@ -152,6 +151,18 @@ func gpifDoc(masterBars, bars, voices, beats, notes, rhythms string) string {
   <Notes>` + notes + `</Notes>
   <Rhythms>` + rhythms + `</Rhythms>
 </GPIF>`
+}
+
+// trackXML emits a standard-tuning <Track>; extra is spliced in ahead of
+// the staves, for the elements that mark a track as a drum kit.
+func trackXML(id int, name, extra string) string {
+	return `<Track id="` + itoa(id) + `">
+      <Name>` + name + `</Name>` + extra + `
+      <Staves><Staff><Properties>
+        <Property name="Tuning"><Pitches>40 45 50 55 59 64</Pitches></Property>
+        <Property name="CapoFret"><Fret>0</Fret></Property>
+      </Properties></Staff></Staves>
+    </Track>`
 }
 
 // note emits a GPIF note with the given id, GP string (0 = lowest), and fret.
@@ -738,5 +749,299 @@ func TestCapoAndTuning(t *testing.T) {
 	evs := s.Events()
 	if len(evs) != 1 || evs[0].Key != 40 { // 38 open + capo 2
 		t.Fatalf("events = %+v, want one note at key 40 (drop D + capo 2)", evs)
+	}
+}
+
+// percNoteXML emits a GPIF percussion note. A drum hit is spelled with
+// Element/Variation — which kit piece, which articulation — and never
+// with String/Fret, which is precisely why the pitched conversion path
+// cannot map one.
+func percNoteXML(id, element int) string {
+	return `<Note id="` + itoa(id) + `"><Properties>` +
+		`<Property name="Element"><Element>` + itoa(element) + `</Element></Property>` +
+		`<Property name="Variation"><Variation>0</Variation></Property>` +
+		`</Properties></Note>`
+}
+
+// percussionDoc builds a two-track document: track 1 is a drum kit marked
+// by mark, holding four hits, and track 2 is a guitar holding one whole
+// note at fret 5 on the low E.
+func percussionDoc(mark string) string {
+	return gpifDocTracks("0 1",
+		trackXML(0, "Drums", mark)+trackXML(1, "G", ""),
+		`<MasterBar><Time>4/4</Time><Bars>0 1</Bars></MasterBar>`,
+		`<Bar id="0"><Voices>0 -1 -1 -1</Voices></Bar>`+
+			`<Bar id="1"><Voices>1 -1 -1 -1</Voices></Bar>`,
+		`<Voice id="0"><Beats>0 1 2 3</Beats></Voice><Voice id="1"><Beats>4</Beats></Voice>`,
+		`<Beat id="0"><Rhythm ref="0" /><Notes>0</Notes></Beat>`+
+			`<Beat id="1"><Rhythm ref="0" /><Notes>1</Notes></Beat>`+
+			`<Beat id="2"><Rhythm ref="0" /><Notes>2</Notes></Beat>`+
+			`<Beat id="3"><Rhythm ref="0" /><Notes>3</Notes></Beat>`+
+			`<Beat id="4"><Rhythm ref="1" /><Notes>4</Notes></Beat>`,
+		percNoteXML(0, 36)+percNoteXML(1, 38)+percNoteXML(2, 42)+percNoteXML(3, 38)+
+			noteXML(4, 0, 5, ""),
+		`<Rhythm id="0"><NoteValue>Quarter</NoteValue></Rhythm>`+
+			`<Rhythm id="1"><NoteValue>Whole</NoteValue></Rhythm>`)
+}
+
+// trackNames lists a score's track names, for failure messages.
+func trackNames(s *score.Score) []string {
+	var names []string
+	for _, tr := range s.Tracks {
+		names = append(names, tr.Name)
+	}
+	return names
+}
+
+// TestPercussionTrackSkipped (audit G1): a drum track must not be run
+// through the pitched string/fret path. That path can map nothing, so
+// every hit became a rest — with one warning PER NOTE — and because the
+// drums were the file's first track the resulting empty part was handed
+// to the user as the thing to practise. The track must be dropped
+// instead, with exactly one warning naming it, leaving the guitar as
+// RoleUser.
+func TestPercussionTrackSkipped(t *testing.T) {
+	s, warns, err := importDoc(t, percussionDoc(`<InstrumentSet><Name>Drumkit</Name><Type>drumKit</Type></InstrumentSet>`))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if len(s.Tracks) != 1 {
+		t.Fatalf("got %d tracks %v, want 1 (the drum track dropped)", len(s.Tracks), trackNames(s))
+	}
+	tr := s.Tracks[0]
+	if tr.Name != "G" || tr.Role != score.RoleUser {
+		t.Errorf("practice track = %q role %d, want G role %d — a percussion track must never be the user's part",
+			tr.Name, tr.Role, score.RoleUser)
+	}
+	if len(warns) != 1 {
+		t.Fatalf("warnings = %v, want exactly one (per track, not per note)", warns)
+	}
+	if !hasWarning(warns, "percussion") || !hasWarning(warns, "Drums") {
+		t.Errorf("warning = %q, want one naming the track and saying it is percussion", warns[0])
+	}
+	if hasWarning(warns, "String/Fret") {
+		t.Errorf("warnings = %v, want no per-note String/Fret complaints", warns)
+	}
+	// The guitar's own music survives intact: low E (40) at fret 5.
+	evs := s.Events()
+	if len(evs) != 1 || evs[0].Key != 45 || evs[0].String != 6 || evs[0].Fret != 5 {
+		t.Fatalf("events = %+v, want the guitar's single whole note (key 45, string 6 fret 5)", evs)
+	}
+}
+
+// TestPercussionMarkers (audit G1): GPIF flags a drum kit in more than
+// one place depending on the writing version, and every marker must be
+// honoured — while an ordinary fretted track must not be mistaken for one.
+func TestPercussionMarkers(t *testing.T) {
+	tests := []struct {
+		name string
+		mark string
+		perc bool
+	}{
+		{"instrument set type", `<InstrumentSet><Type>drumKit</Type></InstrumentSet>`, true},
+		{"instrument set name", `<InstrumentSet><Name>Percussion</Name></InstrumentSet>`, true},
+		{"instrument ref", `<Instrument ref="drmkt" />`, true},
+		{"general midi channel 10", `<GeneralMidi><PrimaryChannel>9</PrimaryChannel></GeneralMidi>`, true},
+		{"guitar instrument ref", `<Instrument ref="e-gtr6" />`, false},
+		{"general midi channel 1", `<GeneralMidi><PrimaryChannel>0</PrimaryChannel></GeneralMidi>`, false},
+		{"no marker at all", ``, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, warns, err := importDoc(t, percussionDoc(tt.mark))
+			if err != nil {
+				t.Fatalf("Import: %v", err)
+			}
+			wantTracks := 2
+			if tt.perc {
+				wantTracks = 1
+			}
+			if len(s.Tracks) != wantTracks {
+				t.Fatalf("got %d tracks %v, want %d", len(s.Tracks), trackNames(s), wantTracks)
+			}
+			if got := hasWarning(warns, "percussion"); got != tt.perc {
+				t.Errorf("percussion warning = %v, want %v (warnings %v)", got, tt.perc, warns)
+			}
+		})
+	}
+}
+
+// TestAllPercussionTracksError (audit G1): a file that is nothing but
+// drums has no part this importer can teach. It must say so rather than
+// hand back a score of silence.
+func TestAllPercussionTracksError(t *testing.T) {
+	doc := gpifDocTracks("0",
+		trackXML(0, "Drums", `<InstrumentSet><Type>drumKit</Type></InstrumentSet>`),
+		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`,
+		`<Bar id="0"><Voices>0 -1 -1 -1</Voices></Bar>`,
+		`<Voice id="0"><Beats>0</Beats></Voice>`,
+		`<Beat id="0"><Rhythm ref="0" /><Notes>0</Notes></Beat>`,
+		percNoteXML(0, 36),
+		`<Rhythm id="0"><NoteValue>Whole</NoteValue></Rhythm>`)
+	_, warns, err := importDoc(t, doc)
+	if err == nil || !strings.Contains(err.Error(), "every track in the file is percussion") {
+		t.Fatalf("err = %v, want an all-percussion error", err)
+	}
+	if !hasWarning(warns, "percussion") {
+		t.Errorf("warnings = %v, want the per-track percussion warning kept alongside the error", warns)
+	}
+}
+
+// threeTrackBarsDoc builds a three-slot document whose middle slot is
+// filtered out: the master track lists three tracks, each master bar
+// lists three bar ids, and the three bars carry frets 1, 3 and 7 so a
+// track reading the wrong slot is immediately visible.
+//
+// middleID is the master-track id in the middle slot (either one that
+// resolves to nothing, or a percussion track's), and middleTrack the
+// <Track> element backing it, if any.
+func threeTrackBarsDoc(middleID, middleTrack string) string {
+	return gpifDocTracks("0 "+middleID+" 2",
+		trackXML(0, "A", "")+middleTrack+trackXML(2, "B", ""),
+		`<MasterBar><Time>4/4</Time><Bars>0 1 2</Bars></MasterBar>`,
+		`<Bar id="0"><Voices>0 -1 -1 -1</Voices></Bar>`+
+			`<Bar id="1"><Voices>1 -1 -1 -1</Voices></Bar>`+
+			`<Bar id="2"><Voices>2 -1 -1 -1</Voices></Bar>`,
+		`<Voice id="0"><Beats>0</Beats></Voice>`+
+			`<Voice id="1"><Beats>1</Beats></Voice>`+
+			`<Voice id="2"><Beats>2</Beats></Voice>`,
+		`<Beat id="0"><Rhythm ref="0" /><Notes>0</Notes></Beat>`+
+			`<Beat id="1"><Rhythm ref="0" /><Notes>1</Notes></Beat>`+
+			`<Beat id="2"><Rhythm ref="0" /><Notes>2</Notes></Beat>`,
+		noteXML(0, 0, 1, "")+noteXML(1, 0, 3, "")+noteXML(2, 0, 7, ""),
+		`<Rhythm id="0"><NoteValue>Whole</NoteValue></Rhythm>`)
+}
+
+// assertOwnBars checks that the two surviving tracks kept the bars
+// belonging to their own slots (frets 1 and 7), not the filtered middle
+// slot's (fret 3).
+func assertOwnBars(t *testing.T, s *score.Score) {
+	t.Helper()
+	if len(s.Tracks) != 2 {
+		t.Fatalf("got %d tracks %v, want 2", len(s.Tracks), trackNames(s))
+	}
+	want := []struct {
+		name string
+		fret int
+	}{{"A", 1}, {"B", 7}}
+	for i, w := range want {
+		tr := s.Tracks[i]
+		if tr.Name != w.name {
+			t.Errorf("track %d = %q, want %q", i, tr.Name, w.name)
+		}
+		notes := tr.Bars[0].Beats[0].Notes
+		if len(notes) != 1 {
+			t.Fatalf("track %q bar 1 has %d notes, want 1", tr.Name, len(notes))
+		}
+		if notes[0].Fret != w.fret {
+			t.Errorf("track %q plays fret %d, want %d — it was handed another slot's bars",
+				tr.Name, notes[0].Fret, w.fret)
+		}
+	}
+}
+
+// TestFilteredTrackKeepsItsOwnBars (audit G2): <MasterBar><Bars> is
+// indexed by the ORIGINAL track order, but the lookup used the track's
+// index in the filtered slice. Drop the middle track and every later
+// track silently reads a preceding slot's bars — here B would be taught
+// the missing track's fret 3 instead of its own fret 7.
+func TestFilteredTrackKeepsItsOwnBars(t *testing.T) {
+	// The master track's middle slot references id 99, which does not exist.
+	s, warns, err := importDoc(t, threeTrackBarsDoc("99", ""))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if !hasWarning(warns, "does not exist") {
+		t.Errorf("warnings = %v, want one about the missing track", warns)
+	}
+	assertOwnBars(t, s)
+}
+
+// TestPercussionFilterKeepsLaterTrackBars (audit G1 + G2): dropping
+// percussion is the filtering that makes the G2 index mismatch common, so
+// the two fixes are pinned together — a drum track between two guitars
+// must not shift the second guitar onto the drums' bars.
+func TestPercussionFilterKeepsLaterTrackBars(t *testing.T) {
+	drums := trackXML(1, "Drums", `<InstrumentSet><Type>drumKit</Type></InstrumentSet>`)
+	s, warns, err := importDoc(t, threeTrackBarsDoc("1", drums))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if !hasWarning(warns, "percussion") {
+		t.Errorf("warnings = %v, want the percussion warning", warns)
+	}
+	assertOwnBars(t, s)
+	if s.Tracks[0].Role != score.RoleUser {
+		t.Errorf("track A role = %d, want RoleUser %d", s.Tracks[0].Role, score.RoleUser)
+	}
+}
+
+// TestHostileTuplet: a PrimaryTuplet denominator of 1e18 overflowed
+// dur*int64(den), wrapping the beat to a length of roughly 7.7e17 ticks
+// that fillBar then truncated to the bar — the note came out wrong and
+// only an unrelated "overfill" warning mentioned it at all. Implausible
+// tuplets must be rejected by name, leaving the plain note value.
+func TestHostileTuplet(t *testing.T) {
+	doc := gpifDoc(
+		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`,
+		`<Bar id="0"><Voices>0 -1 -1 -1</Voices></Bar>`,
+		`<Voice id="0"><Beats>0</Beats></Voice>`,
+		`<Beat id="0"><Rhythm ref="0" /><Notes>0</Notes></Beat>`,
+		noteXML(0, 0, 0, ""),
+		`<Rhythm id="0"><NoteValue>Quarter</NoteValue><PrimaryTuplet num="1" den="1000000000000000000" /></Rhythm>`,
+	)
+	s, warns, err := importDoc(t, doc)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !hasWarning(warns, "implausible tuplet") {
+		t.Errorf("warnings = %v, want one naming the implausible tuplet", warns)
+	}
+	evs := s.Events()
+	if len(evs) != 1 || evs[0].Start != 0 || evs[0].End != score.Quarter {
+		t.Fatalf("events = %+v, want one plain quarter note spanning [0,960)", evs)
+	}
+}
+
+// TestPitchedInstrumentsAreNotPercussion is the fix-verification
+// regression for the percussion filter. Detecting kits by substring
+// deleted every pitched instrument whose name merely contains the word:
+// General MIDI has Steel Drums (115), Percussive Organ (18) and Melodic
+// Tom, GPIF's own family for tuned mallets is literally
+// "pitchedPercussion", and refs like "perc-vibraphone" are ordinary
+// fretted-renderable parts. Each vanished from the score with a warning
+// claiming it was drums — the player opened a file and their part was
+// simply gone.
+func TestPitchedInstrumentsAreNotPercussion(t *testing.T) {
+	tests := []struct {
+		name string
+		mark string
+	}{
+		{"steel drums (GM 115)", `<InstrumentSet><Name>Steel Drums</Name></InstrumentSet>`},
+		{"pitched percussion family", `<InstrumentSet><Type>pitchedPercussion</Type></InstrumentSet>`},
+		{"percussive organ (GM 18)", `<InstrumentSet><Name>Percussive Organ</Name></InstrumentSet>`},
+		{"vibraphone ref", `<Instrument ref="perc-vibraphone" />`},
+		{"melodic tom", `<InstrumentSet><Name>Melodic Tom</Name></InstrumentSet>`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, warns, err := importDoc(t, percussionDoc(tt.mark))
+			if err != nil {
+				t.Fatalf("Import: %v", err)
+			}
+			if len(s.Tracks) != 2 {
+				t.Fatalf("got %d tracks %v, want 2 — a pitched part was dropped as percussion (warnings %v)",
+					len(s.Tracks), trackNames(s), warns)
+			}
+			if hasWarning(warns, "percussion") {
+				t.Errorf("a pitched instrument was reported as percussion: %v", warns)
+			}
+		})
 	}
 }

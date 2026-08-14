@@ -93,6 +93,63 @@ func TestTrackerBendIsOneNote(t *testing.T) {
 	}
 }
 
+// TestTrackerReportsTrajectory is the slide regression. A legato slide is
+// one continuously sounded note that keeps its ORIGIN key (the case above
+// pins that, deliberately), so Note.Cents — a median over the whole note —
+// is the only pitch figure a caller used to get, and it reports neither
+// where the note started nor where it arrived. A scorer therefore could not
+// recognize a slide DESTINATION, which the score writes at the destination
+// pitch, and every slide in a piece was an expectation that could not be
+// matched however well it was played.
+//
+// The same 196→220 Hz sweep must report a trajectory that starts at the
+// opening key, reaches a full tone above it, and SETTLES there.
+func TestTrackerReportsTrajectory(t *testing.T) {
+	notes := runPipeline(t, chirp(196, 220, 0.4, 0.5))
+	if len(notes) != 1 {
+		t.Fatalf("got %d notes, want 1: %+v", len(notes), notes)
+	}
+	n := notes[0]
+	if n.Key != 55 {
+		t.Fatalf("Key = %d, want 55 (G3, where the sweep started)", n.Key)
+	}
+	// The sweep spans 0..+200 cents off the opening key.
+	if n.MinCents > 40 {
+		t.Errorf("MinCents = %+.1f, want near 0 (the note opened on its key)", n.MinCents)
+	}
+	if n.MaxCents < 160 {
+		t.Errorf("MaxCents = %+.1f, want near +200 (the sweep's destination)", n.MaxCents)
+	}
+	// EndCents is what tells a slide that ARRIVED from one still moving:
+	// the final hops sit at the destination, not mid-journey like Cents.
+	if n.EndCents < 160 {
+		t.Errorf("EndCents = %+.1f, want near +200 (where the note settled); Cents is %+.1f", n.EndCents, n.Cents)
+	}
+	if n.EndCents <= n.Cents {
+		t.Errorf("EndCents %+.1f not past the whole-note median %+.1f: the trajectory is being averaged away", n.EndCents, n.Cents)
+	}
+}
+
+// TestTrackerSteadyNoteHasFlatTrajectory: the trajectory fields must not
+// invent movement. A note played straight reports its own key at every
+// rung, so nothing downstream can mistake it for a slide.
+func TestTrackerSteadyNoteHasFlatTrajectory(t *testing.T) {
+	const key = 57 // A3
+	notes := runPipeline(t, sine(keyToFreq(key), 0.4, 0.5))
+	if len(notes) != 1 {
+		t.Fatalf("got %d notes, want 1: %+v", len(notes), notes)
+	}
+	n := notes[0]
+	for _, c := range []struct {
+		name string
+		v    float64
+	}{{"MinCents", n.MinCents}, {"MaxCents", n.MaxCents}, {"EndCents", n.EndCents}} {
+		if math.Abs(c.v) > 25 {
+			t.Errorf("%s = %+.1f, want within ±25 of the key: a steady note swept nowhere", c.name, c.v)
+		}
+	}
+}
+
 // TestTrackerRepickSplitsNotes: two Karplus-Strong plucks of the SAME key
 // back to back must yield TWO notes — the second attack's onset splits
 // them even though the pitch never changes.

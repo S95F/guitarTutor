@@ -11,13 +11,23 @@
 //
 // Matching is greedy: each detection pairs with the oldest unmatched
 // expectation (earliest scheduled frame) whose timing window contains it
-// — exact key preferred over a pitch-class/octave-off match, and the
-// oldest-deadline rule applies within each tier, so a detection sitting
-// in two same-key windows goes to the expectation about to expire rather
-// than the nearest one (nearest-in-time let an early detection steal a
-// later duplicate's expectation and starve the earlier one into a
-// spurious Miss). Each pairing is final — one detection satisfies at most
-// one expectation and vice versa.
+// — a LIVE expectation preferred over one a discontinuity abandoned, then
+// exact key over a pitch-class/octave-off match, and the oldest-deadline
+// rule applies within each tier, so a detection sitting in two same-key
+// windows goes to the expectation about to expire rather than the nearest
+// one (nearest-in-time let an early detection steal a later duplicate's
+// expectation and starve the earlier one into a spurious Miss). Each
+// pairing is final — one detection satisfies at most one expectation and
+// vice versa.
+//
+// Legato is the exception to that last rule, and has to be. A note the
+// score writes with score.TechSlide is not attacked; it is a string
+// already sounding, moved. The tracker reports that as ONE note keeping
+// its origin key, so the destination is unmatchable by the ordinary path
+// no matter how well it is played — a guaranteed false "you missed" on
+// every slide in a piece. One detection therefore answers both the note it
+// was picked for and any slide destination its pitch trajectory reached
+// while it sounded. See matchSlides.
 //
 // Chords (Phase 4, D4). The pitch engine is monophonic, so a strummed
 // chord can never produce one detection per chord note; through Phase 3
@@ -353,18 +363,37 @@ func (s *Scorer) ExpectNote(ev score.NoteEvent, outFrame int64) {
 	s.mu.Unlock()
 }
 
+// Match tiers, best (lowest) first. They are ORed together, so live-ness
+// outranks exactness: an abandoned expectation may still be matched, but
+// never at the cost of a live one (see Detected).
+const (
+	tierClass     = 1 // an octave-off pitch-class match, not the exact key
+	tierAbandoned = 2 // an expectation a discontinuity already wrote off
+)
+
 // Detected feeds closed notes from the pitch tracker.
 //
 // Each note's Start (input frames) is mapped to the output clock by
 // subtracting LatencyOffsetFrames, then matched greedily against the
 // pending expectations: among expectations whose TimingWindowFrames
-// window contains the detection, the earliest outFrame (oldest deadline)
-// wins, exact key preferred over a pitch-class-only (octave-off) match.
-// A pairing finalizes the expectation immediately — exact key within
-// CentsTolerance is a Hit, exact key with looser intonation or an
-// octave-off pitch-class match is a Close. Detections that match nothing
-// are dropped (stray noise, or the player noodling — never penalized,
-// per D5).
+// window contains the detection, the best tier wins and the earliest
+// outFrame (oldest deadline) breaks ties within it. A pairing finalizes
+// the expectation immediately — exact key within CentsTolerance is a Hit,
+// exact key with looser intonation or an octave-off pitch-class match is a
+// Close. Detections that match nothing are dropped (stray noise, or the
+// player noodling — never penalized, per D5).
+//
+// LIVE BEFORE EXACT. A live expectation outranks an ABANDONED one
+// (AbandonBefore) even when only the abandoned one matches the exact key,
+// because the two are not symmetric: an abandoned expectation produces no
+// verdict either way, so letting it win the detection costs the live one
+// its only evidence and ages it into a Miss. A seek would then turn a
+// silent drop plus a Hit into a Hit plus a false Miss — the outcome
+// AbandonBefore exists to prevent. Abandoned expectations stay matchable,
+// last, so a detection nothing live wants still credits the note the
+// player did answer.
+//
+// SLIDES are matched separately, after the whole batch: see matchSlides.
 func (s *Scorer) Detected(notes []pitch.Note) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -376,28 +405,28 @@ func (s *Scorer) Detected(notes []pitch.Note) {
 		if detOut > s.clock {
 			s.clock = detOut
 		}
-		bestExact, bestClass := -1, -1
-		var bestExactOut, bestClassOut int64
+		pick, pickTier := -1, 0
+		var pickOut int64
 		for j := range s.pending {
 			exp := &s.pending[j]
 			dt := detOut - exp.outFrame
 			if dt < -win || dt > win {
 				continue
 			}
+			tier := 0
 			switch {
 			case exp.ev.Key == n.Key:
-				if bestExact < 0 || exp.outFrame < bestExactOut {
-					bestExact, bestExactOut = j, exp.outFrame
-				}
 			case ((exp.ev.Key-n.Key)%12+12)%12 == 0:
-				if bestClass < 0 || exp.outFrame < bestClassOut {
-					bestClass, bestClassOut = j, exp.outFrame
-				}
+				tier |= tierClass
+			default:
+				continue
 			}
-		}
-		pick, exact := bestClass, false
-		if bestExact >= 0 {
-			pick, exact = bestExact, true
+			if exp.abandoned {
+				tier |= tierAbandoned
+			}
+			if pick < 0 || tier < pickTier || (tier == pickTier && exp.outFrame < pickOut) {
+				pick, pickTier, pickOut = j, tier, exp.outFrame
+			}
 		}
 		if pick < 0 {
 			continue
@@ -405,7 +434,7 @@ func (s *Scorer) Detected(notes []pitch.Note) {
 		exp := s.pending[pick]
 		s.pending = append(s.pending[:pick], s.pending[pick+1:]...)
 		v := VerdictClose
-		if exact && math.Abs(n.Cents) <= s.cfg.CentsTolerance {
+		if pickTier&tierClass == 0 && math.Abs(n.Cents) <= s.cfg.CentsTolerance {
 			v = VerdictHit
 		}
 		s.finalize(NoteResult{
@@ -417,6 +446,108 @@ func (s *Scorer) Detected(notes []pitch.Note) {
 			ErrFrames: detOut - exp.outFrame,
 		})
 	}
+	// After the whole batch, so the ordinary path — the stronger evidence,
+	// and the only one that carries honest timing — always gets first
+	// refusal on every detection in it.
+	for i := range notes {
+		s.matchSlides(&notes[i], off, win)
+	}
+}
+
+// matchSlides credits the slide DESTINATIONS one detection glided into.
+// Caller holds mu.
+//
+// A note written with score.TechSlide is slid INTO: the player does not
+// attack it, they move an already-sounding string onto it. The tracker
+// reports that string as one continuous note keeping its ORIGIN key (see
+// pitch.Tracker), so the destination — which the score writes at the
+// destination pitch, on its own tick — can never be matched by the
+// ordinary path, however perfectly it is played. Every slide in a piece
+// was therefore a guaranteed false "you missed", the failure mode ROADMAP's
+// guiding principles name as the #1 rage-quit cause.
+//
+// The evidence a slide destination is entitled to is a detection that (a)
+// was SOUNDING across its window — started at or before the destination's
+// late edge and had not closed before its early edge — and (b) whose pitch
+// trajectory reached the destination key. Two rungs, mirroring the chord
+// ladder in verifyChord:
+//
+//   - HIT — the note SETTLED there: its final hops (pitch.Note.EndCents)
+//     sit within CentsTolerance of the destination key. That is a genuine
+//     intonation reading and is reported as ErrCents.
+//
+//   - CLOSE — the note PASSED THROUGH: the destination lies inside the
+//     trajectory's swept range, CloseCents either side. This is what
+//     credits every step of a chained slide, and a slide the player left
+//     early to move on to the next note. There is no meaningful cents
+//     figure for a pitch the note only travelled over, so ErrCents is 0.
+//
+// ErrFrames is 0 rather than measured. The detection's Start is the ORIGIN
+// note's attack, which is a whole beat away from the destination by
+// construction; reporting that as the player's timing error would be
+// reporting the notation, not the performance. The same reasoning as
+// WaitConfirmed's.
+//
+// This cannot weaken ordinary matching: it runs only on expectations
+// carrying TechSlide, only after the ordinary path has had every detection
+// in the batch, and it can only turn a Miss into a verdict.
+func (s *Scorer) matchSlides(n *pitch.Note, off, win int64) {
+	startOut := n.Start - off
+	// End is 0 on a note that is still sounding (pitch.Tracker.Current),
+	// which has by definition not stopped before anything.
+	endOut := int64(math.MaxInt64)
+	if n.End > 0 {
+		endOut = n.End - off
+	}
+	keep := s.pending[:0]
+	for _, exp := range s.pending {
+		v, cents, ok := s.slideVerdict(n, exp, startOut, endOut, win)
+		if !ok {
+			keep = append(keep, exp)
+			continue
+		}
+		s.finalize(NoteResult{
+			Event:    exp.ev,
+			OutFrame: exp.outFrame,
+			Verdict:  v,
+			Matched:  true,
+			ErrCents: cents,
+		})
+	}
+	s.pending = keep
+}
+
+// slideVerdict judges one expectation against one detection on the legato
+// ladder described in matchSlides, reporting ok false when the expectation
+// is not a slide destination this detection can speak for. Caller holds mu.
+func (s *Scorer) slideVerdict(n *pitch.Note, exp expectation, startOut, endOut, win int64) (Verdict, float64, bool) {
+	if exp.ev.Tech&score.TechSlide == 0 {
+		return 0, 0, false
+	}
+	// See reachedKey: equal keys mean the detection never moved, so it is
+	// a sustained note and not a slide into anything. Without this a note
+	// left ringing across the bar credits every later slide expectation at
+	// its own pitch — one played note scoring as two.
+	if exp.ev.Key == n.Key {
+		return 0, 0, false
+	}
+	if startOut > exp.outFrame+win || endOut < exp.outFrame-win {
+		return 0, 0, false
+	}
+	// Where the destination key sits on the detection's own cents scale.
+	want := float64(exp.ev.Key-n.Key) * 100
+	if err := n.EndCents - want; math.Abs(err) <= s.cfg.CentsTolerance {
+		return VerdictHit, err, true
+	}
+	// CentsTolerance, not CloseCents. CloseCents is 70 — most of a
+	// semitone — and added to the width of ordinary vibrato it reaches a
+	// whole fret, so a note merely left ringing "passed through" every
+	// slide destination a fret away and collected credit for each of
+	// them. The player was given four hits for one sustained note.
+	if want >= n.MinCents-s.cfg.CentsTolerance && want <= n.MaxCents+s.cfg.CentsTolerance {
+		return VerdictClose, 0, true
+	}
+	return 0, 0, false
 }
 
 // DetectedStrum feeds one attack-plus-chroma observation from the pitch
@@ -436,8 +567,9 @@ func (s *Scorer) Detected(notes []pitch.Note) {
 // ChordCorrelationMin, each expected note is verified INDEPENDENTLY on the
 // three-rung ladder in verifyChord — dominant is a Hit, present is a
 // Close, absent from the chroma's own background is a Miss — and all of
-// them finalize from this one strum. The largest in-window chord group
-// wins, nearest in time on a tie. Below the correlation gate nothing is
+// them finalize from this one strum. The chord the strum lands NEAREST in
+// time wins, size breaking ties between chords it is equally near (see
+// chordGroup). Below the correlation gate nothing is
 // finalized: the chroma is either featureless or belongs to some other
 // chord, and the expectations are left to their deadlines (which see the
 // recorded onset and grade it on the same ladder).
@@ -499,27 +631,90 @@ func (s *Scorer) DetectedStrum(st pitch.Strum) {
 		exp.onset = true
 	}
 
-	// The chord group: the largest set of candidates sharing a Start tick
-	// and outFrame, nearest in time on a tie.
-	group, groupN := -1, 0
-	for _, j := range cand {
-		n := 0
-		for _, k := range cand {
-			if s.pending[k].ev.Start == s.pending[j].ev.Start && s.pending[k].outFrame == s.pending[j].outFrame {
-				n++
-			}
-		}
-		if n < 2 {
-			continue
-		}
-		if group < 0 || n > groupN ||
-			(n == groupN && absInt64(stOut-s.pending[j].outFrame) < absInt64(stOut-s.pending[group].outFrame)) {
-			group, groupN = j, n
-		}
-	}
-	if group >= 0 {
+	if group := s.chordGroup(cand, stOut); group >= 0 {
 		s.verifyChord(st, stOut, s.pending[group].ev.Start, s.pending[group].outFrame, stats)
 	}
+}
+
+// chordProximityMillis is the slop inside which two chord ticks count as
+// EQUALLY near a strum, and so the point below which chordGroup stops
+// trusting proximity and falls back on group size.
+//
+// It is wider than the 25–50 ms the detection physics alone costs between
+// an attack and a usable estimate (ROADMAP Phase 2, D4) — which is the
+// precision with which a Strum's frame can be placed at all — and far
+// narrower than any notated rhythm at practice tempos: the fastest figure
+// this app is meant to score, 16ths at 120 BPM, spaces its attacks 125 ms
+// apart. Two chord ticks closer together than this are a rolled chord, not
+// two beats.
+const chordProximityMillis = 50
+
+// chordGroup picks the chord a strum at stOut speaks for, out of the
+// in-window candidate indices cand. It returns an index into s.pending, or
+// -1 when no candidate shares its tick with another (a lone note is not a
+// chord — DetectedStrum leaves those to the monophonic path). Caller holds
+// mu.
+//
+// TEMPORAL PROXIMITY IS THE PRIMARY CRITERION, and that is the whole point
+// of this function. Choosing the largest in-window group instead let one
+// strum finalize a DIFFERENT tick's chord: 16th-note chord stabs at 120 BPM
+// sit 6000 frames apart, well inside the 7200-frame window, so a five-note
+// chord on the beat the player actually strummed lost to a six-note chord
+// an entire 16th later. That deleted expectations the player had not
+// reached yet and judged them against audio that was not theirs, while the
+// chord they DID play went unmatched into a Miss — the false "you missed"
+// this package exists to prevent (D5).
+//
+// Size still decides between groups the strum is EQUALLY near, because pure
+// proximity is the mirror bug: a strum landing between two chords would
+// hand itself to whichever is nearer by a couple of milliseconds, a
+// difference that is inside the onset detector's own placement error and
+// therefore says nothing about what the player meant. "Equally near" is a
+// slop of chordProximityMillis around the nearest group.
+//
+// Two passes rather than one running best-so-far comparison: "nearer,
+// unless comparably near, in which case larger" is not a transitive order,
+// so a single scan over three or more groups would depend on the order the
+// candidates happen to arrive in.
+func (s *Scorer) chordGroup(cand []int, stOut int64) int {
+	nearest := int64(-1)
+	for _, j := range cand {
+		if s.chordSize(cand, j) < 2 {
+			continue
+		}
+		if d := absInt64(stOut - s.pending[j].outFrame); nearest < 0 || d < nearest {
+			nearest = d
+		}
+	}
+	if nearest < 0 {
+		return -1
+	}
+	slop := int64(s.cfg.SampleRate) * chordProximityMillis / 1000
+	group, groupN, groupD := -1, 0, int64(0)
+	for _, j := range cand {
+		n := s.chordSize(cand, j)
+		d := absInt64(stOut - s.pending[j].outFrame)
+		if n < 2 || d > nearest+slop {
+			continue
+		}
+		if group < 0 || n > groupN || (n == groupN && d < groupD) {
+			group, groupN, groupD = j, n, d
+		}
+	}
+	return group
+}
+
+// chordSize counts the candidates sharing cand entry j's Start tick and
+// outFrame — the size of the chord j belongs to, itself included. Caller
+// holds mu.
+func (s *Scorer) chordSize(cand []int, j int) int {
+	n := 0
+	for _, k := range cand {
+		if s.pending[k].ev.Start == s.pending[j].ev.Start && s.pending[k].outFrame == s.pending[j].outFrame {
+			n++
+		}
+	}
+	return n
 }
 
 // verifyChord judges every pending expectation at (start, outFrame) from
@@ -850,6 +1045,15 @@ func (s *Scorer) AbandonBefore(outFrame int64) {
 // pitch-class match is Close) — Matched true, ErrFrames 0. Each pre-match
 // is consumed at most once.
 //
+// A DEAD note (score.TechDead) has no matching note to find, ever: the
+// tracker cannot open one on a damped string. It is pre-matched Close
+// unconditionally, on the strength of the caller's contract — this is
+// called only once WaitGate reports the armed set fully satisfied, and the
+// gate satisfies a dead note from its attack (WaitGate.OfferStrum). Left
+// out, the note would fall through to its deadline and be judged on
+// whether a Strum happened to land inside a window measured from the
+// release frame, which is the machinery's timing, not the player's.
+//
 // Pre-matches expire after ~5 s so a seek that abandons the confirm
 // cannot leak a stale entry into a later pass over the same tick. Expiry
 // runs on the scorer's approximate output clock: the latest frame seen
@@ -879,12 +1083,36 @@ func (s *Scorer) WaitConfirmed(evs []score.NoteEvent, notes []pitch.Note) {
 				best, bestAbs = i, abs
 			}
 		}
-		if best < 0 {
+		v, cents := VerdictClose, 0.0
+		switch {
+		case best >= 0:
+			if bestExact && bestAbs <= s.cfg.CentsTolerance {
+				v = VerdictHit
+			}
+			cents = notes[best].Cents
+		case ev.Tech&score.TechSlide != 0 && slideConfirmer(notes, ev.Key, s.cfg.CentsTolerance) >= 0:
+			// A slide destination is never attacked, so the confirming
+			// detection carries the ORIGIN key and the key search above
+			// cannot find it — the note was played correctly and scored a
+			// MISS, at a wait point the player had just satisfied. Grade
+			// it off the trajectory the way matchSlides does: settling at
+			// the key is a Hit, merely sweeping through it is a Close.
+			n := &notes[slideConfirmer(notes, ev.Key, s.cfg.CentsTolerance)]
+			if err := n.EndCents - float64(ev.Key-n.Key)*100; math.Abs(err) <= s.cfg.CentsTolerance {
+				v, cents = VerdictHit, err
+			}
+		case ev.Tech&score.TechDead != 0:
+			// A dead note produces no trackable f0, so no detection can
+			// ever appear here for it — WaitGate.OfferStrum confirmed it
+			// on its ATTACK instead. This function is only called once
+			// the gate reports the whole armed set satisfied, so a dead
+			// event reaching this line WAS confirmed, and recording the
+			// same Close the damped-note deadline path awards keeps it
+			// out of a deadline that would judge it against the
+			// machinery's own latency (see this function's doc). ErrCents
+			// stays 0: the attack was heard, the pitch never was.
+		default:
 			continue
-		}
-		v := VerdictClose
-		if bestExact && bestAbs <= s.cfg.CentsTolerance {
-			v = VerdictHit
 		}
 		pm := preMatch{
 			track:    ev.Track,
@@ -892,7 +1120,7 @@ func (s *Scorer) WaitConfirmed(evs []score.NoteEvent, notes []pitch.Note) {
 			str:      ev.String,
 			start:    ev.Start,
 			verdict:  v,
-			errCents: notes[best].Cents,
+			errCents: cents,
 			born:     s.clock,
 			expire:   s.clock + int64(preMatchExpirySeconds*s.cfg.SampleRate),
 		}
@@ -959,25 +1187,69 @@ func (s *Scorer) Reset() {
 // Wiring (cmd, Phase 2): the caller polls Engine.WaitingOn; when a wait
 // point appears it Arms the gate with the returned events and the current
 // capture frame, Offers each batch of tracker detections (Tracker.Current
-// works too — the gate only reads Key, Cents, and Start), and calls
-// Engine.ConfirmWait when Offer reports true; it re-Arms at the next wait
+// works too), OfferStrums each batch of pitch.Strums, and calls
+// Engine.ConfirmWait when either reports true; it re-Arms at the next wait
 // point. Rhythm is not judged while waiting — the position is frozen —
 // but the ATTACK must be new: Offer ignores notes whose Start precedes
 // the frame the gate was armed at, so a note still ringing from before
 // the wait cannot auto-confirm a same-key wait point. Intonation stays
 // lenient (CloseCents).
+//
+// A wait point that cannot be satisfied halts playback for good, so the
+// two notes the pitched path structurally cannot see each have their own
+// evidence:
+//
+//   - DEAD notes (score.TechDead) have no f0 to track at all. They are
+//     confirmed by their ATTACK, through OfferStrum.
+//
+//   - SLIDE destinations (score.TechSlide) are never attacked and never
+//     take the tracker's key: the string is already sounding and simply
+//     moves. They are confirmed by a detection whose pitch TRAJECTORY
+//     reached their key (pitch.Note.MinCents/MaxCents).
+//
+// One attack, one wait point. An attack that satisfied an event under a
+// previous arm is spent and cannot satisfy another: a still-ringing note
+// keeps being re-offered from Tracker.Current, and the caller's arming
+// grace is a fixed span of frames, so at fast repeated notes the note that
+// released one wait point can still look fresh at the next one and release
+// that too — awarding, through Scorer.WaitConfirmed, a Hit nobody played.
+// Freshness alone cannot rule that out at every tempo; identity can.
 type WaitGate struct {
 	mu         sync.Mutex
 	closeCents float64
+	// slideCents is the reach tolerance for a slide destination, and is
+	// deliberately the TIGHT (full-credit) bound rather than closeCents.
+	// closeCents is 70 — most of a semitone — so with it a note merely
+	// held with ordinary vibrato "reached" a key a fret away and released
+	// a slide wait point the player never slid to.
+	slideCents float64
 	events     []score.NoteEvent
 	done       []bool
 	nDone      int
-	minStart   int64
+	// fired records that this arm's completion has already been reported,
+	// so it is reported once and not to every later caller (see satisfied).
+	fired    bool
+	minStart int64
+	// credited holds the attacks that have satisfied an event under the
+	// CURRENT arm, spent those from previous arms. The split is what lets
+	// one detection still credit two unison events of one chord (audit
+	// D3) while barring it from the next wait point entirely.
+	credited []attack
+	spent    []attack
+}
+
+// An attack identifies one pluck by the detection it produced: the same
+// pair cmd's wiring uses to recognize re-offered snapshots of a
+// still-sounding note.
+type attack struct {
+	start int64
+	key   int
 }
 
 // NewWaitGate builds a gate sharing the scorer's tolerances.
 func NewWaitGate(cfg Config) *WaitGate {
-	return &WaitGate{closeCents: cfg.withDefaults().CloseCents}
+	c := cfg.withDefaults()
+	return &WaitGate{closeCents: c.CloseCents, slideCents: c.CentsTolerance}
 }
 
 // Arm sets the events the engine is waiting on (from Engine.WaitingOn)
@@ -985,12 +1257,27 @@ func NewWaitGate(cfg Config) *WaitGate {
 // typically the capture position when the wait engaged. Offer ignores
 // notes whose Start precedes minStart. The events are copied; any
 // previous armed set and its progress are discarded.
+//
+// Whatever satisfied the previous armed set becomes spent here, so it can
+// never release this wait point too. Spent attacks older than minStart are
+// forgotten — freshness already rejects them — which is what keeps the set
+// to a handful of entries however long the session runs.
 func (g *WaitGate) Arm(events []score.NoteEvent, minStart int64) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.spent = append(g.spent, g.credited...)
+	g.credited = g.credited[:0]
+	keep := g.spent[:0]
+	for _, a := range g.spent {
+		if a.start >= minStart {
+			keep = append(keep, a)
+		}
+	}
+	g.spent = keep
 	g.events = append(g.events[:0], events...)
 	g.done = append(g.done[:0], make([]bool, len(events))...)
 	g.nDone = 0
+	g.fired = false
 	g.minStart = minStart
 }
 
@@ -1000,12 +1287,16 @@ func (g *WaitGate) Arm(events []score.NoteEvent, minStart int64) {
 //
 // A detection satisfies one unsatisfied armed event on an octave-EXACT
 // key match with |Cents| <= CloseCents when its attack is fresh (Start at
-// or after the armed minStart) — waiting is lenient about intonation,
-// strict about octave and about the attack: playing the wrong octave
-// should not release the wait, and neither should a note that was already
-// ringing when the wait engaged. A chord is satisfied by playing every
-// note, in any order, across any number of Offer calls. With nothing
-// armed, Offer reports false.
+// or after the armed minStart, and not already spent on an earlier wait
+// point) — waiting is lenient about intonation, strict about octave and
+// about the attack: playing the wrong octave should not release the wait,
+// and neither should a note that was already ringing when the wait
+// engaged. A chord is satisfied by playing every note, in any order,
+// across any number of Offer calls. With nothing armed, Offer reports
+// false.
+//
+// A slide destination is satisfied instead by a detection whose pitch
+// trajectory REACHED its key, attacked or not — see the type doc.
 func (g *WaitGate) Offer(notes []pitch.Note) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -1014,19 +1305,177 @@ func (g *WaitGate) Offer(notes []pitch.Note) bool {
 	}
 	for i := range notes {
 		n := &notes[i]
-		if n.Start < g.minStart {
-			continue
-		}
-		if math.Abs(n.Cents) > g.closeCents {
-			continue
-		}
+		// Freshness and identity both ask "is this a NEW attack" — the
+		// right question for a note that has to be struck, and the wrong
+		// one for a slide (see below), so they are asked per event rather
+		// than used to skip the detection outright.
+		fresh := n.Start >= g.minStart && !g.isSpent(n)
+		inTune := math.Abs(n.Cents) <= g.closeCents
 		for j := range g.events {
-			if !g.done[j] && g.events[j].Key == n.Key {
+			if g.done[j] {
+				continue
+			}
+			ev := &g.events[j]
+			switch {
+			// A slide destination, exempt from BOTH freshness and
+			// identity. A legato slide sounds on a string that was
+			// already ringing when the wait engaged — that is what
+			// legato means — and its attack was spent releasing the
+			// origin's own wait point a beat earlier. Neither test can
+			// ever speak for it: at any realistic tempo the origin's
+			// attack is both stale (a quarter at 120 BPM is 24000
+			// frames, far past the ~7200-frame grace) and spent, so
+			// playback halted at every slide in the piece, forever. The
+			// trajectory is the only evidence there is, and reaching a
+			// key the note did not start on is evidence of something the
+			// player did during the wait.
+			case ev.Tech&score.TechSlide != 0 && settledAt(n, ev.Key, g.slideCents):
+			// Anything else has to be struck, now, and not by an attack
+			// that already released an earlier wait point.
+			case fresh && inTune && ev.Key == n.Key:
+			default:
+				continue
+			}
+			g.done[j] = true
+			g.nDone++
+			g.credited = append(g.credited, attack{start: n.Start, key: n.Key})
+			break
+		}
+	}
+	return g.satisfied()
+}
+
+// OfferStrum feeds one attack-plus-chroma observation (the same pitch.Strum
+// Scorer.DetectedStrum runs chord verification on); it returns true when
+// the armed set is fully satisfied, exactly as Offer does.
+//
+// A fresh strum satisfies every unsatisfied DEAD note in the armed set. A
+// damped string has an unmistakable attack and a fundamental too smothered
+// for the tracker to ever open a note on, so the pitched path can never
+// confirm one: a wait point on a dead note used to halt playback
+// permanently, with nothing the player could do about it (fixture
+// testdata/fixture_rich.gtab bar 2 ends in `9.4x`). Crediting the attack is
+// the mechanism the scorer already uses for damped notes at their deadline
+// (deadlineResult, ROADMAP Phase 4).
+//
+// Deliberately WITHOUT the chroma-prominence test deadlineResult applies.
+// That test asks whether a strum was THIS note rather than something else,
+// a question that only arises while the music is running. At a wait point
+// the position is frozen and exactly one thing is being asked for, so any
+// attack during the wait is the player's attempt at it — and demanding
+// pitch-class energy from a note that is by definition pitchless risks the
+// one failure worse than a wrong verdict: playback that never resumes.
+//
+// One strum satisfies ALL the dead notes in a chord, because one strum IS
+// one strike of however many muted strings, the same reasoning that lets a
+// single detection credit both halves of a unison (audit D3).
+func (g *WaitGate) OfferStrum(st pitch.Strum) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.events) == 0 {
+		return false
+	}
+	if st.Frame >= g.minStart {
+		for j := range g.events {
+			if !g.done[j] && g.events[j].Tech&score.TechDead != 0 {
 				g.done[j] = true
 				g.nDone++
-				break
 			}
 		}
 	}
-	return g.nDone == len(g.events)
+	return g.satisfied()
+}
+
+// satisfied reports the armed set complete — ONCE per arm.
+//
+// The gate stays full from the moment it fills until the next Arm, so a
+// caller asking again got "yes" a second time and released a wait the
+// player never answered. That is how it bit: OnStrums runs before
+// OnNotes, and only OnNotes arms, so every strum landing after a
+// confirmation and before the next arm found a full gate and skipped the
+// next wait point. Answering once per arm makes that impossible for every
+// caller, instead of asking each one to remember. Caller holds mu.
+func (g *WaitGate) satisfied() bool {
+	if g.fired || len(g.events) == 0 || g.nDone != len(g.events) {
+		return false
+	}
+	g.fired = true
+	return true
+}
+
+// isSpent reports whether this attack already released an earlier wait
+// point. Caller holds mu.
+func (g *WaitGate) isSpent(n *pitch.Note) bool {
+	for _, a := range g.spent {
+		if a.start == n.Start && a.key == n.Key {
+			return true
+		}
+	}
+	return false
+}
+
+// settledAt reports whether a detection's pitch has ARRIVED at key and is
+// still there — its final hops sit within slop of it.
+//
+// This is the wait gate's test, and it is deliberately stricter than
+// reachedKey. Releasing a halt is not the same question as awarding
+// credit: the position is frozen and the player is holding the note, so
+// the destination must be what is sounding NOW. Merely having swept over
+// the pitch at some earlier moment let a note bent up from a previous
+// phrase, still ringing, release a wait point the player did nothing for.
+func settledAt(n *pitch.Note, key int, slop float64) bool {
+	if key == n.Key {
+		return false
+	}
+	return math.Abs(n.EndCents-float64(key-n.Key)*100) <= slop
+}
+
+// reachedKey reports whether a detection's pitch trajectory passed through
+// key, slop cents either side of the swept range. A slide destination is
+// the case it exists for: the tracker keeps the whole slide as one note on
+// the ORIGIN key, so the destination only ever shows up in the trajectory.
+// The SCORER uses this — a slide the player left early to move on still
+// earns partial credit; see settledAt for why the gate does not.
+func reachedKey(n *pitch.Note, key int, slop float64) bool {
+	// A legato slide is tracked as ONE note that keeps the ORIGIN key, so
+	// a genuine slide destination is never the detection's own key. Equal
+	// keys mean the note never moved — it is a sustained note sitting on
+	// that pitch — and crediting it would award a slide the player did not
+	// play, on the strength of a note they were already credited for.
+	if key == n.Key {
+		return false
+	}
+	want := float64(key-n.Key) * 100
+	return want >= n.MinCents-slop && want <= n.MaxCents+slop
+}
+
+// slideConfirmer returns the index of the detection whose pitch trajectory
+// reached key, or -1. It is how a slide destination is recognized among
+// the notes that confirmed a wait point: the destination is never
+// attacked, so no detection ever carries its key.
+func slideConfirmer(notes []pitch.Note, key int, slop float64) int {
+	for i := range notes {
+		if reachedKey(&notes[i], key, slop) {
+			return i
+		}
+	}
+	return -1
+}
+
+// ConfirmsSlide reports whether detection n is the evidence for slide
+// destination ev — the same test WaitGate.Offer accepts a slide on.
+//
+// It is exported for the live wiring, which decides which detections to
+// hand WaitConfirmed. That wiring keeps only FRESH attacks, which is right
+// for every note that has to be struck and exactly wrong for a slide: the
+// string was struck a beat earlier, so the detection proving the slide is
+// never fresh, and filtering it out left WaitConfirmed with nothing to
+// grade. The slide the gate had just accepted then aged into a false Miss
+// — the player slid correctly, playback resumed, and the note was marked
+// missed.
+func ConfirmsSlide(n pitch.Note, ev score.NoteEvent, cfg Config) bool {
+	if ev.Tech&score.TechSlide == 0 {
+		return false
+	}
+	return settledAt(&n, ev.Key, cfg.withDefaults().CentsTolerance)
 }

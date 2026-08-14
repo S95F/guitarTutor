@@ -109,7 +109,7 @@ func TestFillDeviceIDs(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			in, out, _, err := fillDeviceIDs(testCapture, testPlayback, c.cfg, c.inQ, c.outQ)
+			in, out, _, _, _, err := fillDeviceIDs(testCapture, testPlayback, c.cfg, c.inQ, c.outQ)
 			if c.wantErrPart != "" {
 				if err == nil || !strings.Contains(err.Error(), c.wantErrPart) {
 					t.Fatalf("err = %v, want one containing %q", err, c.wantErrPart)
@@ -200,7 +200,7 @@ func TestOnNotesSeekAbandonsPending(t *testing.T) {
 	gate := practice.NewWaitGate(pcfg)
 	eng.SetEventTap(scorer.ExpectNote)
 	sink := &resultSink{}
-	onNotes := newOnNotes(eng, sink, scorer, gate)
+	onNotes := newLiveWiring(eng, sink, scorer, gate, pcfg).onNotes
 
 	// Play far enough that the first notes have sounded and been tapped.
 	eng.Play()
@@ -305,7 +305,7 @@ func TestOnNotesWaitWiring(t *testing.T) {
 	gate := practice.NewWaitGate(pcfg)
 	eng.SetEventTap(scorer.ExpectNote)
 	sink := &resultSink{}
-	onNotes := newOnNotes(eng, sink, scorer, gate)
+	onNotes := newLiveWiring(eng, sink, scorer, gate, pcfg).onNotes
 
 	eng.Play()
 	renderUntilWait(t, eng, 1) // wait 1: first E2, tick 0
@@ -499,7 +499,7 @@ func TestSetupListenRollsBackTapOnFailure(t *testing.T) {
 	eng := newEngine(sc, engine.Options{})
 	app := ui.New(eng, sc, 0)
 
-	session, err := setupListen(eng, app, 0, "", "", appconfig.Config{})
+	session, err := setupListen(eng, app, "", "", appconfig.Config{})
 	if err == nil {
 		session.Stop()
 		t.Fatal("setupListen with a refusing backend returned nil error")
@@ -532,7 +532,7 @@ func TestSetupListenKeepsTapOnSuccess(t *testing.T) {
 	eng := newEngine(sc, engine.Options{})
 	app := ui.New(eng, sc, 0)
 
-	session, err := setupListen(eng, app, 0, "", "", appconfig.Config{})
+	session, err := setupListen(eng, app, "", "", appconfig.Config{})
 	if err != nil {
 		t.Fatalf("setupListen: %v", err)
 	}
@@ -550,7 +550,7 @@ func TestSetupListenKeepsTapOnSuccess(t *testing.T) {
 // disagreed.
 func TestFillDeviceIDStaleRemembered(t *testing.T) {
 	cfg := appconfig.Config{CaptureDeviceID: "cap-unplugged", PlaybackDeviceID: "pb-usb"}
-	in, out, notes, err := fillDeviceIDs(testCapture, testPlayback, cfg, "", "")
+	in, out, notes, _, _, err := fillDeviceIDs(testCapture, testPlayback, cfg, "", "")
 	if err != nil {
 		t.Fatalf("fillDeviceIDs: %v", err)
 	}
@@ -566,7 +566,7 @@ func TestFillDeviceIDStaleRemembered(t *testing.T) {
 
 	// A present remembered device keeps its silence: no note.
 	cfg = appconfig.Config{CaptureDeviceID: "cap-usb", PlaybackDeviceID: "pb-usb"}
-	_, _, notes, err = fillDeviceIDs(testCapture, testPlayback, cfg, "", "")
+	_, _, notes, _, _, err = fillDeviceIDs(testCapture, testPlayback, cfg, "", "")
 	if err != nil || len(notes) != 0 {
 		t.Errorf("present devices produced notes %v (err %v), want none", notes, err)
 	}
@@ -590,5 +590,283 @@ func TestResolvedDeviceName(t *testing.T) {
 	noDefault := []audio.DeviceInfo{{ID: "a", Name: "A"}}
 	if got := resolvedDeviceName(noDefault, ""); got != "" {
 		t.Errorf("no default marked resolved to %q, want the unknown \"\"", got)
+	}
+}
+
+// TestCalibrateKeepsThePreferenceWhenTheDeviceIsAway is the C5 regression.
+// Calibrating while the saved interface is unplugged measures whatever is
+// there instead — correctly, and the offset for that pair is worth
+// keeping. What must NOT happen is adopting the stand-in as the player's
+// device: the saved preference is the only record of which interface they
+// own, and losing it means reconnecting it no longer selects it and the
+// offset already measured for it is never looked up again.
+func TestCalibrateKeepsThePreferenceWhenTheDeviceIsAway(t *testing.T) {
+	cfg := appconfig.Config{CaptureDeviceID: "cap-unplugged", PlaybackDeviceID: "pb-usb"}
+	in, out, _, inFell, outFell, err := fillDeviceIDs(testCapture, testPlayback, cfg, "", "")
+	if err != nil {
+		t.Fatalf("fillDeviceIDs: %v", err)
+	}
+	if !inFell {
+		t.Fatal("the unplugged capture device was not reported as a fallback")
+	}
+	if outFell {
+		t.Fatal("the still-present playback device was reported as a fallback")
+	}
+
+	rememberDevices(&cfg, in, out, inFell, outFell)
+	if cfg.CaptureDeviceID != "cap-unplugged" {
+		t.Errorf("saved capture device = %q, want the player's own cap-unplugged kept", cfg.CaptureDeviceID)
+	}
+	if cfg.PlaybackDeviceID != "pb-usb" {
+		t.Errorf("saved playback device = %q, want pb-usb", cfg.PlaybackDeviceID)
+	}
+}
+
+// TestCalibrateAdoptsADeviceTheUserChose pins the other side: a device
+// resolved from a flag or filling an empty preference is a real choice and
+// must be remembered, or -in/-out would never stick.
+func TestCalibrateAdoptsADeviceTheUserChose(t *testing.T) {
+	cfg := appconfig.Config{}
+	in, out, _, inFell, outFell, err := fillDeviceIDs(testCapture, testPlayback, cfg, "usb", "usb")
+	if err != nil {
+		t.Fatalf("fillDeviceIDs: %v", err)
+	}
+	if inFell || outFell {
+		t.Fatalf("an explicitly chosen device was reported as a fallback (in %v, out %v)", inFell, outFell)
+	}
+	rememberDevices(&cfg, in, out, inFell, outFell)
+	if cfg.CaptureDeviceID != "cap-usb" || cfg.PlaybackDeviceID != "pb-usb" {
+		t.Errorf("saved devices = %q/%q, want cap-usb/pb-usb", cfg.CaptureDeviceID, cfg.PlaybackDeviceID)
+	}
+}
+
+// deadNoteWaitScore: one dead (muted) note, then a normal one. A damped
+// string produces no trackable f0, so the only evidence the player struck
+// it is the attack itself.
+func deadNoteWaitScore(t *testing.T) *score.Score {
+	t.Helper()
+	sc := &score.Score{
+		Tempos: score.TempoMap{{Tick: 0, USPerQuarter: 500000}},
+		Meters: score.MeterMap{{Tick: 0, Num: 4, Den: 4}},
+	}
+	tr := &score.Track{Name: "guitar", Tuning: score.StandardTuning}
+	sc.Tracks = append(sc.Tracks, tr)
+	b := tr.AppendBar(4, 4)
+	b.AddBeat(score.Quarter, score.Note{String: 6, Fret: 5, Tech: score.TechDead})
+	b.AddBeat(score.Quarter, score.Note{String: 6, Fret: 0})
+	b.AddBeat(score.Half, score.Note{String: 5, Fret: 0})
+	if err := sc.Validate(); err != nil {
+		t.Fatalf("fixture score does not validate: %v", err)
+	}
+	return sc
+}
+
+// TestDeadNoteWaitReleasedByStrum is the P3 regression driven through the
+// real -listen wiring, which is where it actually bit: a wait point on a
+// dead note can never be satisfied by a detection, because a muted string
+// has no pitch to detect. Before the fix the strum callback fed only the
+// scorer, so playback halted at the first `x` in a piece and never
+// resumed no matter what the player did.
+func TestDeadNoteWaitReleasedByStrum(t *testing.T) {
+	sc := deadNoteWaitScore(t)
+	eng := newEngine(sc, engine.Options{})
+	pcfg := practice.Config{SampleRate: sampleRate, Track: 0}
+	scorer := practice.NewScorer(pcfg)
+	gate := practice.NewWaitGate(pcfg)
+	eng.SetEventTap(scorer.ExpectNote)
+	sink := &resultSink{}
+	w := newLiveWiring(eng, sink, scorer, gate, pcfg)
+
+	eng.SetWaitMode(true)
+	eng.Play()
+	renderUntilWait(t, eng, 1)
+
+	evs, _, ok := eng.WaitingOn()
+	if !ok || len(evs) != 1 || evs[0].Tech != score.TechDead {
+		t.Fatalf("expected to be halted on the dead note, got %+v (waiting=%v)", evs, ok)
+	}
+
+	// Arm the gate the way a live batch would.
+	consumed := int64(sampleRate)
+	w.onNotes(nil, pitch.Note{}, false, consumed)
+	if !eng.Waiting() {
+		t.Fatal("the wait released with no player input at all")
+	}
+
+	// The player strikes the muted string: an attack, no pitch.
+	w.onStrums([]pitch.Strum{{Frame: consumed}})
+	w.onNotes(nil, pitch.Note{}, false, consumed+4096)
+
+	if eng.Waiting() {
+		t.Fatal("a strum did not release the dead-note wait point — playback is stuck forever")
+	}
+	// And it must be credited, not left to age into a false miss.
+	for _, r := range sink.results {
+		if r.Verdict == practice.VerdictMiss {
+			t.Errorf("the confirmed dead note scored a miss: %+v", r)
+		}
+	}
+}
+
+// TestDeadNoteWaitStrumInTheArmingBatch: OnStrums runs before OnNotes, so
+// a player who anticipates the wait point by a hair strums while the gate
+// is still unarmed. That attack must not be dropped — otherwise they have
+// to strike a muted note twice with no indication why.
+func TestDeadNoteWaitStrumInTheArmingBatch(t *testing.T) {
+	sc := deadNoteWaitScore(t)
+	eng := newEngine(sc, engine.Options{})
+	pcfg := practice.Config{SampleRate: sampleRate, Track: 0}
+	scorer := practice.NewScorer(pcfg)
+	gate := practice.NewWaitGate(pcfg)
+	eng.SetEventTap(scorer.ExpectNote)
+	w := newLiveWiring(eng, &resultSink{}, scorer, gate, pcfg)
+
+	eng.SetWaitMode(true)
+	eng.Play()
+	renderUntilWait(t, eng, 1)
+
+	// Strum arrives first, in the same batch that will arm the gate.
+	consumed := int64(sampleRate)
+	w.onStrums([]pitch.Strum{{Frame: consumed - 100}})
+	w.onNotes(nil, pitch.Note{}, false, consumed)
+
+	if eng.Waiting() {
+		t.Fatal("a strum in the arming batch was dropped; the anticipating player's attack was lost")
+	}
+}
+
+// TestStaleGateCannotReleaseTheNextWait is the regression for the defect
+// the fix-verification pass found in the P3 wiring itself.
+//
+// The wait gate stays satisfied from the moment it is filled until
+// something re-arms it, and only onNotes arms. When onStrums was first
+// given the gate it consulted nothing else, so every strum AFTER a
+// confirmation found a satisfied gate and released whatever wait came
+// next: the player strummed once and the piece ran on through wait points
+// they never answered. That is worse than the halt the strum path was
+// added to cure — wait mode silently stopped waiting.
+func TestStaleGateCannotReleaseTheNextWait(t *testing.T) {
+	sc := waitFixtureScore(t) // three pitched notes; no dead notes at all
+	eng := newEngine(sc, engine.Options{})
+	eng.SetWaitMode(true)
+
+	pcfg := practice.Config{SampleRate: sampleRate, Track: 0}
+	scorer := practice.NewScorer(pcfg)
+	gate := practice.NewWaitGate(pcfg)
+	eng.SetEventTap(scorer.ExpectNote)
+	w := newLiveWiring(eng, &resultSink{}, scorer, gate, pcfg)
+
+	eng.Play()
+	renderUntilWait(t, eng, 1)
+
+	// Wait 1 released honestly, by a fresh E2 attack.
+	consumed := int64(sampleRate)
+	w.onNotes(nil, pitch.Note{}, false, consumed) // arm
+	fresh := pitch.Note{Start: consumed - 1000, End: consumed + 400, Key: 40, Cents: 3, Clarity: 0.9}
+	w.onNotes([]pitch.Note{fresh}, pitch.Note{}, false, consumed+480)
+	if eng.Waiting() {
+		t.Fatal("the fresh attack did not confirm wait 1")
+	}
+
+	renderUntilWait(t, eng, 2) // wait 2 engages: the second E2
+
+	// The player has played nothing new. A bare onset — a chair creak, a
+	// hand landing on the strings — arrives before onNotes re-arms
+	// (OnStrums runs first within a batch, per live.Config).
+	w.onStrums([]pitch.Strum{{Frame: consumed + 20000}})
+
+	if !eng.Waiting() {
+		t.Fatal("a bare onset released wait 2 through the previous wait's satisfied gate")
+	}
+}
+
+// TestStrumsAreInertWhileNothingIsWaiting: with wait mode off entirely,
+// strums must still reach the scorer for chord verification but must
+// never reach the gate — otherwise every strum re-records WaitConfirmed
+// pre-matches for a wait that is long gone.
+func TestStrumsAreInertWhileNothingIsWaiting(t *testing.T) {
+	sc := waitFixtureScore(t)
+	eng := newEngine(sc, engine.Options{})
+	eng.SetWaitMode(true)
+
+	pcfg := practice.Config{SampleRate: sampleRate, Track: 0}
+	scorer := practice.NewScorer(pcfg)
+	gate := practice.NewWaitGate(pcfg)
+	eng.SetEventTap(scorer.ExpectNote)
+	w := newLiveWiring(eng, &resultSink{}, scorer, gate, pcfg)
+
+	eng.Play()
+	renderUntilWait(t, eng, 1)
+	consumed := int64(sampleRate)
+	w.onNotes(nil, pitch.Note{}, false, consumed)
+	fresh := pitch.Note{Start: consumed - 1000, End: consumed + 400, Key: 40, Cents: 3, Clarity: 0.9}
+	w.onNotes([]pitch.Note{fresh}, pitch.Note{}, false, consumed+480)
+
+	// Wait mode off: nothing is waiting and nothing can be.
+	eng.SetWaitMode(false)
+	l := make([]float32, 480)
+	r := make([]float32, 480)
+	for i := 0; i < 50; i++ {
+		eng.RenderFrames(l, r)
+	}
+	if eng.Waiting() {
+		t.Fatal("the engine is still waiting after SetWaitMode(false)")
+	}
+	if w.armedLive() {
+		t.Error("the wiring believes it is armed for a live wait when none exists")
+	}
+	// The strum must still be scored, just not routed to the gate.
+	w.onStrums([]pitch.Strum{{Frame: consumed + 50000}})
+}
+
+// TestDeadNoteWaitStrumBeforeTheWaitEngages: a player anticipating the
+// wait point strums while the engine has not reached it yet, so the batch
+// carrying that strum takes the "not waiting" path. The attack must
+// survive to the batch that arms the gate — it is inside the arming grace
+// by definition, and dropping it makes the player strike a muted string
+// twice with no indication why.
+func TestDeadNoteWaitStrumBeforeTheWaitEngages(t *testing.T) {
+	sc := deadNoteWaitScore(t)
+	eng := newEngine(sc, engine.Options{})
+	pcfg := practice.Config{SampleRate: sampleRate, Track: 0}
+	scorer := practice.NewScorer(pcfg)
+	gate := practice.NewWaitGate(pcfg)
+	eng.SetEventTap(scorer.ExpectNote)
+	w := newLiveWiring(eng, &resultSink{}, scorer, gate, pcfg)
+
+	eng.SetWaitMode(true)
+	eng.Play()
+
+	// A batch BEFORE the engine has reached the wait point: the strum
+	// arrives, and onNotes takes its not-waiting early return.
+	consumed := int64(sampleRate)
+	w.onStrums([]pitch.Strum{{Frame: consumed - 1000}})
+	w.onNotes(nil, pitch.Note{}, false, consumed)
+
+	// Now the engine reaches the dead note and the gate arms.
+	renderUntilWait(t, eng, 1)
+	w.onNotes(nil, pitch.Note{}, false, consumed+2000)
+
+	if eng.Waiting() {
+		t.Fatal("the anticipating strum was dropped by the not-waiting batch; the dead-note wait is still halted")
+	}
+}
+
+// TestStrumBufferIsBounded: strums are held only until they are too old to
+// confirm anything, so a long noodling session cannot grow the buffer.
+func TestStrumBufferIsBounded(t *testing.T) {
+	sc := deadNoteWaitScore(t)
+	eng := newEngine(sc, engine.Options{})
+	pcfg := practice.Config{SampleRate: sampleRate, Track: 0}
+	scorer := practice.NewScorer(pcfg)
+	w := newLiveWiring(eng, &resultSink{}, scorer, practice.NewWaitGate(pcfg), pcfg)
+
+	for i := int64(0); i < 500; i++ {
+		consumed := i * 4096
+		w.onStrums([]pitch.Strum{{Frame: consumed}})
+		w.onNotes(nil, pitch.Note{}, false, consumed)
+	}
+	if n := len(w.strumBuf); n > maxRecentStrums {
+		t.Errorf("strum buffer holds %d after 500 batches, want at most %d", n, maxRecentStrums)
 	}
 }

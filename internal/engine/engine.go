@@ -110,6 +110,8 @@ type Engine struct {
 	waiting      bool
 	waitReleased bool
 	waitTick     int64 // tick of the wait point; valid while waiting
+	waitTrack    int   // track waits engage on; -1 = every user track
+	waitRelTrack int   // track the CURRENT release is owed to; -1 = none
 
 	// Scheduling state.
 	nextEvent int          // index into events of the next unfired event
@@ -195,6 +197,8 @@ func New(sc *score.Score, opts Options) *Engine {
 		metronome:        opts.Metronome,
 		scale:            1.0,
 		backGain:         1.0,
+		waitTrack:        -1,
+		waitRelTrack:     -1,
 	}
 	e.voices = make([]synth.Voice, len(sc.Tracks))
 	e.muted = make([]bool, len(sc.Tracks))

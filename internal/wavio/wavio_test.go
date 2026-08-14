@@ -180,6 +180,66 @@ func TestClamping(t *testing.T) {
 	}
 }
 
+// TestQuantizeNonFinite pins the total float64 -> int16 mapping.
+// Regression: saturation ran on v := int(math.Round(x)), and a
+// float-to-int conversion of a value that does not fit is undefined in Go
+// — on amd64 it yields MinInt64 for NaN and for +Inf alike. So the
+// `v > MaxInt16` test never fired and `v < MinInt16` did: positive
+// over-range input saturated to the NEGATIVE rail and NaN became -32768
+// instead of silence. This is the last step before a sample reaches a
+// speaker, so every input must have a defined answer.
+func TestQuantizeNonFinite(t *testing.T) {
+	tests := []struct {
+		name string
+		in   float32
+		want int16
+	}{
+		{"NaN is silence", float32(math.NaN()), 0},
+		{"+Inf saturates positive", float32(math.Inf(1)), math.MaxInt16},
+		{"-Inf saturates negative", float32(math.Inf(-1)), math.MinInt16},
+		{"huge positive saturates positive", 1e30, math.MaxInt16},
+		{"huge negative saturates negative", -1e30, math.MinInt16},
+		{"full scale positive", 1, math.MaxInt16},
+		{"full scale negative", -1, math.MinInt16},
+		{"zero", 0, 0},
+		{"negative zero", float32(math.Copysign(0, -1)), 0},
+		{"half scale", 0.5, 16384},
+		{"rounds half away from zero", 1.5 / 32768, 2},
+		{"rounds half away from zero, negative", -1.5 / 32768, -2},
+	}
+	for _, tt := range tests {
+		if got := quantize(tt.in); got != tt.want {
+			t.Errorf("%s: quantize(%v) = %d, want %d", tt.name, tt.in, got, tt.want)
+		}
+	}
+}
+
+// TestWriteNonFiniteSamples is the same regression at file level: a mix
+// that went non-finite upstream (a NaN backing sample, an infinite gain)
+// used to be written as -32768 for BOTH the NaN and the +Inf sample — the
+// -1.0 rail at maximum amplitude, i.e. full-scale noise in the user's
+// headphones. Finite neighbours must be unaffected.
+func TestWriteNonFiniteSamples(t *testing.T) {
+	in := []float32{float32(math.NaN()), float32(math.Inf(1)), float32(math.Inf(-1)), 0.5, -0.5}
+	var buf bytes.Buffer
+	if err := WriteMono(&buf, 48000, in); err != nil {
+		t.Fatalf("WriteMono: %v", err)
+	}
+	_, l, _, err := Read(&buf)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	want := []float32{0, 32767.0 / 32768, -1, 0.5, -0.5}
+	if len(l) != len(want) {
+		t.Fatalf("got %d samples, want %d", len(l), len(want))
+	}
+	for i, w := range want {
+		if l[i] != w {
+			t.Errorf("sample %d = %v, want %v", i, l[i], w)
+		}
+	}
+}
+
 func TestWriteArgErrors(t *testing.T) {
 	var buf bytes.Buffer
 	if err := Write(&buf, 48000, make([]float32, 3), make([]float32, 2)); err == nil {

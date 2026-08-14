@@ -1,6 +1,8 @@
 package audiofile
 
 import (
+	"bytes"
+	"encoding/binary"
 	"math"
 	"os"
 	"path/filepath"
@@ -497,5 +499,124 @@ func TestImplausibleSampleRateRejected(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("8 kHz load produced warnings %v, want a resample note", warnings)
+	}
+}
+
+// writeFloatWAV writes a mono 32-bit IEEE-float WAV by hand. wavio.Write
+// emits 16-bit PCM, which quantizes a bad sample away — float is the only
+// format that can carry NaN or ±Inf through a decode, which is exactly
+// why it is the format worth testing.
+func writeFloatWAV(t *testing.T, rate int, samples []float32) string {
+	t.Helper()
+	var buf bytes.Buffer
+	dataLen := 4 * len(samples)
+	buf.WriteString("RIFF")
+	binary.Write(&buf, binary.LittleEndian, uint32(36+dataLen))
+	buf.WriteString("WAVEfmt ")
+	binary.Write(&buf, binary.LittleEndian, uint32(16))
+	binary.Write(&buf, binary.LittleEndian, uint16(3)) // IEEE float
+	binary.Write(&buf, binary.LittleEndian, uint16(1)) // mono
+	binary.Write(&buf, binary.LittleEndian, uint32(rate))
+	binary.Write(&buf, binary.LittleEndian, uint32(rate*4))
+	binary.Write(&buf, binary.LittleEndian, uint16(4))
+	binary.Write(&buf, binary.LittleEndian, uint16(32))
+	buf.WriteString("data")
+	binary.Write(&buf, binary.LittleEndian, uint32(dataLen))
+	for _, s := range samples {
+		binary.Write(&buf, binary.LittleEndian, math.Float32bits(s))
+	}
+	path := filepath.Join(t.TempDir(), "float.wav")
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestLoadSilencesNonFiniteSamples: a 32-bit-float WAV can carry NaN and
+// ±Inf, and no decoder rejects them — they are valid bit patterns, not a
+// parse error. Left in, they turn the entire mix non-finite and reach the
+// device as a full-scale rail, which is seconds of maximum-amplitude noise
+// in the player's headphones. Load must silence them and say so.
+func TestLoadSilencesNonFiniteSamples(t *testing.T) {
+	samples := []float32{
+		0.5,
+		float32(math.NaN()),
+		-0.25,
+		float32(math.Inf(1)),
+		float32(math.Inf(-1)),
+		0.125,
+	}
+	path := writeFloatWAV(t, SampleRate, samples)
+	left, right, warnings, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(left) != len(samples) {
+		t.Fatalf("decoded %d samples, want %d", len(left), len(samples))
+	}
+	for i := range left {
+		for _, ch := range [][]float32{left, right} {
+			if f := float64(ch[i]); math.IsNaN(f) || math.IsInf(f, 0) {
+				t.Errorf("sample %d survived as %v, want it silenced", i, ch[i])
+			}
+		}
+	}
+	want := []float32{0.5, 0, -0.25, 0, 0, 0.125}
+	for i, w := range want {
+		if left[i] != w {
+			t.Errorf("left[%d] = %v, want %v (good samples must be untouched)", i, left[i], w)
+		}
+	}
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(w, "finite") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("warnings = %v, want one naming the silenced samples — a silent repair is the thing this project does not do", warnings)
+	}
+}
+
+// TestResampleCannotManufactureNonFiniteSamples is the fix-verification
+// regression for the non-finite scrub. Silencing NaN and Inf on load is
+// not enough on its own: resampleLinear subtracts neighbouring samples,
+// and a 32-bit-float WAV may legally carry values near float32's 3.4e38
+// ceiling, whose difference overflows to +Inf. An entirely finite file
+// then arrived at the mixer as all-NaN — the exact failure the scrub was
+// added to prevent, manufactured just after it ran.
+func TestResampleCannotManufactureNonFiniteSamples(t *testing.T) {
+	// Alternating extremes at a rate that forces resampling.
+	samples := make([]float32, 64)
+	for i := range samples {
+		if i%2 == 0 {
+			samples[i] = 3e38
+		} else {
+			samples[i] = -3e38
+		}
+	}
+	path := writeFloatWAV(t, 44100, samples)
+	left, right, warnings, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(left) == 0 {
+		t.Fatal("decoded nothing")
+	}
+	for i := range left {
+		for name, ch := range map[string][]float32{"left": left, "right": right} {
+			if f := float64(ch[i]); math.IsNaN(f) || math.IsInf(f, 0) {
+				t.Fatalf("%s[%d] = %v after resampling an all-finite file", name, i, ch[i])
+			}
+		}
+	}
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(w, "clamped") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("warnings = %v, want one naming the clamped samples", warnings)
 	}
 }

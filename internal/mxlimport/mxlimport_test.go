@@ -177,6 +177,20 @@ func wrap(measures ...string) []byte {
 	return []byte(b.String())
 }
 
+// wrapMeasures builds the same minimal document from COMPLETE <measure>
+// elements, for fixtures that need measure attributes (implicit="yes") or
+// barlines.
+func wrapMeasures(measures ...string) []byte {
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?><score-partwise version="4.0">`)
+	b.WriteString(`<part-list><score-part id="P1"><part-name>T</part-name></score-part></part-list><part id="P1">`)
+	for _, m := range measures {
+		b.WriteString(m)
+	}
+	b.WriteString(`</part></score-partwise>`)
+	return []byte(b.String())
+}
+
 const attrs44div480 = `<attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>`
 
 // note builds a <note> element. str/fret < 0 omits <technical>.

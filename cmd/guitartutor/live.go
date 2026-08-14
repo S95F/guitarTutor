@@ -153,59 +153,67 @@ func deviceLabel(devs []audio.DeviceInfo, id string) string {
 // for display while this path passed the stale ID straight to the device
 // open: the two disagreed about which device would be used, and the one
 // that was wrong was the one that opened the stream (audit C3).
-func fillDeviceID(devs []audio.DeviceInfo, kind, query, remembered string) (id, note string, err error) {
+//
+// fallback distinguishes that stand-in from a device the user actually
+// chose, because a caller that PERSISTS the result must not write it: the
+// saved preference is the whole record of which interface the player
+// owns, and replacing it with whatever was plugged in the day their
+// interface was not would lose it silently (bug review C5).
+func fillDeviceID(devs []audio.DeviceInfo, kind, query, remembered string) (id, note string, fallback bool, err error) {
 	if query == "" && remembered != "" {
 		for _, d := range devs {
 			if d.ID == remembered {
-				return remembered, "", nil
+				return remembered, "", false, nil
 			}
 		}
 		id, err = resolveDevice(devs, kind, "")
 		if err != nil {
-			return "", "", err
+			return "", "", false, err
 		}
-		return id, fmt.Sprintf("the saved %s device is not connected; using %s", kind, deviceLabel(devs, id)), nil
+		return id, fmt.Sprintf("the saved %s device is not connected; using %s", kind, deviceLabel(devs, id)), true, nil
 	}
 	id, err = resolveDevice(devs, kind, query)
-	return id, "", err
+	return id, "", false, err
 }
 
 // fillDeviceIDs applies fillDeviceID to both endpoints. Both the listen and
 // calibrate paths resolve through here, so an offset is stored and looked
 // up under the same key. Pure — the seam the tests drive with fake device
 // lists and configs. notes carries any silent-fallback explanations for
-// the caller to surface.
-func fillDeviceIDs(capture, playback []audio.DeviceInfo, cfg appconfig.Config, inQ, outQ string) (inID, outID string, notes []string, err error) {
+// the caller to surface, and inFell/outFell mark the endpoints that are
+// standing in for a device that is not connected (see fillDeviceID).
+func fillDeviceIDs(capture, playback []audio.DeviceInfo, cfg appconfig.Config, inQ, outQ string) (inID, outID string, notes []string, inFell, outFell bool, err error) {
 	var note string
-	if inID, note, err = fillDeviceID(capture, "capture", inQ, cfg.CaptureDeviceID); err != nil {
-		return "", "", nil, err
+	if inID, note, inFell, err = fillDeviceID(capture, "capture", inQ, cfg.CaptureDeviceID); err != nil {
+		return "", "", nil, false, false, err
 	}
 	if note != "" {
 		notes = append(notes, note)
 	}
-	if outID, note, err = fillDeviceID(playback, "playback", outQ, cfg.PlaybackDeviceID); err != nil {
-		return "", "", nil, err
+	if outID, note, outFell, err = fillDeviceID(playback, "playback", outQ, cfg.PlaybackDeviceID); err != nil {
+		return "", "", nil, false, false, err
 	}
 	if note != "" {
 		notes = append(notes, note)
 	}
-	return inID, outID, notes, nil
+	return inID, outID, notes, inFell, outFell, nil
 }
 
 // resolveDevices enumerates the backend's devices and resolves the -in/-out
 // flag values with the config's remembered devices filling the gaps (flags
-// win). The device lists are returned for labeling, and notes carries any
-// fallback the caller must tell the user about.
-func resolveDevices(b audio.Backend, cfg appconfig.Config, inQ, outQ string) (inID, outID string, capture, playback []audio.DeviceInfo, notes []string, err error) {
+// win). The device lists are returned for labeling, notes carries any
+// fallback the caller must tell the user about, and inFell/outFell mark
+// the endpoints a caller must not persist as a preference.
+func resolveDevices(b audio.Backend, cfg appconfig.Config, inQ, outQ string) (inID, outID string, capture, playback []audio.DeviceInfo, notes []string, inFell, outFell bool, err error) {
 	capture, playback, err = b.Devices()
 	if err != nil {
-		return "", "", nil, nil, nil, fmt.Errorf("enumerating devices: %w", err)
+		return "", "", nil, nil, nil, false, false, fmt.Errorf("enumerating devices: %w", err)
 	}
-	inID, outID, notes, err = fillDeviceIDs(capture, playback, cfg, inQ, outQ)
+	inID, outID, notes, inFell, outFell, err = fillDeviceIDs(capture, playback, cfg, inQ, outQ)
 	if err != nil {
-		return "", "", nil, nil, nil, err
+		return "", "", nil, nil, nil, false, false, err
 	}
-	return inID, outID, capture, playback, notes, nil
+	return inID, outID, capture, playback, notes, inFell, outFell, nil
 }
 
 // calibratedOffset looks up the stored latency offset for a device pair.
@@ -238,6 +246,11 @@ const (
 // the tab ~4 s after the fact.
 const advanceLagFrames = 4 * sampleRate
 
+// maxRecentStrums bounds the buffer of attacks held for a gate that has
+// not armed yet. Strums are pruned by age every batch, so this is only a
+// backstop against a pathological burst of onsets.
+const maxRecentStrums = 32
+
 // waitArmGraceFrames is how far before the gate arms a confirming attack
 // may have started (~150 ms): a player anticipating the wait point by a
 // hair still confirms, but a note ringing from before the wait cannot
@@ -251,73 +264,199 @@ type listenUI interface {
 	OfferTuner(pitch.Note, bool)
 }
 
-// newOnNotes builds the analysis callback: detections feed the scorer and
-// tuner, and while the engine waits the gate decides when to release.
+// liveWiring is the analysis state of one live session: detections and
+// strums feed the scorer and tuner, and while the engine waits the gate
+// decides when to release.
 //
-// The wait is tracked by Engine.WaitGeneration, which increments per
-// engaged wait: unlike the wait tick it distinguishes a seek's re-wait or
-// a loop wrap at the same tick, with no confirm-time reset to get wrong.
+// The two callbacks share one struct because they answer the same wait
+// point by different evidence. A pitched wait point is released by a
+// detection reaching its key; a wait point on a DEAD (muted) note can
+// only be released by a strum, because a damped string produces no
+// trackable f0 — leaving strums out of the gate halted such a piece
+// forever (bug review P3). Both run on the single analysis goroutine
+// (live.Config: OnStrums then OnNotes within a batch), so the state below
+// needs no lock, only a common owner.
+//
+// The wait is tracked by the generation WaitingOn returns with its
+// events: it increments per engaged wait, so unlike the wait tick it
+// distinguishes a seek's re-wait or a loop wrap at the same tick, with no
+// confirm-time reset to get wrong. Both come from the one call because
+// the render thread can end one wait and begin the next between two
+// calls, and arming the previous wait's events under the new generation
+// deadlocks the gate: it can never be satisfied and never re-arms (bug
+// review W1).
+//
 // The gate arms with minStart = consumed - waitArmGraceFrames so only a
 // fresh attack confirms. On satisfaction the confirming detections are
 // recorded with Scorer.WaitConfirmed BEFORE ConfirmWait, so the released
 // events get a pitch-only verdict instead of being timing-judged against
 // the machinery's own latency.
-func newOnNotes(eng *engine.Engine, app listenUI, scorer *practice.Scorer, gate *practice.WaitGate) func(closed []pitch.Note, current pitch.Note, sounding bool, consumed int64) {
-	// State below is owned by the analysis goroutine (OnNotes is
-	// single-threaded).
-	var (
-		armedGen    uint64
-		armedMin    int64
-		armedEvents []score.NoteEvent
-		offerBuf    = make([]pitch.Note, 0, 16)
-		confirmBuf  = make([]pitch.Note, 0, 16)
-		results     []practice.NoteResult
-		lastDiscont = eng.DiscontinuityFrame()
-	)
-	return func(closed []pitch.Note, current pitch.Note, sounding bool, consumed int64) {
-		// Before Advance, so a seek or loop edit abandons what it
-		// truncated instead of letting the deadline score it a Miss.
-		if d := eng.DiscontinuityFrame(); d != lastDiscont {
-			lastDiscont = d
-			scorer.AbandonBefore(d)
-		}
-		scorer.Detected(closed)
-		scorer.Advance(consumed - advanceLagFrames)
-		results = scorer.Results(results[:0])
-		if len(results) > 0 {
-			app.OfferResults(results)
-		}
-		app.OfferTuner(current, sounding)
+type liveWiring struct {
+	eng    *engine.Engine
+	app    listenUI
+	scorer *practice.Scorer
+	gate   *practice.WaitGate
+	pcfg   practice.Config
 
-		evs, waiting := eng.WaitingOn()
-		if !waiting {
-			return
+	armedGen    uint64
+	armedMin    int64
+	armedEvents []score.NoteEvent
+	offerBuf    []pitch.Note
+	confirmBuf  []pitch.Note
+	// strumBuf holds this batch's strums. OnStrums runs first, so a
+	// strum in the very batch that arms the gate would otherwise be
+	// offered to an unarmed gate and never seen again — and a player
+	// who anticipates the wait point by a hair would have to strike a
+	// muted note twice. They are re-offered once, immediately after
+	// arming.
+	strumBuf    []pitch.Strum
+	results     []practice.NoteResult
+	lastDiscont int64
+}
+
+func newLiveWiring(eng *engine.Engine, app listenUI, scorer *practice.Scorer, gate *practice.WaitGate, pcfg practice.Config) *liveWiring {
+	return &liveWiring{
+		eng:         eng,
+		app:         app,
+		scorer:      scorer,
+		gate:        gate,
+		pcfg:        pcfg,
+		offerBuf:    make([]pitch.Note, 0, 16),
+		confirmBuf:  make([]pitch.Note, 0, 16),
+		strumBuf:    make([]pitch.Strum, 0, 8),
+		lastDiscont: eng.DiscontinuityFrame(),
+	}
+}
+
+// onStrums feeds chord verification and palm-mute credit, and offers each
+// fresh strum to the gate so a dead-note wait point can be released.
+func (w *liveWiring) onStrums(sts []pitch.Strum) {
+	for _, st := range sts {
+		// Chord verification wants every strum, wait or no wait.
+		w.scorer.DetectedStrum(st)
+		if w.armedLive() && w.gate.OfferStrum(st) {
+			w.confirmWait()
+			continue
 		}
-		if gen := eng.WaitGeneration(); gen != armedGen {
-			armedGen = gen
-			armedMin = consumed - waitArmGraceFrames
-			armedEvents = append(armedEvents[:0], evs...)
-			confirmBuf = confirmBuf[:0]
-			gate.Arm(evs, armedMin)
-		}
-		offerBuf = append(offerBuf[:0], closed...)
-		if sounding {
-			offerBuf = append(offerBuf, current)
-		}
-		// Collect every fresh attack heard during this wait: a chord
-		// confirms across batches, and WaitConfirmed wants all of the
-		// confirming detections, not just the batch that completed
-		// the set.
-		for _, n := range offerBuf {
-			if n.Start >= armedMin {
-				confirmBuf = mergeNote(confirmBuf, n)
-			}
-		}
-		if len(offerBuf) > 0 && gate.Offer(offerBuf) {
-			scorer.WaitConfirmed(armedEvents, confirmBuf)
-			eng.ConfirmWait()
+		// Not usable yet — remember it in case the gate arms shortly.
+		// The slice the detector hands us is only valid for this call.
+		w.strumBuf = append(w.strumBuf, st)
+	}
+	if n := len(w.strumBuf); n > maxRecentStrums {
+		w.strumBuf = append(w.strumBuf[:0], w.strumBuf[n-maxRecentStrums:]...)
+	}
+}
+
+// armedLive reports whether the gate is armed for the wait the engine is
+// halted on right now.
+//
+// The gate stays satisfied from the moment it is filled until something
+// re-arms it, and only onNotes arms. Without this check every strum after
+// a confirmation found a satisfied gate and released whatever wait came
+// next — the player would strum once and the piece would run on through
+// wait points they never answered, which is worse than the halt this
+// callback was added to fix. onNotes needs no equivalent guard: it
+// returns early when the engine is not waiting, and ConfirmWait clears
+// that flag under the engine's own lock.
+//
+// One WaitingOn call rather than Waiting() plus WaitGeneration(), for the
+// same reason the arming path uses one: read separately they can describe
+// different waits (W1).
+func (w *liveWiring) armedLive() bool {
+	if len(w.armedEvents) == 0 {
+		return false
+	}
+	_, gen, waiting := w.eng.WaitingOn()
+	return waiting && gen == w.armedGen
+}
+
+// onNotes is the note half of the analysis callback.
+func (w *liveWiring) onNotes(closed []pitch.Note, current pitch.Note, sounding bool, consumed int64) {
+	// Before Advance, so a seek or loop edit abandons what it
+	// truncated instead of letting the deadline score it a Miss.
+	if d := w.eng.DiscontinuityFrame(); d != w.lastDiscont {
+		w.lastDiscont = d
+		w.scorer.AbandonBefore(d)
+	}
+	w.scorer.Detected(closed)
+	w.scorer.Advance(consumed - advanceLagFrames)
+	w.results = w.scorer.Results(w.results[:0])
+	if len(w.results) > 0 {
+		w.app.OfferResults(w.results)
+	}
+	w.app.OfferTuner(current, sounding)
+
+	// Forget strums too old to confirm anything. The arming floor only
+	// ever moves forward, so a strum below this batch's floor is already
+	// past every future arm — which bounds the buffer to the handful of
+	// attacks inside one grace window.
+	floor := consumed - waitArmGraceFrames
+	keep := w.strumBuf[:0]
+	for _, st := range w.strumBuf {
+		if st.Frame >= floor {
+			keep = append(keep, st)
 		}
 	}
+	w.strumBuf = keep
+
+	evs, gen, waiting := w.eng.WaitingOn()
+	if !waiting {
+		return
+	}
+	if gen != w.armedGen {
+		w.armedGen = gen
+		w.armedMin = consumed - waitArmGraceFrames
+		w.armedEvents = append(w.armedEvents[:0], evs...)
+		w.confirmBuf = w.confirmBuf[:0]
+		w.gate.Arm(evs, w.armedMin)
+		// Re-offer the strums that arrived before the arm (see strumBuf).
+		for _, st := range w.strumBuf {
+			if st.Frame >= w.armedMin && w.gate.OfferStrum(st) {
+				w.confirmWait()
+				return
+			}
+		}
+	}
+	w.offerBuf = append(w.offerBuf[:0], closed...)
+	if sounding {
+		w.offerBuf = append(w.offerBuf, current)
+	}
+	// Collect every fresh attack heard during this wait: a chord
+	// confirms across batches, and WaitConfirmed wants all of the
+	// confirming detections, not just the batch that completed
+	// the set.
+	for _, n := range w.offerBuf {
+		if n.Start >= w.armedMin || w.slideEvidence(n) {
+			w.confirmBuf = mergeNote(w.confirmBuf, n)
+		}
+	}
+	if len(w.offerBuf) > 0 && w.gate.Offer(w.offerBuf) {
+		w.confirmWait()
+	}
+}
+
+// slideEvidence reports whether a detection older than the arming floor
+// is nevertheless what proves an armed slide destination was played. A
+// legato slide sounds on a string struck a beat earlier, so it never
+// passes the freshness test every other note has to.
+func (w *liveWiring) slideEvidence(n pitch.Note) bool {
+	for i := range w.armedEvents {
+		if practice.ConfirmsSlide(n, w.armedEvents[i], w.pcfg) {
+			return true
+		}
+	}
+	return false
+}
+
+// confirmWait releases the engine's wait, recording the confirming
+// detections first so the released events get a pitch-only verdict.
+func (w *liveWiring) confirmWait() {
+	w.scorer.WaitConfirmed(w.armedEvents, w.confirmBuf)
+	w.eng.ConfirmWait()
+	// Everything buffered has now been used or superseded. Dropping it
+	// stops one attack from also releasing the NEXT wait point, the way
+	// the gate's own attack identity stops a ringing note doing it.
+	w.strumBuf = w.strumBuf[:0]
 }
 
 // mergeNote appends n to buf, replacing an earlier snapshot of the same
@@ -350,12 +489,12 @@ func mergeNote(buf []pitch.Note, n pitch.Note) []pitch.Note {
 // particular the event tap is rolled back, so a caller that falls back to
 // plain playback is not left with an engine feeding expectations into a
 // scorer nobody drains (see the rollback below).
-func setupListen(eng *engine.Engine, app *ui.App, track int, inQ, outQ string, cfg appconfig.Config) (session *live.Session, err error) {
+func setupListen(eng *engine.Engine, app *ui.App, inQ, outQ string, cfg appconfig.Config) (session *live.Session, err error) {
 	b, err := liveBackend()
 	if err != nil {
 		return nil, err
 	}
-	inID, outID, _, _, notes, err := resolveDevices(b, cfg, inQ, outQ)
+	inID, outID, _, _, notes, _, _, err := resolveDevices(b, cfg, inQ, outQ)
 	if err != nil {
 		return nil, err
 	}
@@ -368,13 +507,17 @@ func setupListen(eng *engine.Engine, app *ui.App, track int, inQ, outQ string, c
 		fmt.Fprintln(os.Stderr, "Scoring works, but timing verdicts are skewed by the unmeasured round trip.")
 	}
 
+	// The scored track comes from the view rather than a parameter of its
+	// own: it must be the track being drawn and waited on, and a second
+	// way to say so is a second way to say something different (W3).
 	pcfg := practice.Config{
 		SampleRate:          sampleRate,
-		Track:               track,
+		Track:               app.Track(),
 		LatencyOffsetFrames: offset,
 	}
 	scorer := practice.NewScorer(pcfg)
 	gate := practice.NewWaitGate(pcfg)
+	wiring := newLiveWiring(eng, app, scorer, gate, pcfg)
 	// From here on the engine feeds this scorer. If the wiring below
 	// fails, the session that would have drained the scorer never exists,
 	// and an engine left tapped keeps appending expectations to a list
@@ -397,16 +540,13 @@ func setupListen(eng *engine.Engine, app *ui.App, track int, inQ, outQ string, c
 			CaptureDevice:  inID,
 			PlaybackDevice: outID,
 		},
-		OnNotes: newOnNotes(eng, app, scorer, gate),
+		OnNotes: wiring.onNotes,
 		// Chord verification and palm-mute credit (Phase 4) both hang
 		// off strums; supplying this callback is what enables them.
 		// Without it the session silently scores like Phase 3: one hit
-		// and N-1 misses per strummed chord.
-		OnStrums: func(sts []pitch.Strum) {
-			for _, st := range sts {
-				scorer.DetectedStrum(st)
-			}
-		},
+		// and N-1 misses per strummed chord — and a wait point on a
+		// dead note never releases at all.
+		OnStrums: wiring.onStrums,
 	})
 	if err != nil {
 		return nil, err
@@ -525,6 +665,27 @@ func calibrationPass(ctx context.Context, b audio.Backend, inID, outID string, p
 	return off, conf, nil
 }
 
+// rememberDevices adopts a calibrated pair as the saved device
+// preference, skipping either endpoint that is only standing in for a
+// device that is not connected (see fillDeviceID).
+//
+// The measured OFFSET is always stored, under whichever pair was really
+// used — that measurement is true of those devices. The preference is
+// different: it is the whole record of which interface the player owns.
+// Calibrating with the interface unplugged measured the laptop speakers
+// and then adopted them, so reconnecting the interface no longer selected
+// it and the offset already measured for it was never looked up again.
+// The player's only clue was that timing verdicts had quietly gone wrong
+// (bug review C5).
+func rememberDevices(cfg *appconfig.Config, inID, outID string, inFell, outFell bool) {
+	if !inFell {
+		cfg.CaptureDeviceID = inID
+	}
+	if !outFell {
+		cfg.PlaybackDeviceID = outID
+	}
+}
+
 // runCalibrate measures the round-trip latency offset and stores it.
 func runCalibrate(args []string) error {
 	fs := flag.NewFlagSet("calibrate", flag.ExitOnError)
@@ -544,7 +705,7 @@ func runCalibrate(args []string) error {
 	}
 	// Same resolution as -listen (flags win, remembered devices fill the
 	// gaps), so the offset is stored under the key playback will look up.
-	inID, outID, capture, playback, notes, err := resolveDevices(b, cfg, *inQ, *outQ)
+	inID, outID, capture, playback, notes, inFell, outFell, err := resolveDevices(b, cfg, *inQ, *outQ)
 	if err != nil {
 		return err
 	}
@@ -566,10 +727,13 @@ func runCalibrate(args []string) error {
 		off, float64(off)/sampleRate*1000, conf)
 
 	cfg.SetOffset(inID, outID, off, conf)
-	cfg.CaptureDeviceID, cfg.PlaybackDeviceID = inID, outID
+	rememberDevices(&cfg, inID, outID, inFell, outFell)
 	if err := cfg.Save(); err != nil {
 		return fmt.Errorf("saving config: %w", err)
 	}
 	fmt.Println("saved — live scoring will use this offset for these devices.")
+	if inFell || outFell {
+		fmt.Println("your saved device preference was kept; reconnect it and calibrate again.")
+	}
 	return nil
 }

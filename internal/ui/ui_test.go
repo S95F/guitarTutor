@@ -879,3 +879,57 @@ func TestQuitAll(t *testing.T) {
 		t.Errorf("quit-all action called %d times, want 1", quits)
 	}
 }
+
+// TestNewNarrowsWaitModeToTheDisplayedTrack is the W2/W3 regression at the
+// wiring level. newAppTracks builds tracks that are all RoleUser (the
+// zero value, and what a hand-written duet .gtab produces). Left to the
+// engine's default, wait mode halts at ANY user track's note — including
+// notes this view never draws and the scorer is never told to expect, so
+// nothing can release the halt and playback stops for good. New must
+// point the engine at the track it is displaying.
+func TestNewNarrowsWaitModeToTheDisplayedTrack(t *testing.T) {
+	sc := &score.Score{
+		Tempos: score.TempoMap{{Tick: 0, USPerQuarter: 500000}},
+		Meters: score.MeterMap{{Tick: 0, Num: 4, Den: 4}},
+	}
+	// Track 0 plays on beat 1, track 1 on beat 2. Both are RoleUser.
+	first := &score.Track{Name: "lead", Tuning: score.StandardTuning}
+	second := &score.Track{Name: "harmony", Tuning: score.StandardTuning}
+	sc.Tracks = []*score.Track{first, second}
+	fb := first.AppendBar(4, 4)
+	fb.AddBeat(score.Quarter, score.Note{String: 6, Fret: 0})
+	fb.AddBeat(score.Quarter)
+	fb.AddBeat(score.Quarter)
+	fb.AddBeat(score.Quarter)
+	sb := second.AppendBar(4, 4)
+	sb.AddBeat(score.Quarter)
+	sb.AddBeat(score.Quarter, score.Note{String: 5, Fret: 0})
+	sb.AddBeat(score.Quarter)
+	sb.AddBeat(score.Quarter)
+	if err := sc.Validate(); err != nil {
+		t.Fatalf("fixture score does not validate: %v", err)
+	}
+
+	eng := engine.New(sc, engine.Options{Voices: synth.NewPluck})
+	New(eng, sc, 0) // displaying track 0
+	eng.SetWaitMode(true)
+	eng.Play()
+
+	l := make([]float32, 480)
+	r := make([]float32, 480)
+	for i := 0; i < 200 && !eng.Waiting(); i++ {
+		eng.RenderFrames(l, r)
+	}
+	if !eng.Waiting() {
+		t.Fatal("wait mode never engaged")
+	}
+	eng.ConfirmWait()
+
+	// Track 1's note (tick 960) must not halt a session practising track 0.
+	for i := 0; i < 400; i++ {
+		eng.RenderFrames(l, r)
+	}
+	if evs, _, ok := eng.WaitingOn(); ok {
+		t.Errorf("halted again at tick %d on track %d, want to play through track 1's note", evs[0].Start, evs[0].Track)
+	}
+}

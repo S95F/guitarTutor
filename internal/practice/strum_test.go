@@ -14,6 +14,7 @@ const (
 	pcE  = 4
 	pcF  = 5
 	pcG  = 7
+	pcA  = 9
 	pcAs = 10
 	pcB  = 11
 )
@@ -318,6 +319,82 @@ func TestScorerStrumPicksTheNearestChord(t *testing.T) {
 	for _, r := range rest {
 		if r.OutFrame != 24000 {
 			t.Errorf("unexpected leftover %+v", r)
+		}
+	}
+}
+
+// TestScorerStrumBelongsToTheChordItLandedOn is the P1 regression, and the
+// nastiest shape the old chooser could take: it picked the LARGEST group
+// sharing the strum's window regardless of how far away in time it sat.
+//
+// 16th-note chord stabs at 120 BPM are 6000 frames apart, comfortably
+// inside the 7200-frame window, so a five-note Am on the beat the player
+// actually strummed lost to a six-note C/G an entire 16th later. The strum
+// then finalized notes the player had not reached yet — judging them
+// against audio that was not theirs, two of them into hard Misses — while
+// the Am they DID play was left unmatched to age into five more. Proximity
+// has to decide.
+func TestScorerStrumBelongsToTheChordItLandedOn(t *testing.T) {
+	s := NewScorer(testConfig())
+	am := []int{45, 52, 57, 60, 64}         // A2 E3 A3 C4 E4 — five notes
+	cOverG := []int{43, 48, 52, 55, 60, 64} // G2 C3 E3 G3 C4 E4 — six
+	expectChord(s, am, 1920, 24000)
+	expectChord(s, cOverG, 2040, 30000)
+
+	// The player strums the Am, a hair late. It is 600 frames from the Am
+	// and 5400 from the C/G — both in window, one obviously meant.
+	s.DetectedStrum(strumAt(24600, chroma(0.15, pcA, pcC, pcE)))
+
+	rs := s.Results(nil)
+	if len(rs) != len(am) {
+		t.Fatalf("the strum finalized %d expectations, want the Am's %d: %+v", len(rs), len(am), rs)
+	}
+	for _, r := range rs {
+		if r.OutFrame != 24000 {
+			t.Errorf("finalized a note at outFrame %d; only the chord at 24000 was strummed: %+v", r.OutFrame, r)
+		}
+		if r.Verdict != VerdictHit {
+			t.Errorf("key %d: verdict %v, want Hit", r.Event.Key, r.Verdict)
+		}
+	}
+	if st := s.Stats(); st != (Stats{Hit: len(am)}) {
+		t.Errorf("stats %+v, want %d Hits and nothing else", st, len(am))
+	}
+
+	// The C/G is untouched, and answered on its own beat.
+	s.DetectedStrum(strumAt(30300, chroma(0.15, pcC, pcE, pcG)))
+	rs = s.Results(nil)
+	if len(rs) != len(cOverG) {
+		t.Fatalf("the second strum finalized %d expectations, want the C/G's %d: %+v", len(rs), len(cOverG), rs)
+	}
+	for _, r := range rs {
+		if r.OutFrame != 30000 || r.Verdict != VerdictHit {
+			t.Errorf("got %+v, want a Hit on the chord at 30000", r)
+		}
+	}
+}
+
+// TestScorerStrumSizeBreaksProximityTies guards the mirror bug. Making
+// proximity decide OUTRIGHT would be just as wrong: a strum landing between
+// two chords would hand itself to whichever is nearer by a couple of
+// milliseconds, which is inside the onset detector's own placement error
+// and says nothing about what the player meant. Here a two-note chord is
+// 100 frames away and a five-note chord 1100 — 20 ms apart, far below any
+// notated rhythm — and the chroma is unmistakably the five-note one.
+func TestScorerStrumSizeBreaksProximityTies(t *testing.T) {
+	s := NewScorer(testConfig())
+	expectChord(s, []int{40, 47}, 1920, 24000)             // E + B
+	expectChord(s, []int{43, 48, 52, 55, 60}, 1930, 25200) // C/G
+
+	s.DetectedStrum(strumAt(24100, chroma(0.15, pcC, pcE, pcG)))
+
+	rs := s.Results(nil)
+	if len(rs) != 5 {
+		t.Fatalf("the strum finalized %d expectations, want the 5-note chord's: %+v", len(rs), rs)
+	}
+	for _, r := range rs {
+		if r.OutFrame != 25200 || r.Verdict != VerdictHit {
+			t.Errorf("got %+v, want a Hit on the chord at 25200", r)
 		}
 	}
 }

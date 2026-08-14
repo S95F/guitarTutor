@@ -70,15 +70,28 @@ type xmlPart struct {
 // relative to the elements around them (the time cursor). Elements holds
 // *xmlAttributes, *xmlNote, *xmlBackup, *xmlForward, *xmlDirection, and
 // *xmlSound in document order; everything else is skipped.
+//
+// Barlines are kept out of Elements and in their own slice: they carry the
+// repeat/volta markup, which is read ahead of the walk to decide the order
+// the measures are played in, not while the time cursor moves.
 type xmlMeasure struct {
-	Number   string
+	Number string
+	// Implicit is measure implicit="yes": a pickup (anacrusis) bar, which
+	// holds fewer beats than the time signature. Missing it lays the
+	// pickup out from the start of a full bar and shifts the whole piece
+	// off the barlines.
+	Implicit bool
 	Elements []any
+	Barlines []xmlBarline
 }
 
 func (m *xmlMeasure) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	for _, a := range start.Attr {
-		if a.Name.Local == "number" {
+		switch a.Name.Local {
+		case "number":
 			m.Number = a.Value
+		case "implicit":
+			m.Implicit = strings.EqualFold(strings.TrimSpace(a.Value), "yes")
 		}
 	}
 	for {
@@ -88,6 +101,14 @@ func (m *xmlMeasure) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error 
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
+			if t.Name.Local == "barline" {
+				var bl xmlBarline
+				if err := d.DecodeElement(&bl, &t); err != nil {
+					return err
+				}
+				m.Barlines = append(m.Barlines, bl)
+				continue
+			}
 			var el any
 			switch t.Name.Local {
 			case "attributes":
@@ -118,10 +139,101 @@ func (m *xmlMeasure) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error 
 	}
 }
 
+// xmlBarline carries the structural markup that decides what order the
+// measures are played in: repeat signs and volta (1st/2nd ending) brackets.
+type xmlBarline struct {
+	Location string     `xml:"location,attr"` // "left", "right" (the default), "middle"
+	Repeat   *xmlRepeat `xml:"repeat"`
+	Ending   *xmlEnding `xml:"ending"`
+}
+
+type xmlRepeat struct {
+	Direction string `xml:"direction,attr"` // "forward" opens a section, "backward" closes it
+	Times     int    `xml:"times,attr"`     // total plays; 2 when unstated
+}
+
+type xmlEnding struct {
+	Number string `xml:"number,attr"` // the passes this volta is played on: "1", "1,2"
+	Type   string `xml:"type,attr"`   // "start", "stop", "discontinue"
+}
+
+// passes parses a volta's number attribute into the pass numbers it plays
+// on. An unparsable or empty list yields nil, which the expander treats as
+// "unknown" and refuses to expand around.
+func (e *xmlEnding) passes() []int {
+	var out []int
+	for _, f := range strings.Split(e.Number, ",") {
+		n, err := strconv.Atoi(strings.TrimSpace(f))
+		if err != nil || n < 1 {
+			return nil
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
 type xmlAttributes struct {
 	Divisions    int               `xml:"divisions"`
 	Times        []xmlTime         `xml:"time"`
 	StaffDetails []xmlStaffDetails `xml:"staff-details"`
+	Transposes   []xmlTranspose    `xml:"transpose"`
+}
+
+// xmlTranspose is <attributes><transpose>: the shift from the WRITTEN
+// pitch in <pitch> to the pitch that actually sounds. Guitar parts notated
+// in treble clef carry octave-change -1 near-universally, so ignoring this
+// element imports the whole part an octave sharp.
+type xmlTranspose struct {
+	Number       *int       `xml:"number,attr"` // staff this applies to; absent means all
+	Diatonic     float64    `xml:"diatonic"`
+	Chromatic    float64    `xml:"chromatic"`
+	OctaveChange int        `xml:"octave-change"`
+	Double       *xmlDouble `xml:"double"`
+}
+
+type xmlDouble struct {
+	Above string `xml:"above,attr"`
+}
+
+// semitones returns the written-to-sounding shift. <chromatic> is the
+// semitone part and <octave-change> the octave part; <double/> drops a
+// further octave (or raises one with MusicXML 4.0's above="yes").
+// <diatonic> is a respelling hint for notation only — it never moves
+// sounding pitch — so it is deliberately ignored.
+func (t *xmlTranspose) semitones() int {
+	sem := int(roundHalf(t.Chromatic)) + 12*t.OctaveChange
+	if t.Double != nil {
+		if strings.EqualFold(strings.TrimSpace(t.Double.Above), "yes") {
+			sem += 12
+		} else {
+			sem -= 12
+		}
+	}
+	return sem
+}
+
+// transposeForStaff returns the transposition these attributes declare for
+// staff n. An unnumbered <transpose> applies to every staff, a numbered one
+// only to its own — so a transposed second staff must not leak its shift
+// onto the staff-1 notes this importer keeps.
+func (a *xmlAttributes) transposeForStaff(n int) (*xmlTranspose, bool) {
+	var unnumbered *xmlTranspose
+	for i := range a.Transposes {
+		t := &a.Transposes[i]
+		if t.Number == nil {
+			if unnumbered == nil {
+				unnumbered = t
+			}
+			continue
+		}
+		if *t.Number == n {
+			return t, true
+		}
+	}
+	if unnumbered != nil {
+		return unnumbered, true
+	}
+	return nil, false
 }
 
 // firstTime returns the first <time> child, or nil.
@@ -216,6 +328,7 @@ type xmlNote struct {
 	Chord     *struct{}      `xml:"chord"`
 	Rest      *struct{}      `xml:"rest"`
 	Pitch     *xmlPitch      `xml:"pitch"`
+	Unpitched *struct{}      `xml:"unpitched"`
 	Duration  int            `xml:"duration"`
 	Ties      []xmlTie       `xml:"tie"`
 	Voice     string         `xml:"voice"`
@@ -225,16 +338,23 @@ type xmlNote struct {
 
 // tie reports the note's sound ties: stop (it continues an earlier note)
 // and start (a later note continues it). A mid-chain note carries both.
-func (n *xmlNote) tie() (stop, start bool) {
+// num is the tie's number attribute (0 when absent), which distinguishes
+// simultaneous tie chains that would otherwise be indistinguishable.
+func (n *xmlNote) tie() (stop, start bool, num int) {
 	for _, t := range n.Ties {
 		switch t.Type {
 		case "stop":
 			stop = true
 		case "start":
 			start = true
+		default:
+			continue
+		}
+		if num == 0 && t.Number > 0 {
+			num = t.Number
 		}
 	}
-	return stop, start
+	return stop, start, num
 }
 
 // fingering returns the authored <technical> string and fret, if both are
@@ -256,7 +376,8 @@ type xmlPitch struct {
 }
 
 type xmlTie struct {
-	Type string `xml:"type,attr"`
+	Type   string `xml:"type,attr"`
+	Number int    `xml:"number,attr"`
 }
 
 type xmlNotations struct {
@@ -279,10 +400,67 @@ type xmlForward struct {
 type xmlDirection struct {
 	Sound      *xmlSound      `xml:"sound"`
 	Metronomes []xmlMetronome `xml:"direction-type>metronome"`
+	Segnos     []struct{}     `xml:"direction-type>segno"`
+	Codas      []struct{}     `xml:"direction-type>coda"`
+	Words      []string       `xml:"direction-type>words"`
 }
 
+// jumpMarks names the D.C./D.S./coda-style jump directions this direction
+// carries, for the warning that says they are not followed. The graphic
+// <segno>/<coda> markers and <sound>'s machine-readable attributes are
+// authoritative; <words> is matched only against phrases that cannot
+// plausibly be an expression mark.
+func (d *xmlDirection) jumpMarks() []string {
+	var out []string
+	if d.Sound != nil {
+		out = append(out, d.Sound.jumpMarks()...)
+	}
+	if len(d.Segnos) > 0 {
+		out = append(out, "segno")
+	}
+	if len(d.Codas) > 0 {
+		out = append(out, "coda")
+	}
+	for _, w := range d.Words {
+		w = strings.ToLower(w)
+		for _, phrase := range jumpPhrases {
+			if strings.Contains(w, phrase) {
+				out = append(out, phrase)
+			}
+		}
+	}
+	return out
+}
+
+// jumpPhrases are the <words> spellings of a jump. Bare "fine", "coda" and
+// "segno" are left out on purpose: the graphic markers already cover those
+// forms, and matching the bare words would fire on ordinary text.
+var jumpPhrases = []string{"d.c", "d.s", "da capo", "dal segno", "to coda", "al coda", "al fine"}
+
 type xmlSound struct {
-	Tempo float64 `xml:"tempo,attr"`
+	Tempo    float64 `xml:"tempo,attr"`
+	DaCapo   string  `xml:"dacapo,attr"`
+	DalSegno string  `xml:"dalsegno,attr"`
+	ToCoda   string  `xml:"tocoda,attr"`
+	Fine     string  `xml:"fine,attr"`
+	Segno    string  `xml:"segno,attr"`
+	Coda     string  `xml:"coda,attr"`
+}
+
+// jumpMarks names the jump attributes present on this <sound>.
+func (s *xmlSound) jumpMarks() []string {
+	var out []string
+	for _, m := range []struct {
+		name, val string
+	}{
+		{"D.C.", s.DaCapo}, {"D.S.", s.DalSegno}, {"to coda", s.ToCoda},
+		{"fine", s.Fine}, {"segno", s.Segno}, {"coda", s.Coda},
+	} {
+		if strings.TrimSpace(m.val) != "" && !strings.EqualFold(m.val, "no") {
+			out = append(out, m.name)
+		}
+	}
+	return out
 }
 
 type xmlMetronome struct {

@@ -27,6 +27,35 @@ func drain(s *Scorer) []NoteResult {
 	return s.Results(nil)
 }
 
+// slideTo builds the detection a legato slide produces: ONE note that keeps
+// the origin key and moves semitones away from it (pitch.Tracker). Cents —
+// the median over the whole note — sits at the origin, where the note spent
+// most of its length, which is precisely why it cannot report the slide;
+// only the trajectory fields can.
+func slideTo(start, end int64, key, semitones int) pitch.Note {
+	to := float64(semitones) * 100
+	lo, hi := 0.0, to
+	if to < 0 {
+		lo, hi = to, 0
+	}
+	return pitch.Note{
+		Start:    start,
+		End:      end,
+		Key:      key,
+		Cents:    0,
+		MinCents: lo,
+		MaxCents: hi,
+		EndCents: to,
+		Clarity:  0.95,
+	}
+}
+
+// slideEv builds a track-0 slide DESTINATION expectation: the note the
+// score writes at the destination pitch, on its own tick.
+func slideEv(key int) score.NoteEvent {
+	return score.NoteEvent{Track: 0, Key: key, Tech: score.TechSlide}
+}
+
 func TestScorerPerfectPerformance(t *testing.T) {
 	s := NewScorer(testConfig())
 	keys := []int{40, 43, 45, 40, 43, 45}
@@ -354,6 +383,200 @@ func TestScorerAbandonDropsStaleWaitConfirm(t *testing.T) {
 	}
 }
 
+// TestScorerLiveExpectationOutranksAbandoned is the C2 regression. The
+// oldest-deadline rule used to run over the whole pending set, abandoned
+// entries included, so a seek could hand a detection to an expectation
+// already marked "must produce no verdict" — starving the live one beside
+// it into a Miss. AbandonBefore exists to prevent exactly that Miss, so it
+// must not be the thing that causes one: a silent drop plus a Hit turned
+// into a Hit plus a false Miss.
+func TestScorerLiveExpectationOutranksAbandoned(t *testing.T) {
+	s := NewScorer(testConfig()) // window 7200
+	s.ExpectNote(ev(40), 24000)  // truncated by the seek
+	s.ExpectNote(ev(40), 30000)  // sounded after it: live and scorable
+	s.AbandonBefore(27000)
+	// One detection, sitting in both windows, nearer the abandoned one's
+	// deadline.
+	s.Detected([]pitch.Note{det(27000, 40, 0)})
+
+	rs := drain(s)
+	if len(rs) != 1 {
+		t.Fatalf("got %d results %+v, want only the live expectation's", len(rs), rs)
+	}
+	if rs[0].OutFrame != 30000 || rs[0].Verdict != VerdictHit {
+		t.Errorf("got %+v, want a Hit on the live expectation at 30000", rs[0])
+	}
+	if st := s.Stats(); st.Miss != 0 {
+		t.Errorf("stats %+v, want no Miss: the seek must not invent one", st)
+	}
+}
+
+// TestScorerSlideDestinationIsMatchable is the P2 regression, and the
+// bluntest of the lot: before it, EVERY slide in a piece was an expectation
+// that could not be matched however perfectly it was played.
+//
+// A note written with TechSlide is slid INTO — the player does not attack
+// it, they move a string that is already sounding. The tracker reports that
+// as one continuous note keeping its ORIGIN key (deliberately: see
+// pitch.Tracker), while the score writes the destination at the DESTINATION
+// pitch on its own tick, so the two could never meet. The fixture case is
+// testdata/fixture_rich.gtab bar 2, `4.4.8p 5.4.8s`: two eighths at 96 BPM,
+// 15000 frames apart, one sounded string.
+func TestScorerSlideDestinationIsMatchable(t *testing.T) {
+	s := NewScorer(testConfig())
+	s.ExpectNote(ev(40), 24000)      // picked
+	s.ExpectNote(slideEv(41), 39000) // slid into, an eighth later
+	s.Detected([]pitch.Note{slideTo(24000, 54000, 40, 1)})
+
+	rs := drain(s)
+	if len(rs) != 2 {
+		t.Fatalf("got %d results %+v, want both notes judged", len(rs), rs)
+	}
+	byFrame := map[int64]NoteResult{}
+	for _, r := range rs {
+		byFrame[r.OutFrame] = r
+	}
+	if r := byFrame[24000]; r.Verdict != VerdictHit || !r.Matched {
+		t.Errorf("picked note: got %+v, want a matched Hit", r)
+	}
+	r := byFrame[39000]
+	if r.Verdict != VerdictHit || !r.Matched {
+		t.Errorf("slide destination: got %+v, want a matched Hit — a slide played right cannot be a Miss", r)
+	}
+	// The detection's Start is the ORIGIN's attack, a whole beat from the
+	// destination by construction; reporting it as timing error would be
+	// reporting the notation, not the performance.
+	if r.ErrFrames != 0 {
+		t.Errorf("slide destination ErrFrames %d, want 0", r.ErrFrames)
+	}
+	if st := s.Stats(); st != (Stats{Hit: 2}) {
+		t.Errorf("stats %+v, want 2 Hits", st)
+	}
+}
+
+// TestScorerSlideChainCreditsEveryStep: a chained slide is one sounded
+// string passing through several written notes. The step it SETTLES on is
+// a Hit (its intonation was actually observed); the ones it travelled over
+// are Closes — heard, but never held long enough to measure.
+func TestScorerSlideChainCreditsEveryStep(t *testing.T) {
+	s := NewScorer(testConfig())
+	s.ExpectNote(ev(40), 24000)
+	s.ExpectNote(slideEv(41), 39000)
+	s.ExpectNote(slideEv(43), 54000)
+	s.Detected([]pitch.Note{slideTo(24000, 69000, 40, 3)})
+
+	rs := drain(s)
+	want := map[int64]Verdict{24000: VerdictHit, 39000: VerdictClose, 54000: VerdictHit}
+	if len(rs) != len(want) {
+		t.Fatalf("got %d results %+v, want %d", len(rs), rs, len(want))
+	}
+	for _, r := range rs {
+		if r.Verdict != want[r.OutFrame] {
+			t.Errorf("outFrame %d: verdict %v, want %v", r.OutFrame, r.Verdict, want[r.OutFrame])
+		}
+		if !r.Matched {
+			t.Errorf("outFrame %d: Matched false", r.OutFrame)
+		}
+	}
+}
+
+// TestScorerSlideCreditIsNarrow pins the other half of the P2 fix: legato
+// credit must not become a way for any sounding note to satisfy anything
+// near it. Each case here is a Miss that SHOULD be a Miss.
+func TestScorerSlideCreditIsNarrow(t *testing.T) {
+	tests := []struct {
+		name string
+		exp  score.NoteEvent
+		det  pitch.Note
+	}{
+		{
+			// The whole rule is gated on the technique. An ordinary
+			// note an eighth away is out of window and stays out.
+			name: "a plain expectation is never credited by a glide",
+			exp:  ev(41),
+			det:  slideTo(24000, 54000, 40, 1),
+		},
+		{
+			name: "the trajectory never reached the destination",
+			exp:  slideEv(45),
+			det:  slideTo(24000, 54000, 40, 1),
+		},
+		{
+			name: "the note never moved at all",
+			exp:  slideEv(41),
+			det:  det(24000, 40, 0),
+		},
+		{
+			// A slide is reached from a string still sounding. One
+			// that stopped before the destination's window did not
+			// reach it, whatever pitch it ended on.
+			name: "the note had already stopped sounding",
+			exp:  slideEv(41),
+			det:  slideTo(24000, 30000, 40, 1),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewScorer(testConfig())
+			s.ExpectNote(tt.exp, 39000)
+			s.Detected([]pitch.Note{tt.det})
+			rs := drain(s)
+			if len(rs) != 1 {
+				t.Fatalf("got %d results, want 1: %+v", len(rs), rs)
+			}
+			if rs[0].Verdict != VerdictMiss || rs[0].Matched {
+				t.Errorf("got %+v, want an unmatched Miss", rs[0])
+			}
+		})
+	}
+}
+
+// TestScorerWaitConfirmedDeadNote is the scoring half of the P3 fix. A dead
+// note produces no trackable f0, so WaitConfirmed can never find a
+// detection for one — it used to skip the event entirely, leaving it to a
+// deadline that judges it against a window measured from the RELEASE frame,
+// which is the machinery's timing rather than the player's. The gate
+// confirmed it from its attack (WaitGate.OfferStrum), so the same Close the
+// damped-note deadline path awards is recorded up front.
+func TestScorerWaitConfirmedDeadNote(t *testing.T) {
+	s := NewScorer(testConfig())
+	// fixture_rich.gtab bar 2 ends in `9.4x`.
+	dead := score.NoteEvent{Track: 0, Key: 45, String: 4, Start: 3840, Tech: score.TechDead}
+	s.WaitConfirmed([]score.NoteEvent{dead}, nil)
+	s.ExpectNote(dead, 48000)
+
+	rs := s.Results(nil)
+	if len(rs) != 1 {
+		t.Fatalf("got %d results %+v, want the dead note finalized on arrival", len(rs), rs)
+	}
+	r := rs[0]
+	if r.Verdict != VerdictClose || !r.Matched {
+		t.Errorf("got %+v, want a matched Close: the attack was heard, the pitch never was", r)
+	}
+	if r.ErrCents != 0 || r.ErrFrames != 0 {
+		t.Errorf("got %+v, want no error figures for a note with no measurable pitch", r)
+	}
+	// Consumed like any other pre-match: a later pass over the tick is
+	// judged on its own merits.
+	s.ExpectNote(dead, 96000)
+	if rs := drain(s); len(rs) != 1 || rs[0].Verdict != VerdictMiss {
+		t.Errorf("second pass results %+v, want a normal Miss", rs)
+	}
+}
+
+// TestScorerWaitConfirmedSkipsUnconfirmablePitchedNotes: the dead-note
+// path above must stay a dead-note path. A pitched event with no matching
+// detection still records nothing.
+func TestScorerWaitConfirmedSkipsUnconfirmablePitchedNotes(t *testing.T) {
+	s := NewScorer(testConfig())
+	waited := score.NoteEvent{Track: 0, Key: 40, Start: 960}
+	s.WaitConfirmed([]score.NoteEvent{waited}, []pitch.Note{det(0, 47, 0)})
+	s.ExpectNote(waited, 48000)
+	if rs := s.Results(nil); len(rs) != 0 {
+		t.Fatalf("a pitched event with no matching detection was pre-matched: %+v", rs)
+	}
+}
+
 func TestScorerIgnoresOtherTracks(t *testing.T) {
 	s := NewScorer(testConfig())
 	s.ExpectNote(score.NoteEvent{Track: 1, Key: 40}, 24000)
@@ -653,5 +876,33 @@ func TestScorerWaitConfirmedUnisonConsumedExactly(t *testing.T) {
 	rs := s.Results(nil)
 	if len(rs) != 1 || rs[0].Verdict != VerdictMiss {
 		t.Fatalf("loop-pass expectation = %+v, want exactly one normally-judged Miss", rs)
+	}
+}
+
+// TestScorerSlideNotCreditedByASustainedNote is the fix-verification
+// regression for slide matching. A note left ringing across the bar sits
+// at its own pitch and never moves; before this, its trajectory trivially
+// "reached" any later slide expectation AT THAT SAME PITCH, so one played
+// note was credited twice — once through ordinary matching and once as a
+// slide the player never performed.
+//
+// A legato slide is tracked as one note keeping the ORIGIN key, so a real
+// slide destination is never the detection's own key. Equal keys mean the
+// note did not move.
+func TestScorerSlideNotCreditedByASustainedNote(t *testing.T) {
+	s := NewScorer(Config{SampleRate: 48000})
+	// Beat 1: an ordinary E4, let ring.
+	s.ExpectNote(score.NoteEvent{Key: 64, Start: 0}, 0)
+	// A second later: a slide INTO E4 (from somewhere else).
+	s.ExpectNote(score.NoteEvent{Key: 64, Start: 960, Tech: score.TechSlide}, 48000)
+	// The player plays only the first note and lets it ring two seconds.
+	s.Detected([]pitch.Note{{Start: 0, End: 96000, Key: 64, Cents: 5, MinCents: -4, MaxCents: 6, EndCents: 2}})
+
+	res := s.Results(nil)
+	if len(res) != 1 {
+		t.Fatalf("got %d results, want 1 — one played note must not also credit an unplayed slide: %+v", len(res), res)
+	}
+	if res[0].Event.Start != 0 {
+		t.Errorf("credited the expectation at tick %d, want the one actually played (tick 0)", res[0].Event.Start)
 	}
 }

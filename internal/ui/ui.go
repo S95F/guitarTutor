@@ -173,7 +173,15 @@ type App struct {
 
 // New builds the practice view. track is the index into sc.Tracks to
 // display as tablature (play/mute always applies to all tracks).
+//
+// The displayed track is also the track wait mode halts on. Left to its
+// default the engine waits at every RoleUser track's notes, which freezes
+// playback for good on a piece with two user parts — the wait engages on
+// a note this view never draws and the scorer never expects, so nothing
+// can release it. Setting it here means the halt, the tablature and the
+// expectation always describe the same music (bug review W2/W3).
 func New(eng *engine.Engine, sc *score.Score, track int) *App {
+	eng.SetWaitTrack(track)
 	return &App{eng: eng, sc: sc, track: track, zoom: 1, countInBeats: defaultCountInBeats}
 }
 
@@ -201,6 +209,13 @@ var errQuit = fmt.Errorf("quit")
 func (a *App) pxPerTick() float64 {
 	return a.zoom * defaultPxQ / float64(score.PPQ)
 }
+
+// Track is the index of the part being practiced: the one drawn as
+// tablature, waited on, and — through the caller wiring the scorer — the
+// one scored. It exists so the live wiring reads the track from the view
+// rather than being handed it again, which is how those three came to
+// disagree in the first place (bug review W3).
+func (a *App) Track() int { return a.track }
 
 func (a *App) displayed() *score.Track { return a.sc.Tracks[a.track] }
 

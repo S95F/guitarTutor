@@ -18,6 +18,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,6 +84,24 @@ func Load(path string) (left, right []float32, warnings []string, err error) {
 			"audiofile: %s: declared sample rate %d Hz is outside the plausible %d-%d Hz range (corrupt or forged header)",
 			filepath.Base(path), rate, minSampleRate, maxSampleRate)
 	}
+	// Before resampling, which would smear a bad sample across its
+	// neighbours: a 32-bit-float WAV carries whatever bits the writing DAW
+	// put there, and NaN or ±Inf among them is not a decode error, so
+	// nothing above rejects it. Left alone it reaches the mixer, turns the
+	// entire mix non-finite, and is written to the device as a full-scale
+	// rail — several seconds of maximum-amplitude noise into headphones
+	// (bug review N2's sibling; the offline render is now merely silent,
+	// but the live path writes float32 straight to the backend).
+	nfL, clL := scrubSamples(left)
+	nfR, clR := scrubSamples(right)
+	if n := nfL + nfR; n > 0 {
+		warnings = append(warnings, fmt.Sprintf(
+			"%d sample(s) were not a finite number and were silenced (the file is damaged or was written by a faulty encoder)", n))
+	}
+	if n := clL + clR; n > 0 {
+		warnings = append(warnings, fmt.Sprintf(
+			"%d sample(s) were far outside the audible range and were clamped to +/-%d (the file is damaged or was written by a faulty encoder)", n, maxSample))
+	}
 	if rate != SampleRate {
 		left = resampleLinear(left, rate, SampleRate)
 		right = resampleLinear(right, rate, SampleRate)
@@ -90,6 +109,46 @@ func Load(path string) (left, right []float32, warnings []string, err error) {
 			"resampled from %d Hz to %d Hz by linear interpolation (slight high-frequency loss)", rate, SampleRate))
 	}
 	return left, right, warnings, nil
+}
+
+// maxSample bounds a decoded sample's magnitude — about 24 dB above full
+// scale, far more headroom than any real recording uses.
+//
+// Audio is nominally in [-1, 1] and the integer formats cannot leave it,
+// but a 32-bit-float WAV carries whatever the writing tool put there.
+// A value near float32's 3.4e38 ceiling is not audio, and it is not
+// harmless either: resampleLinear SUBTRACTS neighbouring samples, and
+// 3e38 - (-3e38) overflows float32 to +Inf, so an entirely finite file
+// becomes an all-NaN one on its way to the mixer — the very failure the
+// non-finite scrub above exists to prevent, manufactured after it ran.
+// Bounding the input is what makes the interpolation arithmetic provably
+// safe rather than merely usually safe.
+const maxSample = 16
+
+// scrubSamples makes every sample in s something the rest of the pipeline
+// can safely arithmetic on, reporting how many it had to change of each
+// kind.
+//
+// Non-finite samples become silence: a sample that is not a number names
+// no amplitude, and any finite guess would be audible. Wildly out-of-range
+// samples are clamped rather than silenced — the recording is probably
+// real and merely mis-scaled, so keeping the waveform beats blanking it.
+func scrubSamples(s []float32) (nonFinite, clamped int) {
+	for i, v := range s {
+		f := float64(v)
+		switch {
+		case math.IsNaN(f) || math.IsInf(f, 0):
+			s[i] = 0
+			nonFinite++
+		case f > maxSample:
+			s[i] = maxSample
+			clamped++
+		case f < -maxSample:
+			s[i] = -maxSample
+			clamped++
+		}
+	}
+	return nonFinite, clamped
 }
 
 // loadWAV reads a WAV file via wavio, which already duplicates mono into

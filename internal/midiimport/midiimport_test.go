@@ -2,6 +2,7 @@ package midiimport
 
 import (
 	"bytes"
+	"encoding/binary"
 	"strings"
 	"testing"
 
@@ -552,5 +553,245 @@ func TestImportZeroNumMeterSkipped(t *testing.T) {
 	}
 	if got := s.Meters.At(s.End()).BeatLen(); got <= 0 {
 		t.Errorf("BeatLen at score end = %d, want > 0", got)
+	}
+}
+
+// buildSMF0 assembles a genuine type-0 (single-track) SMF. gomidi writes
+// the format field as 1 whenever it is handed a track, so it is patched
+// back to 0 in the MThd chunk (bytes 8-9) and the result read back to
+// confirm it — this is the shape a downloaded MIDI file actually has,
+// with the whole band on one track and only the channel telling the
+// instruments apart.
+func buildSMF0(t testing.TB, ppq uint16, tr smf.Track) []byte {
+	t.Helper()
+	data := buildSMF(t, ppq, tr)
+	binary.BigEndian.PutUint16(data[8:10], 0)
+	sm, err := smf.ReadFrom(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("reading back the patched type-0 file: %v", err)
+	}
+	if sm.Format() != 0 {
+		t.Fatalf("fixture format = %d, want a type-0 file", sm.Format())
+	}
+	if len(sm.Tracks) != 1 {
+		t.Fatalf("fixture has %d tracks, want the single type-0 track", len(sm.Tracks))
+	}
+	return data
+}
+
+// bandTrack is one MIDI track holding three instruments the way a type-0
+// file does: a guitar on channel 1, a bass on channel 2, and a kick drum
+// on channel 10. Each melodic channel plays two quarter notes.
+func bandTrack() smf.Track {
+	var tr smf.Track
+	tr.Add(0, smf.MetaTrackSequenceName("Band"))
+	tr.Add(0, midi.ProgramChange(0, 26)) // guitar
+	tr.Add(0, midi.ProgramChange(1, 33)) // bass
+	tr.Add(0, midi.NoteOn(0, 64, 100))
+	tr.Add(0, midi.NoteOn(1, 40, 100))
+	tr.Add(0, midi.NoteOn(9, 36, 100)) // percussion, never a pitch
+	tr.Add(960, midi.NoteOff(0, 64))
+	tr.Add(0, midi.NoteOff(1, 40))
+	tr.Add(0, midi.NoteOff(9, 36))
+	tr.Add(0, midi.NoteOn(0, 62, 100))
+	tr.Add(0, midi.NoteOn(1, 43, 100))
+	tr.Add(960, midi.NoteOff(0, 62))
+	tr.Add(0, midi.NoteOff(1, 43))
+	return tr
+}
+
+// eventKeys collects one track's events as (start, end, key) triples.
+func eventKeys(s *score.Score, track int) [][3]int64 {
+	var out [][3]int64
+	for _, ev := range s.Events() {
+		if ev.Track == track {
+			out = append(out, [3]int64{ev.Start, ev.End, int64(ev.Key)})
+		}
+	}
+	return out
+}
+
+// assertBandSplit checks that the guitar and bass came out as separate
+// parts carrying only their own notes and their own programs.
+func assertBandSplit(t *testing.T, s *score.Score, warns []string) {
+	t.Helper()
+	if len(s.Tracks) != 2 {
+		var names []string
+		for _, tr := range s.Tracks {
+			names = append(names, tr.Name)
+		}
+		t.Fatalf("got %d tracks %v, want one per melodic channel", len(s.Tracks), names)
+	}
+	want := []struct {
+		name    string
+		program int
+		role    score.TrackRole
+		events  [][3]int64
+	}{
+		{"Band (channel 1)", 26, score.RoleUser, [][3]int64{{0, 960, 64}, {960, 1920, 62}}},
+		{"Band (channel 2)", 33, score.RoleBacking, [][3]int64{{0, 960, 40}, {960, 1920, 43}}},
+	}
+	for i, w := range want {
+		tr := s.Tracks[i]
+		if tr.Name != w.name {
+			t.Errorf("track %d name = %q, want %q", i, tr.Name, w.name)
+		}
+		if tr.Program != w.program {
+			t.Errorf("track %d program = %d, want %d (the program change on its own channel)", i, tr.Program, w.program)
+		}
+		if tr.Role != w.role {
+			t.Errorf("track %d role = %d, want %d", i, tr.Role, w.role)
+		}
+		got := eventKeys(s, i)
+		if len(got) != len(w.events) {
+			t.Fatalf("track %d has %d events %v, want %d — channels are still merged", i, len(got), got, len(w.events))
+		}
+		for j, ev := range w.events {
+			if got[j] != ev {
+				t.Errorf("track %d event %d = %v, want %v", i, j, got[j], ev)
+			}
+		}
+	}
+	if !hasWarn(warns, "split into one part per channel") {
+		t.Errorf("warnings = %v, want one explaining the channel split", warns)
+	}
+	if !hasWarn(warns, "percussion") {
+		t.Errorf("warnings = %v, want the channel-10 percussion warning", warns)
+	}
+}
+
+func hasWarn(warns []string, substr string) bool {
+	for _, w := range warns {
+		if strings.Contains(w, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestImportType0SplitsByChannel (audit D1): a type-0 file separates its
+// instruments by channel alone. Merged into a single part, the guitar,
+// the bass and the drums are handed to the fretting heuristic at once,
+// which crams what it can onto six strings and drops the rest — so the
+// practice part is none of the three instruments, and its program is
+// whichever instrument happened to send the first program change. Each
+// channel must instead become its own selectable part.
+func TestImportType0SplitsByChannel(t *testing.T) {
+	s, warns, err := Import(buildSMF0(t, 960, bandTrack()))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	assertBandSplit(t, s, warns)
+}
+
+// TestImportMultiChannelTrackSplit (audit D1): the split keys off the
+// channels a track actually uses, not off the file's format byte — a
+// type-1 track carrying several channels is carrying several instruments
+// for exactly the same reason, and writers get the format byte wrong
+// often enough that it is not worth trusting.
+func TestImportMultiChannelTrackSplit(t *testing.T) {
+	s, warns, err := Import(buildSMF(t, 960, bandTrack()))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	assertBandSplit(t, s, warns)
+}
+
+// TestImportSingleChannelNotSplit: the ordinary one-instrument-per-track
+// file must be untouched by the split — one part, its plain track name,
+// and nothing said about channels.
+func TestImportSingleChannelNotSplit(t *testing.T) {
+	var tr smf.Track
+	tr.Add(0, smf.MetaTrackSequenceName("Guitar"))
+	tr.Add(0, midi.NoteOn(0, 52, 100))
+	tr.Add(960, midi.NoteOff(0, 52))
+	tr.Add(0, midi.NoteOn(0, 55, 100))
+	tr.Add(960, midi.NoteOff(0, 55))
+	s, warns, err := Import(buildSMF(t, 960, tr))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if len(s.Tracks) != 1 {
+		t.Fatalf("got %d tracks, want 1", len(s.Tracks))
+	}
+	if s.Tracks[0].Name != "Guitar" {
+		t.Errorf("track name = %q, want the file's own %q, unqualified", s.Tracks[0].Name, "Guitar")
+	}
+	if len(warns) != 0 {
+		t.Errorf("warnings = %v, want none", warns)
+	}
+}
+
+// TestImportPerChannelProgram: a program change belongs to its channel.
+// Applying the first one seen to the whole track labelled every split
+// part with the first instrument in the file.
+func TestImportPerChannelProgram(t *testing.T) {
+	var tr smf.Track
+	tr.Add(0, midi.ProgramChange(1, 33)) // bass, on channel 2 only
+	tr.Add(0, midi.NoteOn(0, 52, 100))   // channel 1 has no program change
+	tr.Add(960, midi.NoteOff(0, 52))
+	tr.Add(0, midi.NoteOn(1, 40, 100))
+	tr.Add(960, midi.NoteOff(1, 40))
+	s, _, err := Import(buildSMF(t, 960, tr))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if len(s.Tracks) != 2 {
+		t.Fatalf("got %d tracks, want 2", len(s.Tracks))
+	}
+	if s.Tracks[0].Program != DefaultProgram {
+		t.Errorf("channel 1 program = %d, want the default %d — channel 2's program change is not its own",
+			s.Tracks[0].Program, DefaultProgram)
+	}
+	if s.Tracks[1].Program != 33 {
+		t.Errorf("channel 2 program = %d, want 33", s.Tracks[1].Program)
+	}
+}
+
+// TestUserTrackIsNotAnEmptyChannel is the fix-verification regression for
+// the channel split. RoleUser used to go to whichever part came first,
+// decided before the tracks were built. Once a multi-channel track splits
+// per channel that is no longer safe: a whole channel can sit outside
+// guitar range — piccolo, bells, a synth lead two octaves up — so every
+// one of its notes is dropped as unfrettable and the part that opens for
+// practice is blank, with nothing to play and no explanation.
+func TestUserTrackIsNotAnEmptyChannel(t *testing.T) {
+	// Channel 1 carries only notes far above the highest fret; channel 3
+	// carries an ordinary guitar line.
+	var tr smf.Track
+	tr.Add(0, smf.MetaTrackSequenceName("Band"))
+	for i := 0; i < 4; i++ {
+		tr.Add(0, midi.NoteOn(0, 120, 100)) // channel 1, key 120: unplayable
+		tr.Add(0, midi.NoteOn(2, 52, 100))  // channel 3, key 52: fine
+		tr.Add(960, midi.NoteOff(0, 120))
+		tr.Add(0, midi.NoteOff(2, 52))
+	}
+
+	sm := smf.New()
+	sm.Add(tr)
+	var buf bytes.Buffer
+	if _, err := sm.WriteTo(&buf); err != nil {
+		t.Fatal(err)
+	}
+	s, warns, err := Import(buf.Bytes())
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	var user *score.Track
+	for _, tr := range s.Tracks {
+		if tr.Role == score.RoleUser {
+			user = tr
+			break
+		}
+	}
+	if user == nil {
+		t.Fatal("no RoleUser track at all")
+	}
+	if !trackHasNotes(user) {
+		t.Errorf("the practice track %q is empty; the player opens a blank tab (tracks %d, warnings %v)",
+			user.Name, len(s.Tracks), warns)
 	}
 }

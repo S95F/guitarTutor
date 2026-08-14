@@ -74,10 +74,17 @@ func TestWaitModeLiveLoop(t *testing.T) {
 	eng.SetEventTap(scorer.ExpectNote)
 
 	// The -listen wiring (cmd/guitartutor newOnNotes): the wait is
-	// tracked by generation, the gate arms with a fresh-attack floor a
-	// grace before the arm, and the confirming detections are recorded
-	// with WaitConfirmed BEFORE ConfirmWait so the released events get a
-	// pitch-only verdict. State is owned by the analysis goroutine.
+	// tracked by the generation WaitingOn returns with its events, the
+	// gate arms with a fresh-attack floor a grace before the arm, and the
+	// confirming detections are recorded with WaitConfirmed BEFORE
+	// ConfirmWait so the released events get a pitch-only verdict. State
+	// is owned by the analysis goroutine.
+	//
+	// Keep this a faithful copy of newOnNotes. It was not one: it read the
+	// events and the generation in two calls, the same race the real
+	// wiring had, so this end-to-end test could not have caught it (bug
+	// review W1). WaitingOn now returns both together, which is what makes
+	// the copy correct by construction rather than by vigilance.
 	var (
 		armedGen    uint64
 		armedMin    int64
@@ -89,11 +96,11 @@ func TestWaitModeLiveLoop(t *testing.T) {
 		scorer.Detected(closed)
 		scorer.Advance(consumed - 4*sr) // same lag as -listen; see advanceLagFrames
 
-		evs, waiting := eng.WaitingOn()
+		evs, gen, waiting := eng.WaitingOn()
 		if !waiting {
 			return
 		}
-		if gen := eng.WaitGeneration(); gen != armedGen {
+		if gen != armedGen {
 			armedGen = gen
 			armedMin = consumed - grace
 			armedEvents = append(armedEvents[:0], evs...)

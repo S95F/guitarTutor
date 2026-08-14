@@ -6,6 +6,8 @@
 // the nearest int16 — no dither. Dither trades round-trip exactness for
 // nicer-sounding quantization noise; for offline renders and test
 // fixtures, a bit-exact round trip is worth more than noise shaping.
+// Samples that are not audio at all are still written as something safe:
+// NaN becomes silence and ±Inf the matching rail (see quantize).
 //
 // Reading accepts 16-bit PCM and 32-bit IEEE-float data, mono or stereo,
 // and skips over unrelated RIFF chunks (LIST, INFO, cue, ...).
@@ -81,16 +83,36 @@ func writePCM16(w io.Writer, sampleRate, channels int, interleaved []float32) er
 
 // quantize converts a float32 sample to int16: scale by 32768, round to
 // nearest, and saturate at the int16 limits (so out-of-range input is
-// clamped and exactly 1.0 becomes 32767).
+// clamped and exactly 1.0 becomes 32767). NaN becomes 0 and ±Inf the
+// matching rail, so the mapping is total: every float64 the scaling can
+// produce has a defined int16 answer.
+//
+// The saturation must happen in float space. It used to run on
+// v := int(math.Round(x)), but a float-to-int conversion is undefined in
+// Go when the value does not fit the destination, and on amd64 it yields
+// MinInt64 — for NaN and for +Inf alike. So the `v > MaxInt16` test never
+// fired and the `v < MinInt16` one did: a positive over-range sample
+// saturated to full-scale NEGATIVE, and NaN became -32768 instead of
+// silence. A float32 WAV carrying NaN or +Inf (a routine DAW export, and
+// nothing upstream rejects non-finite samples) therefore rendered as
+// full-scale noise. This function is the last thing between a decoded
+// sample and a speaker, so it is written to be total rather than to
+// assume its input is in range: silence is the only honest answer for
+// "not a number", and an infinity is a rail.
 func quantize(s float32) int16 {
-	v := int(math.Round(float64(s) * 32768))
-	if v > math.MaxInt16 {
-		v = math.MaxInt16
+	v := float64(s) * 32768
+	switch {
+	case math.IsNaN(v):
+		return 0
+	case v >= math.MaxInt16:
+		return math.MaxInt16
+	case v <= math.MinInt16:
+		return math.MinInt16
 	}
-	if v < math.MinInt16 {
-		v = math.MinInt16
-	}
-	return int16(v)
+	// Now -32768 < v < 32767, so rounding half away from zero (unchanged
+	// from the original, and what the bit-exact round-trip tests pin)
+	// cannot leave the int16 range.
+	return int16(math.Round(v))
 }
 
 // Read parses a WAV file. It accepts 16-bit PCM and 32-bit IEEE-float

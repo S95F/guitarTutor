@@ -305,30 +305,6 @@ func enumerate(beat int, keys []int, tuning score.Tuning, capo int, unplayable *
 	return cands
 }
 
-// spanOK reports whether the fretted notes of a fingering stay within
-// MaxSpan frets of each other. Open strings are exempt.
-func spanOK(pos []Position) bool {
-	min, max := 0, 0
-	first := true
-	for _, p := range pos {
-		if p.Fret == 0 {
-			continue
-		}
-		if first {
-			min, max = p.Fret, p.Fret
-			first = false
-			continue
-		}
-		if p.Fret < min {
-			min = p.Fret
-		}
-		if p.Fret > max {
-			max = p.Fret
-		}
-	}
-	return max-min <= MaxSpan
-}
-
 // finish builds a candidate from a fingering, computing its intrinsic cost
 // and hand position per the package cost model.
 func finish(keyIdx []int, pos []Position) candidate {

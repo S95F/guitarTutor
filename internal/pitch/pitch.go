@@ -201,6 +201,21 @@ type Note struct {
 	Key int
 	// Cents is the median deviation from Key, negative = flat.
 	Cents float64
+	// MinCents and MaxCents bound the note's cents TRAJECTORY — the
+	// lowest and highest deviation from Key it reached — and EndCents is
+	// the deviation it settled on (the median of its final hops).
+	//
+	// They exist because Cents is a median over the WHOLE note, which
+	// averages away the one thing a bend or a legato slide is about:
+	// where the pitch went. The tracker deliberately keeps a continuously
+	// sounded note as one Note on its ORIGIN key (see Tracker), so
+	// without a trajectory summary a caller cannot tell a slide from a
+	// note played badly out of tune — and a score's slide-DESTINATION
+	// note, which is written at the destination pitch, becomes
+	// structurally unmatchable however well it was played. Key plus
+	// EndCents/100 is the key the note arrived on; a key whose deviation
+	// falls inside [MinCents, MaxCents] is one the note passed through.
+	MinCents, MaxCents, EndCents float64
 	// Clarity is the median frame clarity over the note.
 	Clarity float64
 }

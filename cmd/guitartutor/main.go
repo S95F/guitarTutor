@@ -11,6 +11,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,7 +64,7 @@ func main() {
 	case "version", "-version", "--version":
 		fmt.Println("guitartutor", version)
 	case "help", "-h", "--help":
-		usage()
+		usage(os.Stdout)
 	case "play":
 		err = runPlay(os.Args[2:])
 	case "render":
@@ -74,7 +75,7 @@ func main() {
 		err = runCalibrate(os.Args[2:])
 	default:
 		if strings.HasPrefix(os.Args[1], "-") {
-			usage()
+			usage(os.Stderr)
 			os.Exit(2)
 		}
 		err = runPlay(os.Args[1:]) // bare file argument
@@ -85,8 +86,11 @@ func main() {
 	}
 }
 
-func usage() {
-	fmt.Fprint(os.Stderr, `guitartutor — practice companion for guitarists
+// usage writes the help text to w. `help` and -h ask for it, so they get
+// it on stdout where a pager or a grep can reach it; only the
+// unknown-flag path, where the help is a diagnostic, writes to stderr.
+func usage(w io.Writer) {
+	fmt.Fprint(w, `guitartutor — practice companion for guitarists
 
 usage:
   guitartutor play [flags] <file>
@@ -103,7 +107,9 @@ play flags:
   -scale <f>      initial tempo scale, 0.25 to 2.0 (default 1.0)
   -met            start with the metronome on
   -countin <n>    count-in beats before playback starts
-  -track <n>      tab track to display, 1-based (default: first user track)
+  -track <n>      the track you are practising, 1-based: shown as tab, and
+                  under -listen the one scored and waited on
+                  (default: the first user track)
   -listen         hear your guitar: live pitch detection and scoring
   -in <id>        capture device for -listen (see devices; default system)
   -out <id>       playback device for -listen (default system)
@@ -217,7 +223,7 @@ func runPlay(args []string) error {
 	scale := fs.Float64("scale", 1.0, "initial tempo scale")
 	met := fs.Bool("met", false, "metronome on")
 	countIn := fs.Int("countin", 0, "count-in beats")
-	track := fs.Int("track", 0, "tab track to display (1-based)")
+	track := fs.Int("track", 0, "track to practise: displayed, scored and waited on (1-based)")
 	listen := fs.Bool("listen", false, "live pitch detection and scoring")
 	inQ := fs.String("in", "", "capture device for -listen (name fragment)")
 	outQ := fs.String("out", "", "playback device for -listen (name fragment)")
@@ -277,7 +283,7 @@ func runPlay(args []string) error {
 		if cfgErr != nil {
 			fmt.Fprintln(os.Stderr, "warning: existing config unreadable, ignoring it:", cfgErr)
 		}
-		session, err := setupListen(eng, app, display, *inQ, *outQ, cfg)
+		session, err := setupListen(eng, app, *inQ, *outQ, cfg)
 		if err != nil {
 			return err
 		}

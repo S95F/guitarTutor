@@ -14,11 +14,19 @@
 // than half a grid step (which happens when a note collapses to zero
 // length and is stretched back to one grid step).
 //
+// A file track is not assumed to be one instrument. MIDI separates
+// instruments by channel, and a type-0 (single-track) file — the common
+// shape for downloaded MIDI — puts the whole band on one track that way,
+// so each file track is split into one part per channel it carries. See
+// splitChannels for why merging them is not a viable simplification.
+// Channel 10, General MIDI percussion, is dropped rather than split off:
+// its keys select kit pieces, not pitches.
+//
 // Deviations from the file are never silent — they are returned as
-// human-readable warnings: skipped percussion tracks (channel 10), keys
-// below the instrument's range shifted up an octave, dropped unplayable
-// notes, truncated same-string overlaps, unterminated notes, and meter
-// changes that fall inside a bar.
+// human-readable warnings: skipped percussion tracks (channel 10), tracks
+// split across channels, keys below the instrument's range shifted up an
+// octave, dropped unplayable notes, truncated same-string overlaps,
+// unterminated notes, and meter changes that fall inside a bar.
 package midiimport
 
 import (
@@ -26,6 +34,8 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
+	"strings"
 
 	"gitlab.com/gomidi/midi/v2/smf"
 
@@ -57,8 +67,11 @@ const maxBars = 100_000
 
 // Import parses a Standard MIDI File into a Score, returning
 // human-readable warnings for everything the import changed or dropped.
-// The first file track containing notes becomes the RoleUser track, later
-// ones RoleBacking; all tracks are standard tuning with fingerings
+// One score track is produced per (file track, MIDI channel) pair holding
+// notes. The RoleUser track — the part offered for practice — is the
+// first of them that still sounds a note after fingering (see
+// setUserTrack, which explains why "first" alone is not enough); the rest
+// are RoleBacking. All tracks are standard tuning with fingerings
 // inferred by internal/fretting. The result always passes Validate.
 func Import(data []byte) (*score.Score, []string, error) {
 	sm, err := smf.ReadFrom(bytes.NewReader(data))
@@ -103,19 +116,50 @@ func (im *importer) scale(t int64) int64 {
 // quantize snaps a score tick to the nearest Grid multiple.
 func quantize(t int64) int64 { return (t + Grid/2) / Grid * Grid }
 
+// percussionChannel is the wire number of General MIDI channel 10, where
+// a note's key selects a drum-kit piece instead of naming a pitch — so
+// nothing on it can be spelled as a string and fret. internal/gpimport
+// applies the same rule to Guitar Pro tracks.
+const percussionChannel = 9
+
 // A rawNote is one matched note-on/off pair in score ticks.
 type rawNote struct {
 	start, end int64
 	key        int
-	str, fret  int // assigned fingering; str 0 until assigned
+	ch         uint8 // MIDI channel the note was authored on
+	str, fret  int   // assigned fingering; str 0 until assigned
 }
 
-// A rawTrack is one file track's extracted content.
+// A fileTrack is one SMF track exactly as the file holds it: possibly
+// several instruments, told apart only by channel. A type-0 file has one
+// of these carrying the entire piece.
+type fileTrack struct {
+	index    int
+	name     string
+	programs map[uint8]int // first program change per channel
+	notes    []*rawNote
+}
+
+// A rawTrack is one part the import will build: one file track's notes on
+// one MIDI channel.
 type rawTrack struct {
-	index   int // file track index
+	index   int  // file track index
+	channel int  // MIDI channel, 0-based
+	split   bool // the file track carried more than one channel
 	name    string
-	program int // first program change, or -1
+	program int // program change on this channel, or -1
 	notes   []*rawNote
+}
+
+// desc names a part in warnings. A file track that carried a single
+// channel keeps the plain "track N" wording; a part carved out of a
+// multi-channel track names its channel too, so a warning points at one
+// instrument rather than at the whole merged track.
+func (rt *rawTrack) desc() string {
+	if !rt.split {
+		return fmt.Sprintf("track %d", rt.index)
+	}
+	return fmt.Sprintf("track %d channel %d", rt.index, rt.channel+1)
 }
 
 // run drives the import of a parsed SMF.
@@ -123,15 +167,13 @@ func (im *importer) run(sm *smf.SMF) (*score.Score, []string, error) {
 	s := &score.Score{}
 	var raws []*rawTrack
 	for ti, tr := range sm.Tracks {
-		rt := im.readTrack(ti, tr)
-		if ti == 0 && len(rt.notes) == 0 {
+		ft := im.readTrack(ti, tr)
+		if ti == 0 && len(ft.notes) == 0 {
 			// SMF-1 convention: a noteless first track is the
 			// conductor track and its name is the piece title.
-			s.Title = rt.name
+			s.Title = ft.name
 		}
-		if len(rt.notes) > 0 {
-			raws = append(raws, rt)
-		}
+		raws = append(raws, im.splitChannels(ft)...)
 	}
 	if len(raws) == 0 {
 		return nil, im.warns, fmt.Errorf("no playable notes in file")
@@ -163,25 +205,67 @@ func (im *importer) run(sm *smf.SMF) (*score.Score, []string, error) {
 	}
 	s.Meters = rebaseMeters(s.Meters, specs)
 
-	for i, rt := range raws {
-		role := score.RoleBacking
-		if i == 0 {
-			role = score.RoleUser
-		}
-		s.Tracks = append(s.Tracks, im.buildTrack(rt, role, specs))
+	for _, rt := range raws {
+		s.Tracks = append(s.Tracks, im.buildTrack(rt, score.RoleBacking, specs))
 	}
+	setUserTrack(s)
 	if err := s.Validate(); err != nil {
 		return nil, im.warns, fmt.Errorf("imported score failed validation: %w", err)
 	}
 	return s, im.warns, nil
 }
 
-// readTrack extracts one file track's name, program, and notes, matching
-// note-ons to note-offs and filtering percussion (channel 10, wire
-// channel 9). Ticks are converted to score resolution; quantization
-// happens later in normalize.
-func (im *importer) readTrack(ti int, tr smf.Track) *rawTrack {
-	rt := &rawTrack{index: ti, program: -1}
+// setUserTrack marks the practice part, and does it once the tracks are
+// built rather than from the raw part order.
+//
+// Position alone stopped being safe when tracks began splitting per
+// channel. normalize can empty a part completely — every note out of the
+// instrument's range is dropped as unfrettable — and a whole channel can
+// be exactly that: a piccolo, bells, a synth lead two octaves up. Chosen
+// by position, such a channel becomes the part that opens for practice,
+// and the player is handed a blank tab with nothing to play. Choosing the
+// first track that actually sounds costs nothing when the first part is
+// fine, which is the ordinary case.
+//
+// run has already established that at least one note survived
+// normalization, so the loop always finds a track; the trailing
+// assignment is the belt for a future caller that has not.
+func setUserTrack(s *score.Score) {
+	for _, tr := range s.Tracks {
+		if trackHasNotes(tr) {
+			tr.Role = score.RoleUser
+			return
+		}
+	}
+	if len(s.Tracks) > 0 {
+		s.Tracks[0].Role = score.RoleUser
+	}
+}
+
+// trackHasNotes reports whether a built track sounds anything at all, as
+// opposed to being a run of rests.
+func trackHasNotes(t *score.Track) bool {
+	for _, bar := range t.Bars {
+		for _, beat := range bar.Beats {
+			if len(beat.Notes) > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// readTrack extracts one file track's name, its first program change per
+// channel, and its notes, matching note-ons to note-offs and filtering
+// percussion (channel 10, wire channel 9). Ticks are converted to score
+// resolution; quantization happens later in normalize.
+//
+// Programs are kept per channel, not per track: on a multi-channel track
+// the first program change belongs to whichever channel sent it, and
+// applying it to the whole track would label the guitar part with the
+// bass's instrument.
+func (im *importer) readTrack(ti int, tr smf.Track) *fileTrack {
+	ft := &fileTrack{index: ti, programs: map[uint8]int{}}
 	open := map[[2]uint8][]*rawNote{} // (channel, key) -> unclosed notes, oldest first
 	perc := 0
 	var abs int64
@@ -192,15 +276,15 @@ func (im *importer) readTrack(ti int, tr smf.Track) *rawTrack {
 		var text string
 		switch {
 		case msg.GetNoteStart(&ch, &key, &vel):
-			if ch == 9 {
+			if ch == percussionChannel {
 				perc++
 				continue
 			}
-			n := &rawNote{start: im.scale(abs), key: int(key)}
-			rt.notes = append(rt.notes, n)
+			n := &rawNote{start: im.scale(abs), key: int(key), ch: ch}
+			ft.notes = append(ft.notes, n)
 			open[[2]uint8{ch, key}] = append(open[[2]uint8{ch, key}], n)
 		case msg.GetNoteEnd(&ch, &key):
-			if ch == 9 {
+			if ch == percussionChannel {
 				continue
 			}
 			k := [2]uint8{ch, key}
@@ -209,20 +293,20 @@ func (im *importer) readTrack(ti int, tr smf.Track) *rawTrack {
 				open[k] = q[1:]
 			}
 		case msg.GetProgramChange(&ch, &prog):
-			if ch == 9 {
+			if ch == percussionChannel {
 				continue
 			}
-			if rt.program < 0 {
-				rt.program = int(prog)
+			if _, ok := ft.programs[ch]; !ok {
+				ft.programs[ch] = int(prog)
 			}
 		case msg.GetMetaTrackName(&text):
-			if rt.name == "" {
-				rt.name = text
+			if ft.name == "" {
+				ft.name = text
 			}
 		}
 	}
 	if perc > 0 {
-		if len(rt.notes) == 0 {
+		if len(ft.notes) == 0 {
 			im.warnf("track %d: percussion track (channel 10) skipped", ti)
 		} else {
 			im.warnf("track %d: skipped %d percussion notes (channel 10)", ti, perc)
@@ -238,7 +322,79 @@ func (im *importer) readTrack(ti int, tr smf.Track) *rawTrack {
 	if unterminated > 0 {
 		im.warnf("track %d: closed %d unterminated note(s) at end of track", ti, unterminated)
 	}
-	return rt
+	return ft
+}
+
+// splitChannels divides a file track into one part per MIDI channel,
+// lowest channel first, and returns nothing for a track without notes.
+//
+// A type-0 (single-track) MIDI file — the usual shape for downloaded
+// MIDI — puts every instrument on one track, separated only by channel.
+// Merging them hands the fretting heuristic a bass line, a guitar part
+// and a piano voicing sounding at once; it crams what fits onto six
+// strings, truncates the same-string overlaps and drops the rest, so the
+// practice part is not any of the three instruments. Splitting by channel
+// gives back one selectable part per instrument, which is the shape the
+// rest of the app expects of a score.
+//
+// The split is driven by the channels actually used rather than by the
+// file's format byte: type-1 tracks are nearly always single-channel, so
+// this is a no-op for them, and where one is not, it is carrying several
+// instruments for the same reason and wants the same treatment.
+func (im *importer) splitChannels(ft *fileTrack) []*rawTrack {
+	if len(ft.notes) == 0 {
+		return nil
+	}
+	var channels []uint8
+	seen := map[uint8]bool{}
+	for _, n := range ft.notes {
+		if !seen[n.ch] {
+			seen[n.ch] = true
+			channels = append(channels, n.ch)
+		}
+	}
+	sort.Slice(channels, func(i, j int) bool { return channels[i] < channels[j] })
+	multi := len(channels) > 1
+	if multi {
+		im.warnf("track %d: notes on %d MIDI channels (%s); split into one part per channel, since a MIDI track separates instruments by channel",
+			ft.index, len(channels), channelList(channels))
+	}
+	out := make([]*rawTrack, 0, len(channels))
+	for _, ch := range channels {
+		rt := &rawTrack{index: ft.index, channel: int(ch), split: multi, name: ft.name, program: -1}
+		if p, ok := ft.programs[ch]; ok {
+			rt.program = p
+		}
+		if multi {
+			rt.name = partName(ft.name, ch)
+		}
+		for _, n := range ft.notes {
+			if n.ch == ch {
+				rt.notes = append(rt.notes, n)
+			}
+		}
+		out = append(out, rt)
+	}
+	return out
+}
+
+// partName labels one channel's part. MIDI names tracks, never channels,
+// so a split track's name is qualified by the channel rather than
+// repeated verbatim on parts that are different instruments.
+func partName(track string, ch uint8) string {
+	if track == "" {
+		return fmt.Sprintf("Channel %d", ch+1)
+	}
+	return fmt.Sprintf("%s (channel %d)", track, ch+1)
+}
+
+// channelList renders channels as the 1-based numbers a musician sees.
+func channelList(channels []uint8) string {
+	parts := make([]string, len(channels))
+	for i, ch := range channels {
+		parts[i] = strconv.Itoa(int(ch) + 1)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // readMaps collects tempo and time-signature meta events from every track
@@ -329,10 +485,10 @@ func (im *importer) normalize(rt *rawTrack) {
 		}
 	}
 	if moved > 0 {
-		im.warnf("track %d: quantization to the 1/32 grid moved %d note(s) by more than half a grid step (triplet timing is not preserved)", rt.index, moved)
+		im.warnf("%s: quantization to the 1/32 grid moved %d note(s) by more than half a grid step (triplet timing is not preserved)", rt.desc(), moved)
 	}
 	if shifted > 0 {
-		im.warnf("track %d: shifted %d note(s) below the instrument's range up an octave", rt.index, shifted)
+		im.warnf("%s: shifted %d note(s) below the instrument's range up an octave", rt.desc(), shifted)
 	}
 
 	sort.SliceStable(rt.notes, func(i, j int) bool {
@@ -366,8 +522,8 @@ func (im *importer) normalize(rt *rawTrack) {
 		}
 	}
 	for _, u := range unplayable {
-		im.warnf("track %d: dropped unplayable note (key %d) at tick %d: %s",
-			rt.index, u.Key, onsets[u.Beat][0].start, u.Reason)
+		im.warnf("%s: dropped unplayable note (key %d) at tick %d: %s",
+			rt.desc(), u.Key, onsets[u.Beat][0].start, u.Reason)
 	}
 	kept := rt.notes[:0]
 	for _, n := range rt.notes {
@@ -389,7 +545,7 @@ func (im *importer) normalize(rt *rawTrack) {
 		last[n.str] = n
 	}
 	if truncated > 0 {
-		im.warnf("track %d: truncated %d note(s) overlapping a later note on the same string", rt.index, truncated)
+		im.warnf("%s: truncated %d note(s) overlapping a later note on the same string", rt.desc(), truncated)
 	}
 }
 

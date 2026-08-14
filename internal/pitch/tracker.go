@@ -30,6 +30,12 @@ const (
 	// that distinguishes a re-fretted note from a bend. A bend moves a
 	// few cents per hop; a hammer-on moves at least a semitone in one.
 	trackerJumpCents = 80
+	// trackerEndHops is how many of a note's final voiced hops
+	// Note.EndCents is the median of: enough to shrug off one bad
+	// estimate, short enough that a note which bent or slid away from its
+	// opening key reports where it ARRIVED rather than an average of the
+	// journey there.
+	trackerEndHops = 5
 )
 
 // A Tracker assembles Frames into Notes with hysteresis: a note opens
@@ -42,6 +48,16 @@ const (
 // next key is still ONE note whose Cents trajectory rose. Only an onset
 // (re-pick) or a discontinuous jump (trackerJumpCents in one hop, settling
 // on a different key for trackerKeyChangeHops) splits into a new note.
+//
+// A legato SLIDE is the same case and stays one note for the same reason:
+// it is one continuously sounded string, and it moves too gradually to look
+// like a re-fret. Splitting it on arrival instead would either contradict
+// the bend contract above or, worse, manufacture a phantom note at the
+// destination key that could be matched against some genuinely later
+// expectation. So the note keeps its origin key and reports where it WENT
+// through Note.MinCents/MaxCents/EndCents — the trajectory summary a scorer
+// needs to recognize a slide destination, which Note.Cents (a median over
+// the whole note) averages away.
 type Tracker struct {
 	cfg Config
 
@@ -199,11 +215,15 @@ func (t *Tracker) Current() (Note, bool) {
 	if !t.open {
 		return Note{}, false
 	}
+	lo, hi, end := t.trajectory()
 	return Note{
-		Start:   t.start,
-		Key:     t.key,
-		Cents:   median(&t.medScratch, t.cents),
-		Clarity: median(&t.medScratch, t.clar),
+		Start:    t.start,
+		Key:      t.key,
+		Cents:    median(&t.medScratch, t.cents),
+		MinCents: lo,
+		MaxCents: hi,
+		EndCents: end,
+		Clarity:  median(&t.medScratch, t.clar),
 	}, true
 }
 
@@ -234,17 +254,50 @@ func (t *Tracker) openNote(key int, start, last int64, cents, clar []float64) {
 
 // closeNote closes the open note at end and appends it to t.notes.
 func (t *Tracker) closeNote(end int64) {
+	lo, hi, last := t.trajectory()
 	t.notes = append(t.notes, Note{
-		Start:   t.start,
-		End:     end,
-		Key:     t.key,
-		Cents:   median(&t.medScratch, t.cents),
-		Clarity: median(&t.medScratch, t.clar),
+		Start:    t.start,
+		End:      end,
+		Key:      t.key,
+		Cents:    median(&t.medScratch, t.cents),
+		MinCents: lo,
+		MaxCents: hi,
+		EndCents: last,
+		Clarity:  median(&t.medScratch, t.clar),
 	})
 	t.open = false
 	t.cents = t.cents[:0]
 	t.clar = t.clar[:0]
 	t.prevDev = 0
+}
+
+// trajectory summarizes the open note's cents history for Note: its
+// extremes, and the deviation its final hops settled on.
+//
+// The extremes come from the raw per-hop deviations, which are already
+// smoothed — every one of them is computed from the causal median filter's
+// output (medianF0), so a single wild estimate cannot widen the range on
+// its own. The settled value is a median over the last trackerEndHops so
+// that a note released or damped on its way out does not report its dying
+// hop as where it arrived.
+func (t *Tracker) trajectory() (lo, hi, end float64) {
+	if len(t.cents) == 0 {
+		return 0, 0, 0
+	}
+	lo, hi = t.cents[0], t.cents[0]
+	for _, c := range t.cents {
+		if c < lo {
+			lo = c
+		}
+		if c > hi {
+			hi = c
+		}
+	}
+	tail := t.cents
+	if len(tail) > trackerEndHops {
+		tail = tail[len(tail)-trackerEndHops:]
+	}
+	return lo, hi, median(&t.medScratch, tail)
 }
 
 // startJump begins a key-change candidacy at key k for a hop at MIDI

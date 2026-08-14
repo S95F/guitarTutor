@@ -69,7 +69,7 @@ func TestWaitModeHaltsAtFirstNote(t *testing.T) {
 	if tf := e.TotalFrames(); tf != 48000 {
 		t.Errorf("TotalFrames = %d, want 48000 (frames keep flowing while waiting)", tf)
 	}
-	evs, ok := e.WaitingOn()
+	evs, _, ok := e.WaitingOn()
 	if !ok || len(evs) != 1 {
 		t.Fatalf("WaitingOn = (%v, %v), want one event and true", evs, ok)
 	}
@@ -77,7 +77,7 @@ func TestWaitModeHaltsAtFirstNote(t *testing.T) {
 		t.Errorf("WaitingOn event = (tick %d, key %d), want (tick 0, key 40)", evs[0].Start, evs[0].Key)
 	}
 	evs[0].Key = 999 // the returned slice is a copy: mutating it is harmless
-	again, _ := e.WaitingOn()
+	again, _, _ := e.WaitingOn()
 	if again[0].Key != 40 {
 		t.Errorf("WaitingOn after mutating a previous result = key %d, want 40 (stable copy)", again[0].Key)
 	}
@@ -124,7 +124,7 @@ func TestConfirmWaitFiresOnReleaseFrame(t *testing.T) {
 	if !e.Waiting() {
 		t.Fatal("Waiting = false at the next user note")
 	}
-	evs, ok := e.WaitingOn()
+	evs, _, ok := e.WaitingOn()
 	if !ok || len(evs) != 1 || evs[0].Start != 480 || evs[0].Key != 43 {
 		t.Errorf("WaitingOn at second wait = (%v, %v), want the tick-480 key-43 event", evs, ok)
 	}
@@ -144,7 +144,7 @@ func TestWaitChordAllEventsOneFrame(t *testing.T) {
 	if !e.Waiting() {
 		t.Fatal("Waiting = false at the chord")
 	}
-	evs, ok := e.WaitingOn()
+	evs, _, ok := e.WaitingOn()
 	if !ok || len(evs) != 3 {
 		t.Fatalf("WaitingOn at chord = %d events (%v), want 3", len(evs), ok)
 	}
@@ -184,12 +184,12 @@ func TestLoopWaitRearmsEachPass(t *testing.T) {
 	}
 	e.ConfirmWait()
 	renderN(e, 24480, 480) // fires at 480, runs 24000 frames, waits at tick 4800
-	if evs, ok := e.WaitingOn(); !ok || len(evs) != 1 || evs[0].Start != 4800 || evs[0].Key != 45 {
+	if evs, _, ok := e.WaitingOn(); !ok || len(evs) != 1 || evs[0].Start != 4800 || evs[0].Key != 45 {
 		t.Fatalf("WaitingOn at second note = (%v, %v), want the tick-4800 key-45 event", evs, ok)
 	}
 	e.ConfirmWait()
 	renderN(e, 24480, 480) // fires at 24960, waits at tick 5760
-	if evs, ok := e.WaitingOn(); !ok || len(evs) != 1 || evs[0].Start != 5760 || evs[0].Key != 47 {
+	if evs, _, ok := e.WaitingOn(); !ok || len(evs) != 1 || evs[0].Start != 5760 || evs[0].Key != 47 {
 		t.Fatalf("WaitingOn at third note = (%v, %v), want the tick-5760 key-47 event", evs, ok)
 	}
 	if got := e.PassCount(); got != 0 {
@@ -207,7 +207,7 @@ func TestLoopWaitRearmsEachPass(t *testing.T) {
 	if !e.Waiting() {
 		t.Fatal("Waiting = false after the wrap, want a new wait at the bar's first note")
 	}
-	if evs, ok := e.WaitingOn(); !ok || len(evs) != 1 || evs[0].Start != 3840 || evs[0].Key != 47 {
+	if evs, _, ok := e.WaitingOn(); !ok || len(evs) != 1 || evs[0].Start != 3840 || evs[0].Key != 47 {
 		t.Errorf("WaitingOn after wrap = (%v, %v), want the tick-3840 key-47 event", evs, ok)
 	}
 
@@ -269,7 +269,7 @@ func TestSeekClearsWait(t *testing.T) {
 	if !e.Waiting() {
 		t.Fatal("Waiting = false after seeking to a user note, want re-armed")
 	}
-	if evs, ok := e.WaitingOn(); !ok || len(evs) != 1 || evs[0].Start != 3840 || evs[0].Key != 47 {
+	if evs, _, ok := e.WaitingOn(); !ok || len(evs) != 1 || evs[0].Start != 3840 || evs[0].Key != 47 {
 		t.Fatalf("WaitingOn after seek = (%v, %v), want the tick-3840 key-47 event", evs, ok)
 	}
 	if len(v.ons) != 0 {
@@ -306,7 +306,7 @@ func TestPauseClearsWaitAndPlayRearms(t *testing.T) {
 	if !e.Waiting() {
 		t.Fatal("Waiting = false after resuming, want re-armed at the next user note")
 	}
-	if evs, ok := e.WaitingOn(); !ok || len(evs) != 1 || evs[0].Start != 0 || evs[0].Key != 40 {
+	if evs, _, ok := e.WaitingOn(); !ok || len(evs) != 1 || evs[0].Start != 0 || evs[0].Key != 40 {
 		t.Fatalf("WaitingOn after resume = (%v, %v), want the tick-0 key-40 event", evs, ok)
 	}
 	e.ConfirmWait()
@@ -338,7 +338,7 @@ func TestWaitBackingTrackPlaysBetweenWaits(t *testing.T) {
 	if !e.Waiting() {
 		t.Fatal("Waiting = false at the user's second note")
 	}
-	if evs, ok := e.WaitingOn(); !ok || len(evs) != 1 || evs[0].Start != 1920 || evs[0].Key != 43 {
+	if evs, _, ok := e.WaitingOn(); !ok || len(evs) != 1 || evs[0].Start != 1920 || evs[0].Key != 43 {
 		t.Fatalf("WaitingOn = (%v, %v), want the tick-1920 key-43 event", evs, ok)
 	}
 	if len(user.ons) != 1 || user.ons[0] != (noteRec{480, 40}) {
@@ -389,7 +389,7 @@ func TestWaitMutedUserTrackStillWaits(t *testing.T) {
 
 // TestWaitGenerationSeekRewaitSameTick is the W4 regression (seek half):
 // a seek during a wait clears it, and the position can re-wait at the very
-// same tick — indistinguishable through WaitingOn alone, so gate progress
+// same tick â€” indistinguishable through WaitingOn alone, so gate progress
 // from the abandoned wait would leak into the new one. WaitGeneration must
 // tell the two waits apart.
 func TestWaitGenerationSeekRewaitSameTick(t *testing.T) {
@@ -415,7 +415,7 @@ func TestWaitGenerationSeekRewaitSameTick(t *testing.T) {
 	if !e.Waiting() {
 		t.Fatal("Waiting = false after the seek, want a new wait at tick 0")
 	}
-	if evs, ok := e.WaitingOn(); !ok || len(evs) != 1 || evs[0].Start != 0 {
+	if evs, _, ok := e.WaitingOn(); !ok || len(evs) != 1 || evs[0].Start != 0 {
 		t.Fatalf("WaitingOn after seek = (%v, %v), want the same tick-0 event", evs, ok)
 	}
 	if g2 := e.WaitGeneration(); g2 != g1+1 {
@@ -424,7 +424,7 @@ func TestWaitGenerationSeekRewaitSameTick(t *testing.T) {
 }
 
 // TestWaitGenerationLoopWrap is the W4 regression (loop half): each pass
-// waits again at the loop's first note — same tick, same events — and the
+// waits again at the loop's first note â€” same tick, same events â€” and the
 // generation must increase on every engage, including across the wrap.
 func TestWaitGenerationLoopWrap(t *testing.T) {
 	e, _ := newFixtureEngine(t, Options{})
@@ -451,7 +451,7 @@ func TestWaitGenerationLoopWrap(t *testing.T) {
 	if !e.Waiting() {
 		t.Fatal("Waiting = false after the wrap, want a new wait at the bar's first note")
 	}
-	if evs, ok := e.WaitingOn(); !ok || len(evs) != 1 || evs[0].Start != 3840 {
+	if evs, _, ok := e.WaitingOn(); !ok || len(evs) != 1 || evs[0].Start != 3840 {
 		t.Fatalf("WaitingOn after wrap = (%v, %v), want the tick-3840 event again", evs, ok)
 	}
 	if g := e.WaitGeneration(); g != 4 {
@@ -461,7 +461,7 @@ func TestWaitGenerationLoopWrap(t *testing.T) {
 
 // TestWaitingRenderDoesNotAllocate holds the engine in a waiting steady
 // state (wait mode on, loop and metronome armed) and requires zero
-// allocations per RenderFrames — the same bar the playing path clears.
+// allocations per RenderFrames â€” the same bar the playing path clears.
 func TestWaitingRenderDoesNotAllocate(t *testing.T) {
 	var reg []*stubVoice
 	sc := fixtureScore(t)
@@ -486,14 +486,14 @@ func TestWaitingRenderDoesNotAllocate(t *testing.T) {
 // D2. At any practice scale where (waitTick-anchor)*framesPerTick is not
 // an exact integer, the halted position used to be reconstructed from the
 // floored action frame and PosTick() reported waitTick-1 for the whole
-// wait — the UI then showed the bar BEFORE the note being waited on. The
+// wait â€” the UI then showed the bar BEFORE the note being waited on. The
 // halted position is the wait tick itself. (Every other wait test runs at
 // scale 1.0, where fpt is exactly 25 and the bug is invisible.)
 func TestWaitPositionExactAtFractionalScale(t *testing.T) {
 	var reg []*stubVoice
 	e := New(waitDuetScore(t), Options{Voices: newStubFactory(&reg)})
 	e.SetWaitMode(true)
-	e.SetTempoScale(0.95) // fpt = 26.3157... — nothing lands on an integer
+	e.SetTempoScale(0.95) // fpt = 26.3157... â€” nothing lands on an integer
 	e.Play()
 
 	// First wait point: the user note at tick 0 (exact at any scale).
@@ -512,5 +512,219 @@ func TestWaitPositionExactAtFractionalScale(t *testing.T) {
 	}
 	if got := e.PosTick(); got != 1920 {
 		t.Errorf("PosTick while waiting = %d, want exactly the wait tick 1920", got)
+	}
+}
+
+// twoUserScore builds a score whose tracks are BOTH RoleUser — a shape the
+// text format allows and hand-written .gtab files use for duets. Track 0
+// has quarter notes at ticks 0 and 1920; track 1 has one at tick 960,
+// strictly between them.
+func twoUserScore(t *testing.T) *score.Score {
+	t.Helper()
+	s := &score.Score{
+		Tempos: score.TempoMap{{Tick: 0, USPerQuarter: score.USPerQuarter(120)}},
+		Meters: score.MeterMap{{Tick: 0, Num: 4, Den: 4}},
+	}
+	first := &score.Track{Name: "Lead", Tuning: score.StandardTuning}
+	second := &score.Track{Name: "Harmony", Tuning: score.StandardTuning}
+	s.Tracks = []*score.Track{first, second}
+	fb := first.AppendBar(4, 4)
+	fb.AddBeat(score.Quarter, score.Note{String: 6, Fret: 0}) // tick 0
+	fb.AddBeat(score.Quarter)                                 // rest
+	fb.AddBeat(score.Quarter, score.Note{String: 6, Fret: 3}) // tick 1920
+	fb.AddBeat(score.Quarter)                                 // rest
+	sb := second.AppendBar(4, 4)
+	sb.AddBeat(score.Quarter)                                 // rest
+	sb.AddBeat(score.Quarter, score.Note{String: 5, Fret: 0}) // tick 960
+	sb.AddBeat(score.Quarter)                                 // rest
+	sb.AddBeat(score.Quarter)                                 // rest
+	if err := s.Validate(); err != nil {
+		t.Fatalf("two-user score does not validate: %v", err)
+	}
+	return s
+}
+
+// TestWaitingOnCarriesItsOwnGeneration is the W1 regression. The events and
+// the generation are the two halves of "which wait is this, and what does
+// it want", and the wiring pairs them to decide whether to re-arm. Fetched
+// by two calls they could come from different waits — the render thread
+// releases one and engages the next in between — and the gate would arm
+// with events the position has already passed, never be satisfiable, and
+// never re-arm, freezing playback for good.
+//
+// One call returns both, so here the pairing is simply checked to be
+// truthful: each successive wait reports a distinct, increasing generation
+// alongside the events of the tick it is actually halted on.
+func TestWaitingOnCarriesItsOwnGeneration(t *testing.T) {
+	e := New(waitDuetScore(t), Options{SampleRate: 48000, Voices: newStubFactory(new([]*stubVoice))})
+	e.SetWaitMode(true)
+	e.Play()
+
+	want := []struct {
+		tick int64
+		key  int
+	}{{0, 40}, {1920, 43}}
+	var lastGen uint64
+	for i, w := range want {
+		renderN(e, 96000, 480)
+		evs, gen, ok := e.WaitingOn()
+		if !ok || len(evs) != 1 {
+			t.Fatalf("wait %d: WaitingOn = (%v, %d, %v), want one event", i+1, evs, gen, ok)
+		}
+		if evs[0].Start != w.tick || evs[0].Key != w.key {
+			t.Errorf("wait %d: event = (tick %d, key %d), want (tick %d, key %d)",
+				i+1, evs[0].Start, evs[0].Key, w.tick, w.key)
+		}
+		if gen <= lastGen {
+			t.Errorf("wait %d: generation = %d, want > the previous wait's %d", i+1, gen, lastGen)
+		}
+		if live := e.WaitGeneration(); gen != live {
+			t.Errorf("wait %d: WaitingOn reported generation %d, WaitGeneration %d — they must agree", i+1, gen, live)
+		}
+		lastGen = gen
+		e.ConfirmWait()
+	}
+}
+
+// TestWaitingOnSnapshotIsSingleValued is the concurrency half of W1: with
+// the render loop releasing and re-engaging waits as fast as it can, a
+// reader must never see one generation describing two different wait
+// points. That is exactly the confusion the old two-call wiring produced,
+// and it is what makes a wait unreleasable. Run under -race.
+func TestWaitingOnSnapshotIsSingleValued(t *testing.T) {
+	e := New(waitDuetScore(t), Options{SampleRate: 48000, Voices: newStubFactory(new([]*stubVoice))})
+	e.SetWaitMode(true)
+	e.SetLoop(0, 3840) // so waits keep recurring
+	e.Play()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		l := make([]float32, 256)
+		r := make([]float32, 256)
+		for i := 0; i < 4000; i++ {
+			e.RenderFrames(l, r)
+			if e.Waiting() {
+				e.ConfirmWait()
+			}
+		}
+	}()
+
+	seen := map[uint64]int64{}
+	observed := 0
+	for {
+		select {
+		case <-done:
+			if observed == 0 {
+				t.Skip("the render loop never overlapped an observation; nothing was exercised")
+			}
+			return
+		default:
+		}
+		evs, gen, ok := e.WaitingOn()
+		if !ok || len(evs) == 0 {
+			continue
+		}
+		observed++
+		if prev, dup := seen[gen]; dup && prev != evs[0].Start {
+			t.Fatalf("generation %d reported wait tick %d and %d — one generation must mean one wait point",
+				gen, prev, evs[0].Start)
+		}
+		seen[gen] = evs[0].Start
+	}
+}
+
+// TestWaitTrackRestrictsWaitsToOneTrack is the W2 regression. Waiting at
+// every RoleUser track's notes freezes a two-user-part piece: only one
+// track is scored and drawn, so a wait engaged on the other one is a halt
+// nothing can release. SetWaitTrack narrows the halt to the practiced
+// track — here track 0, whose notes are at ticks 0 and 1920 — so the
+// tick-960 note of track 1 plays straight through.
+func TestWaitTrackRestrictsWaitsToOneTrack(t *testing.T) {
+	e := New(twoUserScore(t), Options{SampleRate: 48000, Voices: newStubFactory(new([]*stubVoice))})
+	e.SetWaitTrack(0)
+	e.SetWaitMode(true)
+	e.Play()
+
+	renderN(e, 96000, 480)
+	if _, _, ok := e.WaitingOn(); !ok || e.PosTick() != 0 {
+		t.Fatalf("first wait: waiting=%v PosTick=%d, want waiting at tick 0", ok, e.PosTick())
+	}
+	e.ConfirmWait()
+
+	renderN(e, 96000, 480)
+	evs, _, ok := e.WaitingOn()
+	if !ok {
+		t.Fatal("never reached a second wait point")
+	}
+	if evs[0].Start != 1920 {
+		t.Errorf("second wait is on tick %d, want 1920 — tick 960 belongs to track 1, which is not being practiced", evs[0].Start)
+	}
+}
+
+// TestWaitTrackDefaultWaitsOnEveryUserTrack pins the other side of
+// SetWaitTrack: left alone the engine keeps its documented behaviour of
+// halting at any user track's note, which is what a render or a
+// play-along with no single practiced part wants.
+func TestWaitTrackDefaultWaitsOnEveryUserTrack(t *testing.T) {
+	e := New(twoUserScore(t), Options{SampleRate: 48000, Voices: newStubFactory(new([]*stubVoice))})
+	e.SetWaitMode(true)
+	e.Play()
+
+	renderN(e, 96000, 480)
+	e.ConfirmWait()
+	renderN(e, 96000, 480)
+	evs, _, ok := e.WaitingOn()
+	if !ok || evs[0].Start != 960 {
+		t.Errorf("second wait = (%v, %v), want the track-1 note at tick 960", evs, ok)
+	}
+}
+
+// TestWaitTrackOutOfRangeFallsBackToEveryUserTrack: a caller naming a
+// track the score does not have must not silently disable wait mode.
+func TestWaitTrackOutOfRangeFallsBackToEveryUserTrack(t *testing.T) {
+	e := New(twoUserScore(t), Options{SampleRate: 48000, Voices: newStubFactory(new([]*stubVoice))})
+	e.SetWaitTrack(7)
+	e.SetWaitMode(true)
+	e.Play()
+	renderN(e, 96000, 480)
+	if _, _, ok := e.WaitingOn(); !ok {
+		t.Error("an out-of-range wait track stopped wait mode engaging at all")
+	}
+}
+
+// TestWaitTrackChangeKeepsThePendingRelease is the fix-verification
+// regression for SetWaitTrack. A confirmed wait's release is not spent at
+// the moment of confirmation — it is spent when the held events actually
+// fire, one render later. Deciding whose release it is by asking the
+// CURRENT wait track meant a SetWaitTrack in between left the release
+// owed to a track no longer waited on: it was never consumed there, and
+// went on to suppress the NEXT wait point instead, which the player
+// sailed straight through. A wait is honoured under the rules it engaged
+// with.
+func TestWaitTrackChangeKeepsThePendingRelease(t *testing.T) {
+	e := New(twoUserScore(t), Options{SampleRate: 48000, Voices: newStubFactory(new([]*stubVoice))})
+	e.SetWaitTrack(1) // practise the harmony part: its only note is tick 960
+	e.SetWaitMode(true)
+	e.Play()
+
+	renderN(e, 96000, 480)
+	evs, _, ok := e.WaitingOn()
+	if !ok || evs[0].Start != 960 {
+		t.Fatalf("first wait = (%v, %v), want the track-1 note at tick 960", evs, ok)
+	}
+
+	// Confirm, then switch to practising track 0 before the release has
+	// been rendered.
+	e.ConfirmWait()
+	e.SetWaitTrack(0)
+
+	renderN(e, 96000, 480)
+	evs, _, ok = e.WaitingOn()
+	if !ok {
+		t.Fatal("never halted again; the pending release was spent on track 0's wait point instead of track 1's fired note")
+	}
+	if evs[0].Start != 1920 {
+		t.Errorf("second wait is on tick %d, want track 0's note at 1920", evs[0].Start)
 	}
 }

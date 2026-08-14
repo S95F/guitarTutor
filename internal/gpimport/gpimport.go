@@ -22,6 +22,11 @@
 // rest and overfull bars truncated, with warnings, so the result always
 // passes score.Validate.
 //
+// Percussion tracks are the one whole-track omission: a drum kit has no
+// string/fret spelling, so such a track is dropped with one warning
+// naming it rather than imported as a bar-long row of rests. Import fails
+// only if that leaves nothing behind.
+//
 // Clean-room note (docs/DECISIONS.md D3): the reference implementations
 // for this format are MPL/LGPL licensed; nothing here is ported or
 // paraphrased from their source. The importer is written from the
@@ -108,10 +113,24 @@ const maxImportFret = 30
 // first handful of frets, so 12 is already generous.
 const maxCapoFret = 12
 
+// maxTupletPart bounds a PrimaryTuplet's num and den. Real tuplets never
+// reach 13:8, and without a bound dur*int64(den) overflows int64 and
+// wraps to an arbitrary duration that fillBar then quietly truncates to
+// the bar — a wrong note with nothing said about it. 64 clears every real
+// tuplet and keeps the multiplication exact.
+const maxTupletPart = 64
+
+// gmPercussionChannel is the wire number of General MIDI channel 10, the
+// percussion channel. A track assigned to it plays a drum kit, where the
+// key selects an instrument rather than a pitch; internal/midiimport
+// applies the same rule to Standard MIDI Files.
+const gmPercussionChannel = 9
+
 // Import parses a Guitar Pro 7/8 .gp file into a Score, returning
 // human-readable warnings for everything the import skipped or changed.
-// The first track becomes the RoleUser track, later ones RoleBacking.
-// The result always passes score.Validate.
+// Percussion tracks are dropped with a warning (see trackOrder); of what
+// remains the first track becomes the RoleUser track, later ones
+// RoleBacking. The result always passes score.Validate.
 func Import(data []byte) (*score.Score, []string, error) {
 	doc, err := readGPIF(data)
 	if err != nil {
@@ -208,10 +227,82 @@ type gpAutomation struct {
 }
 
 type gpTrack struct {
-	ID         int          `xml:"id,attr"`
-	Name       string       `xml:"Name"`
-	Staves     []gpStaff    `xml:"Staves>Staff"`
-	Properties []gpProperty `xml:"Properties>Property"` // older single-staff layout
+	ID   int    `xml:"id,attr"`
+	Name string `xml:"Name"`
+	// The three places a GPIF file can mark a track as a drum kit; see
+	// gpTrack.percussion.
+	Instrument    gpInstrumentRef `xml:"Instrument"`
+	InstrumentSet gpInstrumentSet `xml:"InstrumentSet"`
+	GeneralMidi   gpGeneralMidi   `xml:"GeneralMidi"`
+	Staves        []gpStaff       `xml:"Staves>Staff"`
+	Properties    []gpProperty    `xml:"Properties>Property"` // older single-staff layout
+}
+
+// gpInstrumentRef is the <Instrument ref="..."/> pointer to the track's
+// instrument definition; drum kits use a ref naming the kit.
+type gpInstrumentRef struct {
+	Ref string `xml:"ref,attr"`
+}
+
+// gpInstrumentSet describes a track's instrument family; percussion
+// tracks declare a drum-kit type.
+type gpInstrumentSet struct {
+	Name string `xml:"Name"`
+	Type string `xml:"Type"`
+}
+
+// gpGeneralMidi carries a track's General MIDI assignment. The channel is
+// a pointer so an absent element is distinguishable from channel 0.
+type gpGeneralMidi struct {
+	PrimaryChannel *int `xml:"PrimaryChannel"`
+}
+
+// drumKitNames are the InstrumentSet names that mean a kit, matched
+// WHOLE. Substring matching was the first attempt and it was wrong in the
+// expensive direction: General MIDI is full of pitched instruments whose
+// names contain "drum" or "perc" — Steel Drums (115), Percussive Organ
+// (18), Melodic Tom, vibraphone refs like "perc-vibraphone" — and GPIF's
+// own family for those is literally "pitchedPercussion". Every one of
+// them was being deleted from the score, silently taking the part the
+// player opened the file for. A kit announces itself exactly; a pitched
+// instrument merely mentions the word.
+var drumKitNames = map[string]bool{
+	"percussion": true,
+	"drums":      true,
+	"drumset":    true,
+	"drum kit":   true,
+	"drumkit":    true,
+}
+
+// percussion reports whether a track is a drum kit, and which marker said
+// so (for the warning).
+//
+// GPIF records this in more than one place depending on which Guitar Pro
+// version wrote the file, so every marker counts — but each is matched
+// exactly. The two errors are not symmetric: an undetected drum track
+// imports as rests, which is visible, warned about, and merely useless;
+// a pitched track misread as a kit vanishes from the score with a warning
+// that says it was drums. The second is worse, so precision wins.
+func (gt *gpTrack) percussion() (bool, string) {
+	// Channel 10 is the General MIDI percussion channel and is
+	// unambiguous.
+	if c := gt.GeneralMidi.PrimaryChannel; c != nil && *c == gmPercussionChannel {
+		return true, "MIDI channel 10"
+	}
+	// GPIF's own instrument family. "pitchedPercussion" — vibraphone,
+	// marimba, steel drums — is a DIFFERENT value and renders through the
+	// ordinary pitched path like any other melodic part.
+	if t := strings.ToLower(strings.TrimSpace(gt.InstrumentSet.Type)); t == "drumkit" {
+		return true, fmt.Sprintf("instrument set %q", gt.InstrumentSet.Type)
+	}
+	if n := strings.ToLower(strings.TrimSpace(gt.InstrumentSet.Name)); drumKitNames[n] {
+		return true, fmt.Sprintf("instrument set %q", gt.InstrumentSet.Name)
+	}
+	// "drmkt" is the instrument ref Guitar Pro gives a kit.
+	if r := strings.ToLower(strings.TrimSpace(gt.Instrument.Ref)); strings.HasPrefix(r, "drmkt") {
+		return true, fmt.Sprintf("instrument %q", gt.Instrument.Ref)
+	}
+	return false, ""
 }
 
 type gpStaff struct {
@@ -313,6 +404,12 @@ func (im *importer) run() (*score.Score, []string, error) {
 	im.index()
 	order := im.trackOrder()
 	if len(order) == 0 {
+		if len(im.doc.Tracks) > 0 {
+			// The warnings name each dropped track; say plainly why
+			// there is nothing left rather than claiming the file has
+			// no tracks at all.
+			return nil, im.warns, fmt.Errorf("no importable tracks: every track in the file is percussion")
+		}
 		return nil, im.warns, fmt.Errorf("no tracks in file")
 	}
 	if len(im.doc.MasterBars) == 0 {
@@ -325,12 +422,13 @@ func (im *importer) run() (*score.Score, []string, error) {
 	}
 	s.Meters = meters
 	s.Tempos = im.tempos()
-	for ti, gt := range order {
+	for i, ref := range order {
 		role := score.RoleBacking
-		if ti == 0 {
+		if i == 0 {
 			role = score.RoleUser
 		}
-		s.Tracks = append(s.Tracks, im.buildTrack(ti, gt, role))
+		// ref.orig, never i: bars are indexed by the original order.
+		s.Tracks = append(s.Tracks, im.buildTrack(ref.orig, ref.gt, role))
 	}
 	im.flushDeferredWarnings()
 	if err := s.Validate(); err != nil {
@@ -368,24 +466,73 @@ func (im *importer) index() {
 	}
 }
 
-// trackOrder resolves the master track's track-id list, falling back to
-// document order when the list is absent.
-func (im *importer) trackOrder() []*gpTrack {
-	var order []*gpTrack
+// A trackRef is one track the import keeps, paired with the position it
+// occupied in the document's resolved track order.
+//
+// The two indexes diverge the moment any track is filtered out, and they
+// must never be confused: <MasterBar><Bars> lists one bar id per track in
+// the ORIGINAL order, so looking a bar up by the kept-slice index hands a
+// track its neighbour's music — the user would be shown, and scored
+// against, another instrument's part.
+type trackRef struct {
+	gt   *gpTrack
+	orig int
+}
+
+// trackOrder resolves the master track's track-id list into the tracks to
+// import, falling back to document order when that list resolves to
+// nothing, and dropping percussion tracks along the way.
+//
+// Skipped tracks still occupy their slot in the resolved order, because
+// that order is what <MasterBar><Bars> is indexed by; each kept track
+// therefore carries its original position rather than relying on its
+// position in the returned slice.
+//
+// Percussion is dropped rather than imported as silence: a drum part has
+// no string/fret spelling at all, so the pitched path turns every hit
+// into a rest — and an all-rest track in the first slot would become the
+// user's practice part, teaching an empty song with no explanation.
+func (im *importer) trackOrder() []trackRef {
+	var resolved []*gpTrack
+	found := 0
 	for _, id := range im.ids(im.doc.MasterTrack.Tracks, "master track <Tracks>") {
 		gt := im.tracks[id]
 		if gt == nil {
 			im.warnf("master track references track %d, which does not exist; skipped", id)
+		} else {
+			found++
+		}
+		// nil keeps the slot so later tracks keep their original index.
+		resolved = append(resolved, gt)
+	}
+	if found == 0 {
+		resolved = resolved[:0]
+		for i := range im.doc.Tracks {
+			resolved = append(resolved, &im.doc.Tracks[i])
+		}
+	}
+	var order []trackRef
+	for i, gt := range resolved {
+		if gt == nil {
 			continue
 		}
-		order = append(order, gt)
-	}
-	if len(order) == 0 {
-		for i := range im.doc.Tracks {
-			order = append(order, &im.doc.Tracks[i])
+		if perc, why := gt.percussion(); perc {
+			im.warnf("%s is a percussion part (%s); skipped, because drum notation has no string/fret spelling this importer can render",
+				trackLabel(gt, i), why)
+			continue
 		}
+		order = append(order, trackRef{gt: gt, orig: i})
 	}
 	return order
+}
+
+// trackLabel names a track in a warning by its 1-based position in the
+// document's track order, plus its name when the file gave it one.
+func trackLabel(gt *gpTrack, orig int) string {
+	if strings.TrimSpace(gt.Name) == "" {
+		return fmt.Sprintf("track %d", orig+1)
+	}
+	return fmt.Sprintf("track %d (%s)", orig+1, gt.Name)
 }
 
 // ids parses a space-separated id list, warning about unparsable tokens.
@@ -531,8 +678,13 @@ func (im *importer) tempos() score.TempoMap {
 
 // buildTrack converts one GPIF track: tuning and capo from its (first)
 // staff's properties, then one score bar per master bar.
-func (im *importer) buildTrack(ti int, gt *gpTrack, role score.TrackRole) *score.Track {
-	tuning, capo := im.trackSetup(ti, gt)
+//
+// orig is the track's position in the document's track order, not its
+// position among the tracks being kept — every bar lookup below is
+// indexed by the original order, and warnings quote it so a number in a
+// warning matches the track number in the file.
+func (im *importer) buildTrack(orig int, gt *gpTrack, role score.TrackRole) *score.Track {
+	tuning, capo := im.trackSetup(orig, gt)
 	tr := &score.Track{
 		Name:    gt.Name,
 		Tuning:  tuning,
@@ -542,16 +694,16 @@ func (im *importer) buildTrack(ti int, gt *gpTrack, role score.TrackRole) *score
 	}
 	for mi := range im.doc.MasterBars {
 		bar := tr.AppendBar(im.barNums[mi], im.barDens[mi])
-		im.fillBar(ti, mi, bar, tuning, capo)
+		im.fillBar(orig, mi, bar, tuning, capo)
 	}
 	return tr
 }
 
 // trackSetup extracts a track's tuning (GPIF stores open-string pitches
 // low to high; the score model wants highest first) and capo fret.
-func (im *importer) trackSetup(ti int, gt *gpTrack) (score.Tuning, int) {
+func (im *importer) trackSetup(orig int, gt *gpTrack) (score.Tuning, int) {
 	if len(gt.Staves) > 1 {
-		im.warnf("track %d (%s): %d staves; only the first is imported", ti+1, gt.Name, len(gt.Staves))
+		im.warnf("track %d (%s): %d staves; only the first is imported", orig+1, gt.Name, len(gt.Staves))
 	}
 	props := gt.Properties
 	if len(gt.Staves) > 0 {
@@ -567,7 +719,7 @@ func (im *importer) trackSetup(ti int, gt *gpTrack) (score.Tuning, int) {
 			}
 			tn, err := parseTuning(p.Pitches)
 			if err != nil {
-				im.warnf("track %d (%s): bad tuning %q (%v); assuming standard", ti+1, gt.Name, p.Pitches, err)
+				im.warnf("track %d (%s): bad tuning %q (%v); assuming standard", orig+1, gt.Name, p.Pitches, err)
 				continue
 			}
 			tuning = tn
@@ -578,7 +730,7 @@ func (im *importer) trackSetup(ti int, gt *gpTrack) (score.Tuning, int) {
 		}
 	}
 	if tuning == nil {
-		im.warnf("track %d (%s): no tuning property; assuming standard EADGBE", ti+1, gt.Name)
+		im.warnf("track %d (%s): no tuning property; assuming standard EADGBE", orig+1, gt.Name)
 		tuning = append(score.Tuning{}, score.StandardTuning...)
 	}
 	if capo < 0 || capo > maxCapoFret {
@@ -586,7 +738,7 @@ func (im *importer) trackSetup(ti int, gt *gpTrack) (score.Tuning, int) {
 		// nonsense value to "no capo" is the least-wrong recovery: the
 		// authored frets stay intact and only the sounding octave-ish
 		// offset is lost.
-		im.warnf("track %d (%s): capo fret %d outside 0-%d; using no capo", ti+1, gt.Name, capo, maxCapoFret)
+		im.warnf("track %d (%s): capo fret %d outside 0-%d; using no capo", orig+1, gt.Name, capo, maxCapoFret)
 		capo = 0
 	}
 	return tuning, capo
@@ -624,8 +776,8 @@ type beatData struct {
 // fillBar resolves a track's bar in master bar mi and lays its beats
 // into the score bar, padding underfull bars with a trailing rest and
 // truncating overfull ones, so the bar always exactly fills its meter.
-func (im *importer) fillBar(ti, mi int, bar *score.Bar, tuning score.Tuning, capo int) {
-	beats := im.barBeats(ti, mi, tuning, capo)
+func (im *importer) fillBar(orig, mi int, bar *score.Bar, tuning score.Tuning, capo int) {
+	beats := im.barBeats(orig, mi, tuning, capo)
 	barLen := bar.Len()
 	var filled int64
 	over := false
@@ -643,29 +795,36 @@ func (im *importer) fillBar(ti, mi int, bar *score.Bar, tuning score.Tuning, cap
 		filled += dur
 	}
 	if over {
-		im.warnf("track %d bar %d: beats overfill the %d/%d bar; truncated", ti+1, mi+1, bar.Num, bar.Den)
+		im.warnf("track %d bar %d: beats overfill the %d/%d bar; truncated", orig+1, mi+1, bar.Num, bar.Den)
 	}
 	if filled < barLen {
 		bar.AddBeat(barLen - filled)
 		if len(beats) > 0 {
-			im.warnf("track %d bar %d: beats fill %d of %d ticks; padded with a rest", ti+1, mi+1, filled, barLen)
+			im.warnf("track %d bar %d: beats fill %d of %d ticks; padded with a rest", orig+1, mi+1, filled, barLen)
 		}
 	}
 }
 
-// barBeats resolves master bar mi's bar for track ti down to beats:
-// picks the first voice (warning when other voices hold beats), skips
-// grace beats, and resolves each beat's rhythm and notes.
-func (im *importer) barBeats(ti, mi int, tuning score.Tuning, capo int) []beatData {
+// barBeats resolves master bar mi's bar for the track at original index
+// orig down to beats: picks the first voice (warning when other voices
+// hold beats), skips grace beats, and resolves each beat's rhythm and
+// notes.
+//
+// <Bars> holds one bar id per track in the document's track order, so orig
+// — not the track's index among the kept tracks — is the only correct
+// subscript here. Indexing by the kept position gives a track the bars of
+// whichever track precedes it by the number of tracks filtered out ahead
+// of it, silently teaching another instrument's part.
+func (im *importer) barBeats(orig, mi int, tuning score.Tuning, capo int) []beatData {
 	mb := im.doc.MasterBars[mi]
 	barIDs := im.ids(mb.Bars, fmt.Sprintf("master bar %d <Bars>", mi+1))
-	if ti >= len(barIDs) {
+	if orig >= len(barIDs) {
 		if len(barIDs) > 0 {
-			im.warnf("master bar %d lists no bar for track %d; treated as empty", mi+1, ti+1)
+			im.warnf("master bar %d lists no bar for track %d; treated as empty", mi+1, orig+1)
 		}
 		return nil
 	}
-	barID := barIDs[ti]
+	barID := barIDs[orig]
 	if barID < 0 {
 		return nil
 	}
@@ -691,14 +850,14 @@ func (im *importer) barBeats(ti, mi int, tuning score.Tuning, capo int) []beatDa
 		}
 	}
 	if extra > 0 {
-		im.warnf("track %d bar %d: %d additional voice(s) hold beats; only the first voice is imported", ti+1, mi+1, extra)
+		im.warnf("track %d bar %d: %d additional voice(s) hold beats; only the first voice is imported", orig+1, mi+1, extra)
 	}
 	if first < 0 {
 		return nil
 	}
 	voice := im.voices[first]
 	if voice == nil {
-		im.warnf("track %d bar %d: voice %d does not exist; treated as empty", ti+1, mi+1, first)
+		im.warnf("track %d bar %d: voice %d does not exist; treated as empty", orig+1, mi+1, first)
 		return nil
 	}
 
@@ -715,7 +874,7 @@ func (im *importer) barBeats(ti, mi int, tuning score.Tuning, capo int) []beatDa
 		}
 		out = append(out, beatData{
 			dur:   im.rhythmDur(gbt),
-			notes: im.beatNotes(ti, mi, gbt, tuning, capo),
+			notes: im.beatNotes(orig, mi, gbt, tuning, capo),
 		})
 	}
 	return out
@@ -754,10 +913,17 @@ func (im *importer) rhythmDur(gbt *gpBeat) int64 {
 		}
 	}
 	if rh.Tuplet != nil {
-		if rh.Tuplet.Num > 0 && rh.Tuplet.Den > 0 {
-			dur = dur * int64(rh.Tuplet.Den) / int64(rh.Tuplet.Num)
-		} else {
-			im.warnf("rhythm %d: bad tuplet %d:%d; ignored", rh.ID, rh.Tuplet.Num, rh.Tuplet.Den)
+		num, den := rh.Tuplet.Num, rh.Tuplet.Den
+		switch {
+		case num <= 0 || den <= 0:
+			im.warnf("rhythm %d: bad tuplet %d:%d; ignored", rh.ID, num, den)
+		case num > maxTupletPart || den > maxTupletPart:
+			// Unbounded, dur*int64(den) wraps int64 and the beat ends up
+			// an arbitrary length that fillBar truncates to the bar
+			// without ever naming the tuplet as the cause.
+			im.warnf("rhythm %d: implausible tuplet %d:%d, past the %d limit; ignored", rh.ID, num, den, maxTupletPart)
+		default:
+			dur = dur * int64(den) / int64(num)
 		}
 	}
 	if dur <= 0 {
@@ -778,7 +944,7 @@ func (im *importer) rhythmDur(gbt *gpBeat) int64 {
 // structurally unreadable: a single fret-64 note (or a weird-but-legal
 // tuning+fret sum past MIDI 127) must not make the final Validate reject
 // the whole score.
-func (im *importer) beatNotes(ti, mi int, gbt *gpBeat, tuning score.Tuning, capo int) []score.Note {
+func (im *importer) beatNotes(orig, mi int, gbt *gpBeat, tuning score.Tuning, capo int) []score.Note {
 	nStrings := len(tuning)
 	var out []score.Note
 	for _, nid := range im.ids(gbt.Notes, fmt.Sprintf("beat %d <Notes>", gbt.ID)) {
@@ -809,7 +975,7 @@ func (im *importer) beatNotes(ti, mi int, gbt *gpBeat, tuning score.Tuning, capo
 		}
 		if *fret < 0 || *fret > maxImportFret {
 			im.warnf("track %d bar %d: string %d fret %d outside the 0-%d fret range; note skipped",
-				ti+1, mi+1, str, *fret, maxImportFret)
+				orig+1, mi+1, str, *fret, maxImportFret)
 			continue
 		}
 		// Belt and suspenders: string, fret, and capo are each in range,
@@ -818,7 +984,7 @@ func (im *importer) beatNotes(ti, mi int, gbt *gpBeat, tuning score.Tuning, capo
 		// kill the import.
 		if k := tuning[str-1] + capo + *fret; k < 0 || k > 127 {
 			im.warnf("track %d bar %d: string %d fret %d sounds MIDI key %d, outside 0-127; note skipped",
-				ti+1, mi+1, str, *fret, k)
+				orig+1, mi+1, str, *fret, k)
 			continue
 		}
 		out = append(out, score.Note{

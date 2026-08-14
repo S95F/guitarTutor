@@ -16,7 +16,20 @@
 //   - Only voice 1 and staff 1 are imported; notes in other voices or
 //     staves are skipped with a warning (their durations still move the
 //     time cursor, so voice-1 timing is unaffected).
-//   - Grace notes and ornaments are skipped with a warning.
+//   - Grace notes and ornaments are skipped with a warning, as are
+//     <unpitched> percussion notes (counted once per part, not per note —
+//     a drum staff would otherwise bury every warning that matters).
+//   - <attributes><transpose> is honored: <pitch> is the WRITTEN pitch and
+//     the score model stores what SOUNDS, so chromatic + octave-change
+//     (and <double/>) are added to every note. A guitar part notated in
+//     treble clef with octave-change -1 — what MuseScore, Guitar Pro and
+//     Finale all emit — would otherwise import an octave sharp.
+//   - measure implicit="yes" (a pickup) is right-aligned to the barline.
+//     The score model has no short bar, so the bar stays full and gains a
+//     leading rest; the pickup still ends where beat 1 of bar 1 begins.
+//   - Forward/backward repeats and voltas are EXPANDED into a flat play
+//     order (see repeat.go). D.C./D.S./coda/fine jumps are not followed —
+//     they warn, since a wrong expansion is worse than none.
 //   - <backup> and <forward> are honored exactly — mishandling them is
 //     the documented silent-corruption trap in partial MusicXML
 //     implementations (docs/DECISIONS.md D3), so the cursor math is
@@ -228,10 +241,14 @@ func (im *importer) run(doc *xmlScorePartwise) (*score.Score, []string, error) {
 		decls[sp.ID] = sp
 	}
 
+	// One play order for the whole document: parts share barlines, so
+	// expanding each part's repeats on its own could desynchronise them.
+	order := im.playOrder(doc)
+
 	var parts []*partData
 	for pi := range doc.Parts {
 		xp := &doc.Parts[pi]
-		pd, err := im.parsePart(pi, decls[xp.ID], xp)
+		pd, err := im.parsePart(pi, decls[xp.ID], xp, order)
 		if err != nil {
 			return nil, im.warns, err
 		}

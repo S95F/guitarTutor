@@ -249,7 +249,7 @@ func (e *Engine) applyActionsAt(af int) {
 			e.voices[ev.Track].NoteOn(ev.Key, ev.Velocity)
 			e.active = append(e.active, activeNote{track: ev.Track, key: ev.Key, end: ev.End})
 		}
-		if e.waitReleased && e.userTrack[ev.Track] {
+		if e.waitReleased && e.releaseOwedTo(ev.Track) {
 			// The released wait's held events are firing now: consume the
 			// release so the next user NoteOn waits anew.
 			e.waitReleased = false
@@ -407,7 +407,18 @@ func (e *Engine) applyRamp() {
 
 // setScale sets the tempo scale, clamped to [minTempoScale, maxTempoScale],
 // and invalidates the current segment. Caller holds mu.
+//
+// A non-finite scale is refused outright rather than clamped: both
+// comparisons below are false for NaN, so it used to sail through and
+// poison frames per tick, the segment end, the published BPM and the
+// backing-track position — the last of which indexed a slice with
+// int(NaN) and panicked the audio thread (bug review N1's sibling). There
+// is no sensible clamp for "not a number", so the scale is left as it
+// was.
 func (e *Engine) setScale(s float64) {
+	if math.IsNaN(s) || math.IsInf(s, 0) {
+		return
+	}
 	if s < minTempoScale {
 		s = minTempoScale
 	}

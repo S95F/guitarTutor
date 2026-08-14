@@ -152,6 +152,6 @@ func TestLiveLoopScoresLoopback(t *testing.T) {
 		t.Errorf("accuracy = %.3f, want >= 0.95 (stats %+v)", acc, stats)
 	}
 	if stats.Hit < 15 {
-		t.Errorf("hits = %d, want >= 12 (stats %+v)", stats.Hit, stats)
+		t.Errorf("hits = %d, want >= 15 (stats %+v)", stats.Hit, stats)
 	}
 }

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"math"
 	"testing"
 )
 
@@ -304,6 +305,97 @@ func TestBackingPauseSilent(t *testing.T) {
 	}
 }
 
+// TestMixBackingNonFinitePositionSilent drives the render loop's bounds
+// guard directly. Regression: the guard was `p < 0 || p > last`, and every
+// comparison involving NaN is false, so a NaN file position fell through
+// to j := int(p) — MinInt64 on amd64 — and indexed backL out of range,
+// panicking the audio thread ("index out of range
+// [-9223372036854775808]"). A position that is not a real number names no
+// sample, so every non-finite position must read as silence. scale is
+// covered as well as backBase: SetTempoScale's clamp has the same NaN
+// blindness, so a NaN can still reach this loop from there.
+func TestMixBackingNonFinitePositionSilent(t *testing.T) {
+	e, _ := newBackingEngine(t, Options{})
+	bl, br := rampBacking(1000)
+	e.SetBackingTrack(bl, br, 0)
+	cases := []struct {
+		name        string
+		base, scale float64
+	}{
+		{"NaN base", math.NaN(), 1},
+		{"+Inf base", math.Inf(1), 1},
+		{"-Inf base", math.Inf(-1), 1},
+		{"NaN scale", 0, math.NaN()},
+		{"+Inf scale", 0, math.Inf(1)},
+		{"-Inf scale", 0, math.Inf(-1)},
+	}
+	for _, tc := range cases {
+		l := make([]float32, 16)
+		r := make([]float32, 16)
+		e.mu.Lock()
+		e.backBase, e.scale = tc.base, tc.scale
+		e.mixBacking(l, r, 0) // must not panic
+		e.mu.Unlock()
+		for k := range l {
+			if l[k] != 0 || r[k] != 0 {
+				t.Errorf("%s: frame %d = (%v, %v), want silence for a non-finite file position", tc.name, k, l[k], r[k])
+				break
+			}
+		}
+	}
+}
+
+// TestBackingNonFiniteOffsetRefused pins the boundary check that keeps a
+// non-finite position out of the engine in the first place. Regression:
+// `render -backing-offset NaN` reached SetBackingTrack unfiltered, stored
+// NaN in backOffset, and made every file position NaN — a panic on the
+// audio thread from processFrames. The offset is refused (treated as 0),
+// so playback must match an aligned backing exactly; +Inf is refused for
+// the same reason, having pinned the position outside the file forever
+// and made the backing silently inaudible.
+func TestBackingNonFiniteOffsetRefused(t *testing.T) {
+	for _, off := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		e, _ := newBackingEngine(t, Options{})
+		bl, br := rampBacking(200000)
+		e.SetBackingTrack(bl, br, off)
+		e.Play()
+		l, r := renderCollect(e, 2000, 480)
+		for k := range l {
+			if l[k] != float32(k) || r[k] != float32(k)+0.5 {
+				t.Fatalf("offset %v: frame %d = (%v, %v), want exactly (%v, %v) — a non-finite offset must be refused, not stored", off, k, l[k], r[k], float32(k), float32(k)+0.5)
+			}
+		}
+	}
+}
+
+// TestBackingNonFiniteGainRefused pins the gain clamp. Regression: the
+// clamp was `if g < 0`, false for NaN, so `render -backing-gain NaN`
+// stored NaN; mixBacking's `backGain == 0` early-out is false for NaN
+// too, so every backing sample became NaN, the whole mix followed, and
+// the rendered WAV was eight seconds of full-scale noise (every sample at
+// the -1.0 rail). +Inf is the same hazard by multiplication. The engine
+// must hold only a gain it can multiply by, so all of these store 0, and
+// with the track muted the output must be silence — not NaN, which the
+// exact comparison below also rejects.
+func TestBackingNonFiniteGainRefused(t *testing.T) {
+	for _, g := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), -1} {
+		e, _ := newBackingEngine(t, Options{})
+		bl, br := rampBacking(200000)
+		e.SetBackingTrack(bl, br, 0)
+		e.SetBackingGain(g)
+		if got := e.BackingGain(); got != 0 {
+			t.Fatalf("SetBackingGain(%v) stored %v, want 0", g, got)
+		}
+		e.Play()
+		l, r := renderCollect(e, 2000, 480)
+		for k := range l {
+			if l[k] != 0 || r[k] != 0 {
+				t.Fatalf("gain %v: frame %d = (%v, %v), want silence", g, k, l[k], r[k])
+			}
+		}
+	}
+}
+
 // TestBackingRenderFramesDoesNotAllocate is the steady-state allocation
 // contract with a backing track in the mix: still zero.
 func TestBackingRenderFramesDoesNotAllocate(t *testing.T) {
@@ -322,5 +414,34 @@ func TestBackingRenderFramesDoesNotAllocate(t *testing.T) {
 	}
 	if allocs := testing.AllocsPerRun(100, func() { e.RenderFrames(l, r) }); allocs != 0 {
 		t.Errorf("RenderFrames with a backing track allocates %v times per run, want 0", allocs)
+	}
+}
+
+// TestBackingNonFiniteSamplesSilenced is the fix-verification regression
+// for the backing mixer. Guarding the POSITION and the GAIN still left the
+// samples themselves: mixBacking adds `gain * backL[j]` into the output,
+// so one NaN in the buffer makes the entire mix non-finite from that frame
+// on, and the live path writes float32 straight to the device — a
+// full-scale rail in the player's headphones.
+func TestBackingNonFiniteSamplesSilenced(t *testing.T) {
+	e, _ := newFixtureEngine(t, Options{})
+	back := make([]float32, 4800)
+	for i := range back {
+		back[i] = 0.25
+	}
+	back[0] = float32(math.NaN())
+	back[10] = float32(math.Inf(1))
+	back[20] = float32(math.Inf(-1))
+	e.SetBackingTrack(back, back, 0)
+	e.Play()
+
+	l, r := renderCollect(e, 4800, 480)
+	for i := range l {
+		if f := float64(l[i]); math.IsNaN(f) || math.IsInf(f, 0) {
+			t.Fatalf("left[%d] = %v: one bad backing sample poisoned the mix", i, l[i])
+		}
+		if f := float64(r[i]); math.IsNaN(f) || math.IsInf(f, 0) {
+			t.Fatalf("right[%d] = %v", i, r[i])
+		}
 	}
 }
