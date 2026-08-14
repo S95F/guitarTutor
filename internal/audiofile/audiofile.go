@@ -39,6 +39,21 @@ const SampleRate = 48000
 // append as frames actually decode.
 const maxPreallocSamples = 4 << 20
 
+// Sample-rate plausibility bounds on a file's declared rate. The
+// declaration is attacker-controlled bytes (a WAV fmt chunk, a FLAC
+// STREAMINFO) and it DIVIDES in resampleLinear: a 167 KB WAV claiming
+// 1 Hz would inflate into two ~8 GB output channels and abort the
+// process out of memory (audit B3). Nothing real declares below 8 kHz
+// (MPEG-2.5, telephony WAV) or above 768 kHz (the highest marketed PCM
+// rate; FLAC's own spec ceiling is 655,350 Hz), so these bounds reject
+// only garbage while capping the resample amplification at 48x.
+// (go-mp3 is table-bound to 8-48 kHz and cannot report an absurd rate;
+// the check covers it anyway as free insurance.)
+const (
+	minSampleRate = 1000
+	maxSampleRate = 768000
+)
+
 // Load decodes the audio file at path into 48 kHz stereo float32.
 // The format is chosen by file extension: .wav, .flac, or .mp3
 // (case-insensitive). Mono files are duplicated into both channels, and
@@ -60,6 +75,13 @@ func Load(path string) (left, right []float32, warnings []string, err error) {
 	}
 	if err != nil {
 		return nil, nil, nil, err
+	}
+	// One policy check covers every decode path above and any format
+	// added later; the per-decoder checks only reject rate <= 0.
+	if rate < minSampleRate || rate > maxSampleRate {
+		return nil, nil, nil, fmt.Errorf(
+			"audiofile: %s: declared sample rate %d Hz is outside the plausible %d-%d Hz range (corrupt or forged header)",
+			filepath.Base(path), rate, minSampleRate, maxSampleRate)
 	}
 	if rate != SampleRate {
 		left = resampleLinear(left, rate, SampleRate)

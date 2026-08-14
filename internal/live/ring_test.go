@@ -131,3 +131,33 @@ donereading:
 		t.Errorf("values missing from the stream = %d, want the dropped count %d", missing, g.Dropped())
 	}
 }
+
+// TestRingDropPosSurvivesLaterWrites is the regression test for audit D5:
+// the position of a loss is published by the producer at the instant of
+// overflow, so a consumer that notices the drop an iteration late — after
+// its own reads freed space and the write cursor moved on — still splices
+// the gap where the loss actually happened, not wherever the cursor has
+// reached by then.
+func TestRingDropPosSurvivesLaterWrites(t *testing.T) {
+	g := newRing(4)
+	g.write([]float32{1, 2, 3, 4})
+	g.write([]float32{5, 6}) // ring full at position 4: both samples drop
+	if got := g.Dropped(); got != 2 {
+		t.Fatalf("Dropped = %d, want 2", got)
+	}
+
+	// The consumer reads (freeing space) BEFORE it checks for the drop —
+	// the late-notice interleaving.
+	dst := make([]float32, 2)
+	if n, _ := g.read(dst); n != 2 {
+		t.Fatalf("read %d, want 2", n)
+	}
+	g.write([]float32{7, 8}) // post-gap capture: the cursor advances to 6
+
+	if got := g.dropPos(); got != 4 {
+		t.Errorf("dropPos = %d, want 4 — the fill point of the loss, not the advanced cursor", got)
+	}
+	if got := g.w.Load(); got != 6 {
+		t.Errorf("write cursor = %d, want 6 (the point the old code would have blamed)", got)
+	}
+}

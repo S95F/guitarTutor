@@ -467,3 +467,35 @@ func TestResampleLinearRatio(t *testing.T) {
 		}
 	}
 }
+
+// TestImplausibleSampleRateRejected is the regression test for audit B3:
+// the declared rate divides in resampleLinear, so a small file claiming
+// 1 Hz would inflate into two ~8 GB output channels and abort the process
+// out of memory. Anything outside the plausible range must be rejected
+// promptly — the absent allocation is the point of the test.
+func TestImplausibleSampleRateRejected(t *testing.T) {
+	samples := sine(2000, 220, 8000, 0.5)
+	for _, rate := range []int{1, 999, 768001, 4_000_000} {
+		path := writeWAVMono(t, rate, samples)
+		if _, _, _, err := Load(path); err == nil || !strings.Contains(err.Error(), "sample rate") {
+			t.Errorf("rate %d: err = %v, want a sample-rate rejection", rate, err)
+		}
+	}
+
+	// The floor is generous: telephony-grade 8 kHz still loads (with the
+	// resample warning).
+	path := writeWAVMono(t, 8000, samples)
+	_, _, warnings, err := Load(path)
+	if err != nil {
+		t.Fatalf("8 kHz should load, got %v", err)
+	}
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(w, "resampled") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("8 kHz load produced warnings %v, want a resample note", warnings)
+	}
+}

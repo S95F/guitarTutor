@@ -593,3 +593,65 @@ func TestScorerConcurrencySmoke(t *testing.T) {
 		}
 	}
 }
+
+// TestScorerWaitConfirmedUnison is the regression test for audit D3: a
+// guitar unison — two expected notes sharing a tick and a MIDI key,
+// differing only by string — must produce two pre-matches, so the single
+// detection the monophonic tracker can offer credits BOTH notes. The
+// pre-match used to be keyed without the string, the second event
+// overwrote the first's entry, and the uncredited note aged into a false
+// Miss — the project's number-one named rage-quit cause.
+func TestScorerWaitConfirmedUnison(t *testing.T) {
+	s := NewScorer(Config{SampleRate: 48000, Track: 0})
+	e1 := score.NoteEvent{Track: 0, Key: 64, Start: 960, String: 1}
+	e2 := score.NoteEvent{Track: 0, Key: 64, Start: 960, String: 2}
+	det := []pitch.Note{{Key: 64, Cents: 3, Start: 1000, End: 3000}}
+
+	s.WaitConfirmed([]score.NoteEvent{e1, e2}, det)
+	s.ExpectNote(e1, 2000)
+	s.ExpectNote(e2, 2000)
+
+	rs := s.Results(nil)
+	if len(rs) != 2 {
+		t.Fatalf("got %d results, want 2 — both unison notes credited: %+v", len(rs), rs)
+	}
+	for i, r := range rs {
+		if r.Verdict != VerdictHit || !r.Matched {
+			t.Errorf("result %d = %+v, want a matched Hit", i, r)
+		}
+		if r.ErrCents != 3 {
+			t.Errorf("result %d ErrCents = %v, want the detection's 3", i, r.ErrCents)
+		}
+	}
+	if st := s.Stats(); st.Hit != 2 || st.Miss != 0 {
+		t.Errorf("stats = %+v, want 2 hits and no misses", st)
+	}
+}
+
+// TestScorerWaitConfirmedUnisonConsumedExactly: re-confirming the same
+// unison updates the two entries in place (never four), and each release
+// consumes exactly one — a third expectation at the same tick, a loop
+// pass, is judged normally rather than inheriting a stale pre-match.
+func TestScorerWaitConfirmedUnisonConsumedExactly(t *testing.T) {
+	s := NewScorer(Config{SampleRate: 48000, Track: 0})
+	e1 := score.NoteEvent{Track: 0, Key: 64, Start: 960, String: 1}
+	e2 := score.NoteEvent{Track: 0, Key: 64, Start: 960, String: 2}
+	det := []pitch.Note{{Key: 64, Cents: 1, Start: 1000, End: 3000}}
+
+	s.WaitConfirmed([]score.NoteEvent{e1, e2}, det)
+	s.WaitConfirmed([]score.NoteEvent{e1, e2}, det) // re-confirm: replace, not append
+	s.ExpectNote(e1, 2000)
+	s.ExpectNote(e2, 2000)
+	if rs := s.Results(nil); len(rs) != 2 {
+		t.Fatalf("after consuming both entries got %d results, want 2", len(rs))
+	}
+
+	// The next pass over the same tick has no pre-match left: it joins
+	// pending and, never played again, ages into a Miss.
+	s.ExpectNote(e1, 10000)
+	s.Advance(1 << 40) // far past every window: the deadline judges it
+	rs := s.Results(nil)
+	if len(rs) != 1 || rs[0].Verdict != VerdictMiss {
+		t.Fatalf("loop-pass expectation = %+v, want exactly one normally-judged Miss", rs)
+	}
+}

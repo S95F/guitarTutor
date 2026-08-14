@@ -261,10 +261,15 @@ type expectation struct {
 
 // A preMatch records a wait-confirming detection observed before its
 // expectation existed (see WaitConfirmed), keyed by the expected note's
-// Track+Key+Start tick.
+// Track+Key+String+Start tick. String is part of the key because a guitar
+// unison — two strings sounding the same pitch at the same tick — is two
+// expected notes that differ ONLY by string; keyed without it the second
+// overwrote the first, one entry served two events, and the uncredited
+// event aged into a false Miss (audit D3).
 type preMatch struct {
 	track    int
 	key      int
+	str      int   // guitar string of the expected note
 	start    int64 // score tick of the expected note
 	verdict  Verdict
 	errCents float64
@@ -329,7 +334,7 @@ func (s *Scorer) ExpectNote(ev score.NoteEvent, outFrame int64) {
 	}
 	for i := range s.preMatch {
 		p := &s.preMatch[i]
-		if p.track == ev.Track && p.key == ev.Key && p.start == ev.Start && s.clock <= p.expire {
+		if p.track == ev.Track && p.key == ev.Key && p.str == ev.String && p.start == ev.Start && s.clock <= p.expire {
 			s.finalize(NoteResult{
 				Event:    ev,
 				OutFrame: outFrame,
@@ -839,7 +844,7 @@ func (s *Scorer) AbandonBefore(outFrame int64) {
 // confirmation latency), an error that is the machinery's, not the
 // player's. WaitConfirmed fixes both: for each expected event
 // (Config.Track only) the best-cents matching note is recorded as a
-// pre-match keyed by Track+Key+Start tick, and when ExpectNote later
+// pre-match keyed by Track+Key+String+Start tick, and when ExpectNote later
 // receives a pre-matched event it finalizes immediately with a pitch-only
 // verdict — Hit if |cents| <= CentsTolerance, else Close (an octave-off
 // pitch-class match is Close) — Matched true, ErrFrames 0. Each pre-match
@@ -884,6 +889,7 @@ func (s *Scorer) WaitConfirmed(evs []score.NoteEvent, notes []pitch.Note) {
 		pm := preMatch{
 			track:    ev.Track,
 			key:      ev.Key,
+			str:      ev.String,
 			start:    ev.Start,
 			verdict:  v,
 			errCents: notes[best].Cents,
@@ -893,7 +899,7 @@ func (s *Scorer) WaitConfirmed(evs []score.NoteEvent, notes []pitch.Note) {
 		replaced := false
 		for i := range s.preMatch {
 			p := &s.preMatch[i]
-			if p.track == pm.track && p.key == pm.key && p.start == pm.start {
+			if p.track == pm.track && p.key == pm.key && p.str == pm.str && p.start == pm.start {
 				*p = pm
 				replaced = true
 				break

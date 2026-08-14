@@ -753,3 +753,85 @@ func TestEventTapFramesAndMute(t *testing.T) {
 		t.Errorf("TotalFrames = %d, want 480000", tf)
 	}
 }
+
+// TestSeekToLoopEndWrapsIn is the regression test for audit E1: a position
+// parked exactly on the loop end B — the timeline scrubbed there, or the B
+// edge dragged onto a parked playhead — must engage the loop and wrap to
+// A, not sail past a still-armed loop to the score end and stop.
+func TestSeekToLoopEndWrapsIn(t *testing.T) {
+	e, v := newFixtureEngine(t, Options{})
+	e.SetLoop(3840, 7680)
+	e.SeekTick(7680) // exactly B
+	e.Play()
+	renderN(e, 96000, 480) // one full pass worth of frames
+
+	if !e.Playing() {
+		t.Fatal("parked on B with the loop armed, Play stopped instead of wrapping to A")
+	}
+	if len(v.ons) == 0 || v.ons[0].key != 47 {
+		t.Fatalf("first NoteOn = %v, want the loop's first note (key 47)", v.ons)
+	}
+	// The degenerate wrap itself is not a completed pass; only the full
+	// pass rendered above counts.
+	if got := e.PassCount(); got != 1 {
+		t.Errorf("PassCount = %d, want 1 (the empty wrap must not count)", got)
+	}
+}
+
+// TestPlayAtScoreEndWithLoopAtEnd: the pre-timeline repro — play the piece
+// out, set a loop over the last bar, press play. The position sits at
+// B == scoreEnd; before the E1 fix the transport died in under one block.
+func TestPlayAtScoreEndWithLoopAtEnd(t *testing.T) {
+	e, v := newFixtureEngine(t, Options{})
+	e.Play()
+	renderN(e, 16*48000, 480) // the whole piece and then some
+	if e.Playing() {
+		t.Fatal("the piece never finished; fixture assumptions changed")
+	}
+
+	e.SetLoop(11520, 15360) // bar 4
+	e.Play()
+	before := len(v.ons)
+	renderN(e, 48000, 480)
+	if !e.Playing() {
+		t.Fatal("Play at the score end with a loop over the last bar stopped instantly")
+	}
+	if len(v.ons) == before {
+		t.Error("no note sounded; the loop never wrapped in")
+	}
+}
+
+// TestLoopBehindPlayheadStaysDormant pins the deliberate other half of
+// E1: a position strictly PAST the loop end leaves the loop dormant — the
+// DAW convention — until a seek re-enters it.
+func TestLoopBehindPlayheadStaysDormant(t *testing.T) {
+	e, _ := newFixtureEngine(t, Options{})
+	e.SetLoop(3840, 7680)
+	e.SeekTick(9600) // strictly past B
+	e.Play()
+	renderN(e, 16*48000, 480)
+	if e.Playing() {
+		t.Error("playback should have run to the score end and stopped")
+	}
+	if got := e.PassCount(); got != 0 {
+		t.Errorf("PassCount = %d, want 0: a dormant loop completes no passes", got)
+	}
+	if got := e.PosTick(); got != 15360 {
+		t.Errorf("PosTick = %d, want the score end 15360", got)
+	}
+}
+
+// TestSeekToLoopEndDoesNotRamp: the degenerate wrap must not feed the
+// speed trainer — a scrub to the loop end is not a completed pass.
+func TestSeekToLoopEndDoesNotRamp(t *testing.T) {
+	e, _ := newFixtureEngine(t, Options{})
+	e.SetTempoScale(0.5)
+	e.SetRamp(RampConfig{Enabled: true, Increment: 0.1, Target: 1.0})
+	e.SetLoop(3840, 7680)
+	e.SeekTick(7680)
+	e.Play()
+	renderN(e, 480, 480) // enough to process the wrap
+	if got := e.TempoScale(); got != 0.5 {
+		t.Errorf("TempoScale after the empty wrap = %v, want 0.5 untouched", got)
+	}
+}

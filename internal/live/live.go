@@ -192,12 +192,15 @@ func newAnalyzer(s *Session, cfg pitch.Config, onNotes func([]pitch.Note, pitch.
 // whatever was sounding when the overflow cut in.
 func (a *analyzer) drain() {
 	for {
-		// Check for overflow BEFORE reading: drops happen only while
-		// the ring is full and only a read makes space again, so at
-		// this instant every buffered sample predates the loss and
-		// the accepted count is exactly where the gap belongs.
+		// Check for overflow BEFORE reading. The producer publishes the
+		// loss position (dropPos) before the count (Dropped), so reading
+		// count then position yields the fill point of the loss just
+		// observed — even when this loop notices a drop an iteration
+		// late, after its own reads freed space and the write cursor
+		// moved past the loss. The cursor itself was the old source of
+		// the position, and it lied in exactly that case (audit D5).
 		if d := a.s.ringBuf.Dropped(); d != a.lastDropped {
-			a.gaps = append(a.gaps, gapRec{at: a.s.ringBuf.accepted(), n: d - a.lastDropped})
+			a.gaps = append(a.gaps, gapRec{at: a.s.ringBuf.dropPos(), n: d - a.lastDropped})
 			a.lastDropped = d
 		}
 		n, start := a.s.ringBuf.read(a.chunk)
@@ -211,9 +214,16 @@ func (a *analyzer) drain() {
 		for len(a.gaps) > 0 && a.gaps[0].at <= start+int64(len(buf)) {
 			g := a.gaps[0]
 			a.gaps = a.gaps[1:]
-			a.process(buf[:g.at-start], false)
-			buf = buf[g.at-start:]
-			start = g.at
+			cut := g.at - start
+			if cut < 0 {
+				// A drop noticed so late that its position precedes
+				// capture already processed: splice at the earliest
+				// point still possible rather than slicing negatively.
+				cut = 0
+			}
+			a.process(buf[:cut], false)
+			buf = buf[cut:]
+			start += cut
 			a.feedGap(g.n)
 		}
 		a.process(buf, false)

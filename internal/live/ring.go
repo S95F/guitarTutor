@@ -20,6 +20,12 @@ type ring struct {
 	r atomic.Int64
 	// dropped counts samples lost to overflow (producer-side).
 	dropped atomic.Int64
+	// dropAt is the accepted-stream position of the most recent overflow:
+	// the write cursor at the instant of loss. Published BEFORE dropped,
+	// so a consumer that loads Dropped and then dropPos observes a
+	// position at or after any loss the count includes — never one from
+	// before it.
+	dropAt atomic.Int64
 }
 
 // newRing rounds capacity up to a power of two.
@@ -49,12 +55,17 @@ func (g *ring) write(samples []float32) {
 	}
 	g.w.Store(w + n)
 	if drop > 0 {
-		// Counted only after publishing w: a consumer that observes
-		// the new dropped count therefore also sees the w the ring
-		// filled up at, which is exactly where the lost stretch
-		// belongs in the accepted stream (Session's analyzer splices
-		// a zeroed gap there to keep the detector on the device
-		// clock).
+		// Position first, then count. The consumer reads in the inverse
+		// order (Dropped, then dropPos), so once it observes the new
+		// count, the fill point of that loss is already visible. w+n is
+		// exact: a drop means the ring is full at w+n, and w cannot
+		// advance again until the consumer frees space — so this value,
+		// not whatever w has grown to by the time the loss is noticed,
+		// is where the zeroed splice belongs. Inferring the position
+		// from the live write cursor instead attributed a late-noticed
+		// drop to a cursor that had already moved past the loss,
+		// splicing the gap AFTER capture that came after it (audit D5).
+		g.dropAt.Store(w + n)
 		g.dropped.Add(drop)
 	}
 }
@@ -82,10 +93,11 @@ func (g *ring) read(dst []float32) (n int, start int64) {
 // Dropped reports samples lost to overflow since construction.
 func (g *ring) Dropped() int64 { return g.dropped.Load() }
 
-// accepted reports the total samples ever accepted into the ring (the
-// write cursor). accepted() + Dropped() is the device-clock position of
-// the capture stream.
-func (g *ring) accepted() int64 { return g.w.Load() }
+// dropPos reports the accepted-stream position of the most recent
+// overflow; meaningful only once Dropped reports a loss. Load Dropped
+// first — dropAt is published before dropped, so the (Dropped, dropPos)
+// pair read in that order never places a loss earlier than it happened.
+func (g *ring) dropPos() int64 { return g.dropAt.Load() }
 
 // buffered reports the samples currently waiting to be read.
 func (g *ring) buffered() int64 { return g.w.Load() - g.r.Load() }

@@ -481,3 +481,36 @@ func TestWaitingRenderDoesNotAllocate(t *testing.T) {
 		t.Errorf("RenderFrames while waiting allocates %v times per run, want 0", allocs)
 	}
 }
+
+// TestWaitPositionExactAtFractionalScale is the regression test for audit
+// D2. At any practice scale where (waitTick-anchor)*framesPerTick is not
+// an exact integer, the halted position used to be reconstructed from the
+// floored action frame and PosTick() reported waitTick-1 for the whole
+// wait — the UI then showed the bar BEFORE the note being waited on. The
+// halted position is the wait tick itself. (Every other wait test runs at
+// scale 1.0, where fpt is exactly 25 and the bug is invisible.)
+func TestWaitPositionExactAtFractionalScale(t *testing.T) {
+	var reg []*stubVoice
+	e := New(waitDuetScore(t), Options{Voices: newStubFactory(&reg)})
+	e.SetWaitMode(true)
+	e.SetTempoScale(0.95) // fpt = 26.3157... — nothing lands on an integer
+	e.Play()
+
+	// First wait point: the user note at tick 0 (exact at any scale).
+	renderN(e, 4800, 480)
+	if !e.Waiting() || e.PosTick() != 0 {
+		t.Fatalf("first wait: Waiting=%v PosTick=%d, want waiting at 0", e.Waiting(), e.PosTick())
+	}
+	e.ConfirmWait()
+
+	// Second wait point: the user note at tick 1920. floor(1920*26.315..)
+	// = 50526 frames; 50526/26.315.. = 1919.98.., so the old code
+	// published 1919 here.
+	renderN(e, 96000, 480)
+	if !e.Waiting() {
+		t.Fatal("never reached the second wait point")
+	}
+	if got := e.PosTick(); got != 1920 {
+		t.Errorf("PosTick while waiting = %d, want exactly the wait tick 1920", got)
+	}
+}

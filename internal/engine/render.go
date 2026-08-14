@@ -98,7 +98,15 @@ func (e *Engine) buildSegment() {
 			break
 		}
 	}
-	if e.loopOn && float64(e.loopB) > pos && e.loopB <= boundary {
+	// >= pos, not > pos: a position parked exactly on B — the timeline
+	// scrubbed to the loop end, the B edge dragged onto a beat-parked
+	// playhead, or the B key pressed after playback ran out — must engage
+	// the loop, not sail past it to the score end with the loop still
+	// drawn as armed (audit E1). The zero-length segment this builds
+	// renders nothing and falls straight into handleBoundary's wrap to A.
+	// A position strictly PAST B stays out on purpose: a loop region
+	// behind the playhead is dormant until a seek re-enters it.
+	if e.loopOn && float64(e.loopB) >= pos && e.loopB <= boundary {
 		boundary, kind = e.loopB, bLoop
 	}
 	e.boundary = boundary
@@ -195,7 +203,17 @@ func (e *Engine) processFrames(left, right []float32) int {
 		if e.waitMode && !e.waitReleased && e.waitPointAt(af) {
 			e.beginWait(af)
 			e.segFrame = af
-			e.pos = e.anchor + float64(e.segFrame)/e.fpt
+			// The halted position is the wait tick itself, not the floored
+			// frame's reconstruction: whenever (waitTick-anchor)*fpt is not
+			// an exact integer, anchor + af/fpt lands fractionally short and
+			// PosTick() reports waitTick-1 for the whole wait — the UI then
+			// shows the bar BEFORE the note being waited on (audit D2). The
+			// snap is sub-frame (under 1/fpt frames) and forward, a
+			// relabeling of the same instant rather than a jump, so it is
+			// not a discontinuity; and resume arithmetic is frame-based
+			// (segFrame is the authority while the segment is valid), so
+			// the release still fires on exactly this frame.
+			e.pos = float64(e.waitTick)
 			return cur
 		}
 		e.applyActionsAt(af)
@@ -253,8 +271,16 @@ func (e *Engine) handleBoundary() {
 	switch e.bKind {
 	case bLoop:
 		e.allNotesOff()
-		e.passes++
-		e.applyRamp()
+		// A degenerate wrap — the position was parked exactly on B by a
+		// seek or a loop edit, so the "pass" played zero frames — must
+		// not count as a completed pass, and above all must not ramp the
+		// tempo: a scrub to the loop end is not an achievement. segEnd==0
+		// discriminates exactly, because every natural bLoop segment has
+		// segEnd = ceil((B-anchor)*fpt) >= 1 (audit E1).
+		if e.segEnd > 0 {
+			e.passes++
+			e.applyRamp()
+		}
 		e.pos = float64(e.loopA)
 		e.reindexFrom(e.loopA)
 		if e.countInEveryPass && e.countInBeats > 0 {
