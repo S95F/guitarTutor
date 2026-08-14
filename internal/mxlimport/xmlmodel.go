@@ -157,6 +157,15 @@ type xmlStaffDetails struct {
 	Capo       *int             `xml:"capo"`
 }
 
+// maxTuningLines caps how many tab-staff lines (strings) a staff-details
+// tuning may declare. Real fretted instruments top out around 15-18
+// strings — a Warr guitar has 15, a theorbo ~14 courses — so 25 clears
+// everything real while stopping a hostile file from installing an
+// enormous tuning that the downstream fingering search would choke on.
+// An over-limit staff is rejected wholesale rather than truncated:
+// truncation would invent an instrument and mis-map the line numbers.
+const maxTuningLines = 25
+
 // tuning converts <staff-tuning> lines to a score Tuning. MusicXML numbers
 // tab staff lines from the BOTTOM: line 1 is the lowest string on the
 // staff. The score model numbers strings from the top: string 1 is the
@@ -172,6 +181,9 @@ func (sd *xmlStaffDetails) tuning() (score.Tuning, bool, string) {
 				n = t.Line
 			}
 		}
+	}
+	if n > maxTuningLines {
+		return nil, false, fmt.Sprintf("staff-details declares a %d-line tab staff, more than the %d-string limit", n, maxTuningLines)
 	}
 	if len(sd.Tunings) != n {
 		return nil, false, fmt.Sprintf("staff-details has %d staff-tuning lines for a %d-line staff", len(sd.Tunings), n)

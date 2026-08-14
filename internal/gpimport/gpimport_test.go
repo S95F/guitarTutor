@@ -624,6 +624,91 @@ func TestAbsurdTempoSkipped(t *testing.T) {
 	}
 }
 
+// TestImportTuningTooManyStrings: a Tuning property declaring 30 strings
+// is past the 25-string limit — warned, and standard tuning assumed —
+// because an absurd tuning passes Validate and then chokes tab rendering.
+func TestImportTuningTooManyStrings(t *testing.T) {
+	doc := gpifDoc(
+		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`,
+		`<Bar id="0"><Voices>0 -1 -1 -1</Voices></Bar>`,
+		`<Voice id="0"><Beats>0</Beats></Voice>`,
+		`<Beat id="0"><Rhythm ref="0" /><Notes>0</Notes></Beat>`,
+		noteXML(0, 0, 0, ""),
+		`<Rhythm id="0"><NoteValue>Whole</NoteValue></Rhythm>`,
+	)
+	pitches := strings.TrimSpace(strings.Repeat("40 ", 30))
+	doc = strings.Replace(doc, `<Pitches>40 45 50 55 59 64</Pitches>`, `<Pitches>`+pitches+`</Pitches>`, 1)
+	s, warns, err := importDoc(t, doc)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if !hasWarning(warns, "more than the 25-string limit") {
+		t.Errorf("warnings = %v, want one naming the 25-string limit", warns)
+	}
+	if !hasWarning(warns, "assuming standard") {
+		t.Errorf("warnings = %v, want the standard-tuning fallback", warns)
+	}
+	tr := s.Tracks[0]
+	if len(tr.Tuning) != len(score.StandardTuning) {
+		t.Fatalf("tuning has %d strings, want the standard %d", len(tr.Tuning), len(score.StandardTuning))
+	}
+	for i, want := range score.StandardTuning {
+		if tr.Tuning[i] != want {
+			t.Errorf("tuning[%d] = %d, want %d (standard EADGBE)", i, tr.Tuning[i], want)
+		}
+	}
+}
+
+// TestImportHugeTimeSignatureRejected: a numerator that is a multiple of
+// 2^56 used to wrap the bar-length multiplication to exactly zero,
+// making every bar zero-length while still passing Validate. This is a
+// structural absurdity — not a droppable note — so the import must fail,
+// naming the limit.
+func TestImportHugeTimeSignatureRejected(t *testing.T) {
+	doc := gpifDoc(
+		`<MasterBar><Time>72057594037927936/1</Time><Bars>0</Bars></MasterBar>`,
+		`<Bar id="0"><Voices>0 -1 -1 -1</Voices></Bar>`,
+		`<Voice id="0"><Beats>0</Beats></Voice>`,
+		`<Beat id="0"><Rhythm ref="0" /><Notes>0</Notes></Beat>`,
+		noteXML(0, 0, 0, ""),
+		`<Rhythm id="0"><NoteValue>Whole</NoteValue></Rhythm>`,
+	)
+	_, _, err := importDoc(t, doc)
+	if err == nil || !strings.Contains(err.Error(), "numerator above the 256 limit") {
+		t.Errorf("err = %v, want a numerator-limit error", err)
+	}
+}
+
+// TestImportOutOfRangeFretDropped: one fret-64 note must not make the
+// final Validate reject the whole score ("string 1 fret 64 sounds MIDI
+// key 128, outside 0-127") — the note drops with a warning and the rest
+// of the file imports intact.
+func TestImportOutOfRangeFretDropped(t *testing.T) {
+	doc := gpifDoc(
+		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`,
+		`<Bar id="0"><Voices>0 -1 -1 -1</Voices></Bar>`,
+		`<Voice id="0"><Beats>0 1</Beats></Voice>`,
+		`<Beat id="0"><Rhythm ref="0" /><Notes>0</Notes></Beat>`+
+			`<Beat id="1"><Rhythm ref="0" /><Notes>1</Notes></Beat>`,
+		noteXML(0, 0, 0, "")+noteXML(1, 0, 64, ""),
+		`<Rhythm id="0"><NoteValue>Half</NoteValue></Rhythm>`,
+	)
+	s, warns, err := importDoc(t, doc)
+	if err != nil {
+		t.Fatalf("Import: %v (one absurd fret must not fail the import)", err)
+	}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !hasWarning(warns, "fret 64") {
+		t.Errorf("warnings = %v, want one naming fret 64", warns)
+	}
+	evs := s.Events()
+	if len(evs) != 1 || evs[0].Key != 40 || evs[0].Start != 0 || evs[0].End != score.Half {
+		t.Fatalf("events = %+v, want only the surviving half note at key 40", evs)
+	}
+}
+
 // TestCapoAndTuning: a capo and a drop-D tuning shift derived pitches.
 func TestCapoAndTuning(t *testing.T) {
 	doc := gpifDoc(

@@ -41,6 +41,20 @@ const Grid = score.ThirtySec
 // format's default (docs/TEXTFORMAT.md).
 const DefaultProgram = 25
 
+// MaxTicks caps the score extent the import will accept — about 14
+// hours of 4/4 at 120 BPM. barSpecs allocates one barSpec per bar from
+// tick 0 to the score's end, so a single hostile delta (a few bytes in
+// the file) could otherwise turn the layout into an unbounded
+// allocation loop. Score ticks are always PPQ 960 after rescaling, so
+// the limit is resolution-independent: a 3-hour piece is roughly 21
+// million ticks / 5,400 bars, comfortably inside.
+const MaxTicks = 100_000_000
+
+// maxBars is the belt-and-braces cap on the bar count itself, for meter
+// maps whose tiny bars (a 1/128 meter makes 30-tick bars) would slice
+// even a legal extent into an absurd number of specs.
+const maxBars = 100_000
+
 // Import parses a Standard MIDI File into a Score, returning
 // human-readable warnings for everything the import changed or dropped.
 // The first file track containing notes becomes the RoleUser track, later
@@ -251,7 +265,19 @@ func (im *importer) readMaps(sm *smf.SMF) (score.TempoMap, score.MeterMap) {
 					im.warnf("skipped tempo event at tick %d: non-positive microseconds per quarter", im.scale(abs))
 				}
 			case ev.Message.GetMetaMeter(&num, &den):
-				meters = append(meters, score.Meter{Tick: im.scale(abs), Num: int(num), Den: int(den)})
+				// gomidi decodes the denominator byte as a power of
+				// two, and a byte of 8 or more overflows uint8 to 0;
+				// the numerator byte is not validated at all. A
+				// zero-valued meter placed past the last note escapes
+				// barSpecs' check (which only inspects meters that
+				// govern bars) and later panics BeatLen with a divide
+				// by zero when the user seeks to the end of the piece
+				// — so reject invalid meters here, with a warning.
+				if num >= 1 && den >= 1 {
+					meters = append(meters, score.Meter{Tick: im.scale(abs), Num: int(num), Den: int(den)})
+				} else {
+					im.warnf("skipped time signature event at tick %d: %d/%d is not a valid meter", im.scale(abs), num, den)
+				}
 			}
 		}
 	}
@@ -377,9 +403,19 @@ type barSpec struct {
 // meter map. A meter change that falls inside a bar takes effect at the
 // next barline, with a warning.
 func (im *importer) barSpecs(meters score.MeterMap, end int64) ([]barSpec, error) {
+	// A negative end means an absurd file delta overflowed int64 in
+	// scale(); both that and a merely enormous end would otherwise drive
+	// the layout loop below into an unbounded (or never-terminating)
+	// allocation.
+	if end < 0 || end > MaxTicks {
+		return nil, fmt.Errorf("score too long: extends to tick %d, past the %d-tick limit", end, int64(MaxTicks))
+	}
 	var specs []barSpec
 	starts := map[int64]bool{}
 	for start := int64(0); start < end; {
+		if len(specs) >= maxBars {
+			return nil, fmt.Errorf("score too long: more than %d bars", maxBars)
+		}
 		m := meters.At(start)
 		if m.Num <= 0 || m.Den <= 0 || (4*score.PPQ)%int64(m.Den) != 0 {
 			return nil, fmt.Errorf("unsupported time signature %d/%d", m.Num, m.Den)
@@ -435,6 +471,16 @@ func rebaseMeters(meters score.MeterMap, specs []barSpec) score.MeterMap {
 // note onset and end inside it, so each note covers a whole number of
 // beats: the first carries the attack, the rest continue it as Tied
 // notes, and beats with nothing sounding become rests.
+//
+// The walk is linear in notes plus bars rather than their product: note
+// edges are bucketed into their bars up front (one binary search per
+// edge), and the notes sounding at each beat segment are tracked with an
+// advancing cursor plus a carried active set instead of rescanning the
+// whole note list per segment. After normalize's same-string truncation
+// the active set holds at most one note per string. A tied note can
+// sound many bars past its start, which is why the active set is carried
+// across bars instead of being recomputed from a per-bar window of note
+// starts.
 func (im *importer) buildTrack(rt *rawTrack, role score.TrackRole, specs []barSpec) *score.Track {
 	program := rt.program
 	if program < 0 {
@@ -446,34 +492,59 @@ func (im *importer) buildTrack(rt *rawTrack, role score.TrackRole, specs []barSp
 		Program: program,
 		Role:    role,
 	}
-	for _, bs := range specs {
-		bar := tr.AppendBar(bs.num, bs.den)
-		barEnd := bar.Start + bar.Len()
-		bounds := []int64{bar.Start, barEnd}
-		for _, n := range rt.notes {
-			if n.start > bar.Start && n.start < barEnd {
-				bounds = append(bounds, n.start)
+	// Bucket every note edge that falls strictly inside a bar; an edge
+	// on a barline adds no boundary because the bar's own edges already
+	// cover it. Bars are contiguous, so the bar owning edge x is the
+	// last one starting before x, and an edge at or past that bar's end
+	// sits on a barline or past the score.
+	edges := make([][]int64, len(specs))
+	for _, n := range rt.notes {
+		for _, x := range [2]int64{n.start, n.end} {
+			i := sort.Search(len(specs), func(i int) bool { return specs[i].start >= x }) - 1
+			if i < 0 {
+				continue
 			}
-			if n.end > bar.Start && n.end < barEnd {
-				bounds = append(bounds, n.end)
+			barEnd := specs[i].start + int64(specs[i].num)*(4*score.PPQ/int64(specs[i].den))
+			if x < barEnd {
+				edges[i] = append(edges[i], x)
 			}
 		}
+	}
+	// rt.notes is sorted by start (normalize keeps it that way) and
+	// segment starts only ever advance, so a single cursor pass
+	// activates each note exactly once; a note leaves the active set
+	// once it no longer sounds at the current segment.
+	cursor := 0
+	var active []*rawNote
+	for bi, bs := range specs {
+		bar := tr.AppendBar(bs.num, bs.den)
+		barEnd := bar.Start + bar.Len()
+		bounds := append([]int64{bar.Start, barEnd}, edges[bi]...)
 		sort.Slice(bounds, func(i, j int) bool { return bounds[i] < bounds[j] })
 		for i := 0; i+1 < len(bounds); i++ {
 			segStart, segEnd := bounds[i], bounds[i+1]
 			if segEnd == segStart {
 				continue // duplicate boundary
 			}
-			var notes []score.Note
-			for _, n := range rt.notes {
-				if n.start <= segStart && n.end > segStart {
-					notes = append(notes, score.Note{
-						String:   n.str,
-						Fret:     n.fret,
-						Tied:     n.start < segStart,
-						Inferred: true,
-					})
+			for cursor < len(rt.notes) && rt.notes[cursor].start <= segStart {
+				active = append(active, rt.notes[cursor])
+				cursor++
+			}
+			kept := active[:0]
+			for _, n := range active {
+				if n.end > segStart {
+					kept = append(kept, n)
 				}
+			}
+			active = kept
+			var notes []score.Note
+			for _, n := range active {
+				notes = append(notes, score.Note{
+					String:   n.str,
+					Fret:     n.fret,
+					Tied:     n.start < segStart,
+					Inferred: true,
+				})
 			}
 			sort.Slice(notes, func(i, j int) bool { return notes[i].String > notes[j].String })
 			bar.AddBeat(segEnd-segStart, notes...)

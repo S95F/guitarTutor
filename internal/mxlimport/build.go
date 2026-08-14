@@ -58,6 +58,16 @@ func barSpecs(meters score.MeterMap, end int64) ([]barSpec, error) {
 // the first carries the attack, the rest continue it as Tied notes
 // (score.Events merges them back), and beats with nothing sounding become
 // rests — which is how underfull measures end up padded.
+//
+// The walk is linear in notes plus bars rather than their product: note
+// edges are bucketed into their bars up front (one binary search per
+// edge), and the notes sounding at each beat segment are tracked with an
+// advancing cursor plus a carried active set instead of rescanning the
+// whole note list per segment. After finish's same-string truncation the
+// active set holds at most one note per string. A tied note can sound
+// many bars past its start, which is why the active set is carried
+// across bars instead of being recomputed from a per-bar window of note
+// starts.
 func buildTrack(pd *partData, role score.TrackRole, specs []barSpec) *score.Track {
 	tr := &score.Track{
 		Name:    pd.name,
@@ -66,34 +76,59 @@ func buildTrack(pd *partData, role score.TrackRole, specs []barSpec) *score.Trac
 		Program: pd.program,
 		Role:    role,
 	}
-	for _, bs := range specs {
-		bar := tr.AppendBar(bs.num, bs.den)
-		barEnd := bar.Start + bar.Len()
-		bounds := []int64{bar.Start, barEnd}
-		for _, n := range pd.notes {
-			if n.start > bar.Start && n.start < barEnd {
-				bounds = append(bounds, n.start)
+	// Bucket every note edge that falls strictly inside a bar; an edge
+	// on a barline adds no boundary because the bar's own edges already
+	// cover it. Bars are contiguous, so the bar owning edge x is the
+	// last one starting before x, and an edge at or past that bar's end
+	// sits on a barline or past the score.
+	edges := make([][]int64, len(specs))
+	for _, n := range pd.notes {
+		for _, x := range [2]int64{n.start, n.end} {
+			i := sort.Search(len(specs), func(i int) bool { return specs[i].start >= x }) - 1
+			if i < 0 {
+				continue
 			}
-			if n.end > bar.Start && n.end < barEnd {
-				bounds = append(bounds, n.end)
+			barEnd := specs[i].start + int64(specs[i].num)*(4*score.PPQ/int64(specs[i].den))
+			if x < barEnd {
+				edges[i] = append(edges[i], x)
 			}
 		}
+	}
+	// pd.notes is sorted by start (finish keeps it that way) and segment
+	// starts only ever advance, so a single cursor pass activates each
+	// note exactly once; a note leaves the active set once it no longer
+	// sounds at the current segment.
+	cursor := 0
+	var active []*rawNote
+	for bi, bs := range specs {
+		bar := tr.AppendBar(bs.num, bs.den)
+		barEnd := bar.Start + bar.Len()
+		bounds := append([]int64{bar.Start, barEnd}, edges[bi]...)
 		sort.Slice(bounds, func(i, j int) bool { return bounds[i] < bounds[j] })
 		for i := 0; i+1 < len(bounds); i++ {
 			segStart, segEnd := bounds[i], bounds[i+1]
 			if segEnd == segStart {
 				continue // duplicate boundary
 			}
-			var notes []score.Note
-			for _, n := range pd.notes {
-				if n.start <= segStart && n.end > segStart {
-					notes = append(notes, score.Note{
-						String:   n.str,
-						Fret:     n.fret,
-						Tied:     n.start < segStart,
-						Inferred: n.inferred,
-					})
+			for cursor < len(pd.notes) && pd.notes[cursor].start <= segStart {
+				active = append(active, pd.notes[cursor])
+				cursor++
+			}
+			kept := active[:0]
+			for _, n := range active {
+				if n.end > segStart {
+					kept = append(kept, n)
 				}
+			}
+			active = kept
+			var notes []score.Note
+			for _, n := range active {
+				notes = append(notes, score.Note{
+					String:   n.str,
+					Fret:     n.fret,
+					Tied:     n.start < segStart,
+					Inferred: n.inferred,
+				})
 			}
 			sort.Slice(notes, func(i, j int) bool { return notes[i].String > notes[j].String })
 			bar.AddBeat(segEnd-segStart, notes...)

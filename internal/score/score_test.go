@@ -188,6 +188,39 @@ func TestValidateRejectsDegenerateTempoAndPitch(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsInvalidMeters(t *testing.T) {
+	base := func() *Score {
+		s := &Score{
+			Tempos: TempoMap{{Tick: 0, USPerQuarter: USPerQuarter(120)}},
+			Meters: MeterMap{{Tick: 0, Num: 4, Den: 4}},
+		}
+		tr := &Track{Tuning: StandardTuning}
+		s.Tracks = []*Track{tr}
+		tr.AppendBar(4, 4).AddBeat(Whole, Note{String: 6, Fret: 0})
+		return s
+	}
+
+	// A zero denominator past the last bar: the shape a hostile MIDI
+	// time-signature meta produced pre-fix, which panicked BeatLen with
+	// a divide by zero on a seek to the end of the piece.
+	s := base()
+	s.Meters = MeterMap{{Tick: 0, Num: 4, Den: 4}, {Tick: 3840, Num: 4, Den: 0}}
+	if err := s.Validate(); err == nil {
+		t.Error("Validate accepted a zero meter denominator")
+	}
+	s = base()
+	s.Meters = MeterMap{{Tick: 0, Num: 0, Den: 4}}
+	if err := s.Validate(); err == nil {
+		t.Error("Validate accepted a zero meter numerator")
+	}
+	// A denominator finer than the tick grid truncates BeatLen to zero.
+	s = base()
+	s.Meters = MeterMap{{Tick: 0, Num: 1, Den: 7680}}
+	if err := s.Validate(); err == nil {
+		t.Error("Validate accepted a meter denominator finer than the tick grid")
+	}
+}
+
 func TestEventsTieMismatchDegrades(t *testing.T) {
 	s := &Score{
 		Tempos: TempoMap{{Tick: 0, USPerQuarter: USPerQuarter(120)}},

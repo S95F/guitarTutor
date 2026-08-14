@@ -29,6 +29,31 @@ import (
 // MaxFret is the highest fret considered playable.
 const MaxFret = 24
 
+// maxStrings is the package's string-count ceiling. Strings beyond it get
+// no positions at all (options simply stops looking), because enumerate
+// tracks taken strings in a uint64 bitmask: string numbers up to 63 map to
+// distinct bits, anything higher would alias. No real fretted instrument
+// comes close — the widest are around 15-18 strings — so the cap costs
+// nothing and keeps the mask arithmetic honest.
+const maxStrings = 63
+
+// maxNodes caps how many recursion steps enumerate spends on one beat's
+// joint-fingering search. The search space is permutational — a 15-note
+// chord on a 40-string staff has ~5e22 leaves, effectively unbounded — but
+// any realistic worst case (dense chord, many-stringed tuning) finishes in
+// a couple of thousand steps, so 100k is ~40x headroom for real music
+// while a hostile input hits the cap in well under a millisecond and falls
+// through to the greedy per-note placement.
+const maxNodes = 100_000
+
+// maxCands caps how many joint fingerings one beat may collect. Every
+// candidate is copied by finish and later scored against every candidate
+// of the neighboring beats in the Viterbi pass, so an unbounded list turns
+// into quadratic transition work. Enumeration order is fret-ascending,
+// meaning the cheap, playable fingerings are found first — keeping only
+// the first 512 loses nothing anyone would want to play.
+const maxCands = 512
+
 // MaxSpan is the largest allowed difference between the highest and lowest
 // fretted fret within one chord. Open strings do not count toward the span.
 const MaxSpan = 4
@@ -135,7 +160,7 @@ type candidate struct {
 // fret then by string number, both ascending.
 func options(key int, tuning score.Tuning, capo int) []Position {
 	var opts []Position
-	for s := 1; s <= len(tuning); s++ {
+	for s := 1; s <= len(tuning) && s <= maxStrings; s++ {
 		fret := key - tuning[s-1] - capo
 		if fret >= 0 && fret <= MaxFret {
 			opts = append(opts, Position{String: s, Fret: fret})
@@ -150,10 +175,13 @@ func options(key int, tuning score.Tuning, capo int) []Position {
 	return opts
 }
 
-// enumerate lists every legal joint fingering of one beat, reporting keys
+// enumerate lists the legal joint fingerings of one beat — capped at
+// maxCands fingerings found within maxNodes search steps — reporting keys
 // with no position at all and falling back to a greedy per-key assignment
-// when the chord admits no joint fingering. It always returns at least one
-// candidate (possibly an empty fingering) so the beat chain stays intact.
+// when the search yields no joint fingering (the chord admits none, or a
+// pathological input exhausted the budget first). It always returns at
+// least one candidate (possibly an empty fingering) so the beat chain
+// stays intact.
 func enumerate(beat int, keys []int, tuning score.Tuning, capo int, unplayable *[]Unplayable) []candidate {
 	lowest, highest := tuning[0]+capo, tuning[0]+capo
 	for _, open := range tuning {
@@ -184,16 +212,27 @@ func enumerate(beat int, keys []int, tuning score.Tuning, capo int, unplayable *
 		opts = append(opts, o)
 	}
 
+	// The exhaustive search runs under a node budget and a candidate cap:
+	// rec reports whether the search may keep going, and a false return
+	// unwinds the whole recursion. A hostile beat (a huge chord over a
+	// many-stringed tuning) therefore stops after maxNodes steps instead
+	// of running for years; if it stops with nothing, the greedy fallback
+	// below takes over, so the beat chain still stays intact.
 	var cands []candidate
 	pos := make([]Position, len(keyIdx))
-	var used uint32 // bitmask of taken string numbers
-	var rec func(k int)
-	rec = func(k int) {
+	var used uint64 // bitmask of taken string numbers (options caps strings at maxStrings=63)
+	budget := maxNodes
+	var rec func(k int) bool
+	rec = func(k int) bool {
+		if budget <= 0 || len(cands) >= maxCands {
+			return false
+		}
+		budget--
 		if k == len(keyIdx) {
 			if spanOK(pos) {
 				cands = append(cands, finish(keyIdx, pos))
 			}
-			return
+			return true
 		}
 		for _, p := range opts[k] {
 			if used&(1<<p.String) != 0 {
@@ -201,16 +240,21 @@ func enumerate(beat int, keys []int, tuning score.Tuning, capo int, unplayable *
 			}
 			used |= 1 << p.String
 			pos[k] = p
-			rec(k + 1)
+			ok := rec(k + 1)
 			used &^= 1 << p.String
+			if !ok {
+				return false
+			}
 		}
+		return true
 	}
 	rec(0)
 
 	if len(cands) == 0 {
-		// No joint fingering (too many notes, or the span rule ruled
-		// every combination out): place notes greedily, lowest fret
-		// first, and report whatever will not fit.
+		// No joint fingering (too many notes, the span rule ruled every
+		// combination out, or the node budget ran dry before a fingering
+		// was found): place notes greedily, lowest fret first, and
+		// report whatever will not fit.
 		var kis []int
 		var ps []Position
 		used = 0

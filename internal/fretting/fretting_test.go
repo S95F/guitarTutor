@@ -3,6 +3,7 @@ package fretting
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/S95F/guitarTutor/internal/score"
 )
@@ -104,6 +105,101 @@ func TestAssignStable(t *testing.T) {
 	}
 	if !reflect.DeepEqual(u1, u2) {
 		t.Errorf("unplayable reports differ across runs:\n%v\n%v", u1, u2)
+	}
+}
+
+// TestAssignPathologicalWideStaff is the search-budget acceptance test: a
+// 15-note chord over a 40-string tuning has ~5e22 joint fingerings, which
+// the pre-budget exhaustive search would chew on for years. With the node
+// budget, Assign must return promptly — every string is open here, so the
+// capped search still finds plenty of legal candidates and no note is
+// lost or doubled onto a taken string.
+func TestAssignPathologicalWideStaff(t *testing.T) {
+	tuning := make(score.Tuning, 40)
+	for i := range tuning {
+		tuning[i] = 40
+	}
+	chord := make([]int, 15)
+	for i := range chord {
+		chord[i] = 40
+	}
+	start := time.Now()
+	got, unp := Assign([][]int{chord}, tuning, 0)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Assign took %v, want under 1s (search budget not applied?)", elapsed)
+	}
+	if len(unp) != 0 {
+		t.Fatalf("unplayable = %v, want none", unp)
+	}
+	seen := map[int]bool{}
+	for i, p := range got[0] {
+		if p.String == 0 {
+			t.Fatalf("chord note %d got no assignment", i)
+		}
+		if seen[p.String] {
+			t.Errorf("string %d assigned to more than one chord note", p.String)
+		}
+		seen[p.String] = true
+	}
+}
+
+// TestAssignBudgetFallsBackGreedy: on 25 identical strings the chord
+// {45,46,50,51,55,56} spans frets 5-16 in every joint fingering, so all
+// ~1.3e8 leaves fail the span rule and, uncapped, the search would grind
+// through every one of them finding nothing. The budget must cut it short
+// and the greedy fallback must still place every note, deterministically,
+// on pairwise-distinct strings.
+func TestAssignBudgetFallsBackGreedy(t *testing.T) {
+	tuning := make(score.Tuning, 25)
+	for i := range tuning {
+		tuning[i] = 40
+	}
+	chord := []int{45, 46, 50, 51, 55, 56}
+	start := time.Now()
+	got, unp := Assign([][]int{chord}, tuning, 0)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Assign took %v, want under 1s (search budget not applied?)", elapsed)
+	}
+	if len(unp) != 0 {
+		t.Fatalf("unplayable = %v, want none (25 strings fit 6 notes greedily)", unp)
+	}
+	seen := map[int]bool{}
+	for i, p := range got[0] {
+		if p.String == 0 {
+			t.Fatalf("chord note %d got no assignment", i)
+		}
+		if seen[p.String] {
+			t.Errorf("string %d assigned to more than one chord note", p.String)
+		}
+		seen[p.String] = true
+	}
+	got2, unp2 := Assign([][]int{chord}, tuning, 0)
+	if !reflect.DeepEqual(got, got2) || !reflect.DeepEqual(unp, unp2) {
+		t.Errorf("budget fallback is not deterministic:\n%v %v\n%v %v", got, unp, got2, unp2)
+	}
+}
+
+// TestAssignManyStringsDistinct guards the taken-string bitmask width:
+// with a 32-bit mask, string numbers of 32 and above shifted to a zero
+// bit, so a two-note chord playable only on strings 32 and 33 doubled
+// both notes onto string 32. The mask is 64-bit now and the notes must
+// land on distinct strings.
+func TestAssignManyStringsDistinct(t *testing.T) {
+	tuning := make(score.Tuning, 33)
+	for i := range tuning {
+		tuning[i] = 120 // strings 1-31: far too high for key 40
+	}
+	tuning[31], tuning[32] = 40, 40 // strings 32 and 33: the only options
+	got, unp := Assign([][]int{{40, 40}}, tuning, 0)
+	if len(unp) != 0 {
+		t.Fatalf("unplayable = %v, want none", unp)
+	}
+	a, b := got[0][0], got[0][1]
+	if a.String == 0 || b.String == 0 {
+		t.Fatalf("assignments = %v/%v, want both notes placed", a, b)
+	}
+	if a.String == b.String {
+		t.Errorf("both notes landed on string %d; want distinct strings (mask aliasing above string 31)", a.String)
 	}
 }
 

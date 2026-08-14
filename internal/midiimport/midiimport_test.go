@@ -101,9 +101,9 @@ func TestImportFixtureRiff(t *testing.T) {
 	}
 }
 
-// buildSMF assembles an in-memory SMF for import tests. Each track is a
-// sequence of (delta, message) pairs.
-func buildSMF(t *testing.T, ppq uint16, tracks ...smf.Track) []byte {
+// buildSMF assembles an in-memory SMF for import tests and benchmarks.
+// Each track is a sequence of (delta, message) pairs.
+func buildSMF(t testing.TB, ppq uint16, tracks ...smf.Track) []byte {
 	t.Helper()
 	s := smf.NewSMF1()
 	s.TimeFormat = smf.MetricTicks(ppq)
@@ -432,6 +432,28 @@ func TestImportAllNotesUnplayable(t *testing.T) {
 	}
 }
 
+// BenchmarkImportDense imports a long dense line — about 50k sequential
+// 16th notes — the shape that made buildTrack's per-bar and per-segment
+// full-note-list scans dominate import time before they were replaced
+// with bucketed bar edges and an advancing active-note cursor.
+func BenchmarkImportDense(b *testing.B) {
+	const notes = 50_000
+	keys := []uint8{40, 45, 50, 55, 59, 64}
+	var tr smf.Track
+	for i := 0; i < notes; i++ {
+		k := keys[i%len(keys)]
+		tr.Add(0, midi.NoteOn(0, k, 100))
+		tr.Add(240, midi.NoteOff(0, k)) // one 16th at PPQ 960
+	}
+	data := buildSMF(b, 960, tr)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, _, err := Import(data); err != nil {
+			b.Fatalf("Import: %v", err)
+		}
+	}
+}
+
 func TestImportZeroTempoSkipped(t *testing.T) {
 	// A tempo meta event encoding 0 microseconds per quarter (which
 	// gomidi decodes as +Inf BPM) must be skipped with a warning, with
@@ -449,5 +471,86 @@ func TestImportZeroTempoSkipped(t *testing.T) {
 	}
 	if len(warns) != 1 || !strings.Contains(warns[0], "tempo") {
 		t.Errorf("warnings = %v, want one skipped-tempo warning", warns)
+	}
+}
+
+func TestImportHostileExtentCapped(t *testing.T) {
+	// At PPQ 1 a modest file delta rescales to an enormous score extent
+	// (250,000 file ticks become 240 million score ticks), which would
+	// otherwise lay out tens of thousands of bars. Import must refuse.
+	var tr smf.Track
+	tr.Add(0, midi.NoteOn(0, 52, 100))
+	tr.Add(250_000, midi.NoteOff(0, 52))
+	_, _, err := Import(buildSMF(t, 1, tr))
+	if err == nil || !strings.Contains(err.Error(), "score too long") {
+		t.Fatalf("err = %v, want a 'score too long' error", err)
+	}
+}
+
+func TestImportTinyBarsCapped(t *testing.T) {
+	// A 1/128 meter makes 30-tick bars, so a note run well inside the
+	// tick limit still explodes into an absurd number of bars: the bar
+	// cap must catch what the tick cap cannot.
+	var tr smf.Track
+	tr.Add(0, smf.MetaMeter(1, 128))
+	tr.Add(0, midi.NoteOn(0, 52, 100))
+	tr.Add(4_000_000, midi.NoteOff(0, 52))
+	_, _, err := Import(buildSMF(t, 960, tr))
+	if err == nil || !strings.Contains(err.Error(), "score too long: more than 100000 bars") {
+		t.Fatalf("err = %v, want a 'score too long: more than 100000 bars' error", err)
+	}
+}
+
+// TestImportZeroDenMeterSkipped: a time-signature meta whose denominator
+// byte is 8 (2^8 overflows uint8 to 0) decodes as 4/0. Placed past the
+// last note it governs no bar, so barSpecs' meter check never sees it —
+// pre-fix it survived into s.Meters and panicked BeatLen with a divide
+// by zero when the user sought to the end of the piece. It must instead
+// be skipped at read time with a warning.
+func TestImportZeroDenMeterSkipped(t *testing.T) {
+	var tr smf.Track
+	tr.Add(0, midi.NoteOn(0, 52, 100))
+	tr.Add(960, midi.NoteOff(0, 52))
+	tr.Add(0, smf.MetaUndefined(0x58, []byte{4, 8, 24, 8})) // raw meter meta: 4/(2^8) = 4/0
+	s, warns, err := Import(buildSMF(t, 960, tr))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0], "time signature") {
+		t.Errorf("warnings = %v, want one skipped-time-signature warning", warns)
+	}
+	if len(s.Meters) != 1 || s.Meters[0] != (score.Meter{Tick: 0, Num: 4, Den: 4}) {
+		t.Errorf("Meters = %v, want single default 4/4 at tick 0", s.Meters)
+	}
+	if err := s.Validate(); err != nil {
+		t.Errorf("Validate: %v", err)
+	}
+	if got := s.Meters.At(s.End()).BeatLen(); got <= 0 { // panicked pre-fix
+		t.Errorf("BeatLen at score end = %d, want > 0", got)
+	}
+}
+
+// TestImportZeroNumMeterSkipped: same escape path as the zero
+// denominator, via an unvalidated zero numerator byte (0/4).
+func TestImportZeroNumMeterSkipped(t *testing.T) {
+	var tr smf.Track
+	tr.Add(0, midi.NoteOn(0, 52, 100))
+	tr.Add(960, midi.NoteOff(0, 52))
+	tr.Add(0, smf.MetaUndefined(0x58, []byte{0, 2, 24, 8})) // raw meter meta: 0/(2^2) = 0/4
+	s, warns, err := Import(buildSMF(t, 960, tr))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0], "time signature") {
+		t.Errorf("warnings = %v, want one skipped-time-signature warning", warns)
+	}
+	if len(s.Meters) != 1 || s.Meters[0] != (score.Meter{Tick: 0, Num: 4, Den: 4}) {
+		t.Errorf("Meters = %v, want single default 4/4 at tick 0", s.Meters)
+	}
+	if err := s.Validate(); err != nil {
+		t.Errorf("Validate: %v", err)
+	}
+	if got := s.Meters.At(s.End()).BeatLen(); got <= 0 {
+		t.Errorf("BeatLen at score end = %d, want > 0", got)
 	}
 }

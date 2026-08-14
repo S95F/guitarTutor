@@ -84,6 +84,30 @@ var noteValues = map[string]int64{
 // 5 dotted half.
 var tempoUnits = map[int]float64{1: 0.5, 2: 1, 3: 1.5, 4: 2, 5: 3}
 
+// maxTimeSigPart bounds a master bar's time-signature numerator and
+// denominator. Without it a numerator that is a multiple of 2^56 wraps
+// int64(num)*3840 to exactly zero, making every bar zero-length while the
+// score still passes Validate. 256 is far past any real signature and
+// keeps the bar-length multiplication overflow-free.
+const maxTimeSigPart = 256
+
+// maxTuningStrings caps how many strings a Tuning property may declare.
+// Real fretted instruments top out around 15-18 strings (a Warr guitar
+// has 15, a theorbo ~14 courses), so 25 clears everything real while
+// stopping a hostile file from installing a tuning that would pass
+// Validate and then choke tab rendering. The cap matches mxlimport's.
+const maxTuningStrings = 25
+
+// maxImportFret is the highest fret a note may claim: 30 sits comfortably
+// above any real 24-fret neck, and bounding it here keeps one absurd fret
+// from pushing a pitch past MIDI 127 and failing the whole import in the
+// final Validate.
+const maxImportFret = 30
+
+// maxCapoFret is the highest capo fret accepted; real capos live in the
+// first handful of frets, so 12 is already generous.
+const maxCapoFret = 12
+
 // Import parses a Guitar Pro 7/8 .gp file into a Score, returning
 // human-readable warnings for everything the import skipped or changed.
 // The first track becomes the RoleUser track, later ones RoleBacking.
@@ -398,6 +422,12 @@ func (im *importer) layoutBars() (score.MeterMap, error) {
 		if num <= 0 || den <= 0 || (4*score.PPQ)%int64(den) != 0 {
 			return nil, fmt.Errorf("unsupported time signature %d/%d", num, den)
 		}
+		if num > maxTimeSigPart {
+			return nil, fmt.Errorf("time signature %d/%d: numerator above the %d limit", num, den, maxTimeSigPart)
+		}
+		if den > maxTimeSigPart {
+			return nil, fmt.Errorf("time signature %d/%d: denominator above the %d limit", num, den, maxTimeSigPart)
+		}
 		if len(meters) == 0 || meters[len(meters)-1].Num != num || meters[len(meters)-1].Den != den {
 			meters = append(meters, score.Meter{Tick: tick, Num: num, Den: den})
 		}
@@ -512,7 +542,7 @@ func (im *importer) buildTrack(ti int, gt *gpTrack, role score.TrackRole) *score
 	}
 	for mi := range im.doc.MasterBars {
 		bar := tr.AppendBar(im.barNums[mi], im.barDens[mi])
-		im.fillBar(ti, mi, bar, len(tuning))
+		im.fillBar(ti, mi, bar, tuning, capo)
 	}
 	return tr
 }
@@ -551,17 +581,26 @@ func (im *importer) trackSetup(ti int, gt *gpTrack) (score.Tuning, int) {
 		im.warnf("track %d (%s): no tuning property; assuming standard EADGBE", ti+1, gt.Name)
 		tuning = append(score.Tuning{}, score.StandardTuning...)
 	}
-	if capo < 0 {
-		im.warnf("track %d (%s): negative capo fret %d; using 0", ti+1, gt.Name, capo)
+	if capo < 0 || capo > maxCapoFret {
+		// A wrong capo shifts every pitch on the track, so clamping a
+		// nonsense value to "no capo" is the least-wrong recovery: the
+		// authored frets stay intact and only the sounding octave-ish
+		// offset is lost.
+		im.warnf("track %d (%s): capo fret %d outside 0-%d; using no capo", ti+1, gt.Name, capo, maxCapoFret)
 		capo = 0
 	}
 	return tuning, capo
 }
 
 // parseTuning parses space-separated MIDI notes low-to-high and reverses
-// them into the score convention (string 1 = highest-pitched).
+// them into the score convention (string 1 = highest-pitched). An error
+// here feeds trackSetup's warn-and-assume-standard recovery, so a bad or
+// absurd tuning degrades the track instead of failing the import.
 func parseTuning(pitches string) (score.Tuning, error) {
 	fields := strings.Fields(pitches)
+	if len(fields) > maxTuningStrings {
+		return nil, fmt.Errorf("%d strings, more than the %d-string limit", len(fields), maxTuningStrings)
+	}
 	tn := make(score.Tuning, len(fields))
 	for i, f := range fields {
 		v, err := strconv.Atoi(f)
@@ -585,8 +624,8 @@ type beatData struct {
 // fillBar resolves a track's bar in master bar mi and lays its beats
 // into the score bar, padding underfull bars with a trailing rest and
 // truncating overfull ones, so the bar always exactly fills its meter.
-func (im *importer) fillBar(ti, mi int, bar *score.Bar, nStrings int) {
-	beats := im.barBeats(ti, mi, nStrings)
+func (im *importer) fillBar(ti, mi int, bar *score.Bar, tuning score.Tuning, capo int) {
+	beats := im.barBeats(ti, mi, tuning, capo)
 	barLen := bar.Len()
 	var filled int64
 	over := false
@@ -617,7 +656,7 @@ func (im *importer) fillBar(ti, mi int, bar *score.Bar, nStrings int) {
 // barBeats resolves master bar mi's bar for track ti down to beats:
 // picks the first voice (warning when other voices hold beats), skips
 // grace beats, and resolves each beat's rhythm and notes.
-func (im *importer) barBeats(ti, mi, nStrings int) []beatData {
+func (im *importer) barBeats(ti, mi int, tuning score.Tuning, capo int) []beatData {
 	mb := im.doc.MasterBars[mi]
 	barIDs := im.ids(mb.Bars, fmt.Sprintf("master bar %d <Bars>", mi+1))
 	if ti >= len(barIDs) {
@@ -676,7 +715,7 @@ func (im *importer) barBeats(ti, mi, nStrings int) []beatData {
 		}
 		out = append(out, beatData{
 			dur:   im.rhythmDur(gbt),
-			notes: im.beatNotes(gbt, nStrings),
+			notes: im.beatNotes(ti, mi, gbt, tuning, capo),
 		})
 	}
 	return out
@@ -733,7 +772,14 @@ func (im *importer) rhythmDur(gbt *gpBeat) int64 {
 // highest, so string s becomes nStrings-s. Fingering is authored, so
 // Inferred stays false. A note whose Tie destination flag is set is the
 // continuation of the previous beat's note (score.Events merges them).
-func (im *importer) beatNotes(gbt *gpBeat, nStrings int) []score.Note {
+//
+// Out-of-range notes are dropped here, one at a time with a warning,
+// because the package contract says import fails only when the file is
+// structurally unreadable: a single fret-64 note (or a weird-but-legal
+// tuning+fret sum past MIDI 127) must not make the final Validate reject
+// the whole score.
+func (im *importer) beatNotes(ti, mi int, gbt *gpBeat, tuning score.Tuning, capo int) []score.Note {
+	nStrings := len(tuning)
 	var out []score.Note
 	for _, nid := range im.ids(gbt.Notes, fmt.Sprintf("beat %d <Notes>", gbt.ID)) {
 		gn := im.notes[nid]
@@ -761,8 +807,18 @@ func (im *importer) beatNotes(gbt *gpBeat, nStrings int) []score.Note {
 			im.warnf("note %d: string %d outside the %d-string tuning; skipped", nid, *gpString, nStrings)
 			continue
 		}
-		if *fret < 0 {
-			im.warnf("note %d: negative fret %d; skipped", nid, *fret)
+		if *fret < 0 || *fret > maxImportFret {
+			im.warnf("track %d bar %d: string %d fret %d outside the 0-%d fret range; note skipped",
+				ti+1, mi+1, str, *fret, maxImportFret)
+			continue
+		}
+		// Belt and suspenders: string, fret, and capo are each in range,
+		// but their sum is the sounding pitch, and an odd tuning can push
+		// it past MIDI 127 anyway. Drop the note rather than let Validate
+		// kill the import.
+		if k := tuning[str-1] + capo + *fret; k < 0 || k > 127 {
+			im.warnf("track %d bar %d: string %d fret %d sounds MIDI key %d, outside 0-127; note skipped",
+				ti+1, mi+1, str, *fret, k)
 			continue
 		}
 		out = append(out, score.Note{

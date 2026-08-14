@@ -15,9 +15,6 @@ type Tempo struct {
 // USPerQuarter converts beats-per-minute to SMF microseconds per quarter.
 func USPerQuarter(bpm float64) int64 { return int64(60e6/bpm + 0.5) }
 
-// BPM converts microseconds per quarter back to beats per minute.
-func (t Tempo) BPM() float64 { return 60e6 / float64(t.USPerQuarter) }
-
 // A TempoMap is the piece's tempo changes, sorted by tick, with the first
 // entry at tick 0.
 type TempoMap []Tempo
@@ -120,6 +117,18 @@ func (s *Score) Validate() error {
 	}
 	if !sort.SliceIsSorted(s.Meters, func(i, j int) bool { return s.Meters[i].Tick < s.Meters[j].Tick }) {
 		return fmt.Errorf("meter map out of order")
+	}
+	// A meter with a zero (or negative) part would panic BeatLen with a
+	// divide by zero the moment anything asks about that region of the
+	// piece, and a denominator finer than the tick grid (4*PPQ, a
+	// 1/3840th note) truncates BeatLen to zero ticks — reject both even
+	// when no bar happens to use the meter, since importers can carry
+	// meter changes past the last bar. Large numerators are legal: some
+	// formats write them freely.
+	for _, m := range s.Meters {
+		if m.Num < 1 || m.Den < 1 || m.Den > 4*PPQ {
+			return fmt.Errorf("meter at tick %d: invalid time signature %d/%d", m.Tick, m.Num, m.Den)
+		}
 	}
 	for ti, tr := range s.Tracks {
 		if len(tr.Tuning) == 0 {

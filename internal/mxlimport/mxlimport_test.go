@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/S95F/guitarTutor/internal/score"
 )
@@ -823,6 +824,83 @@ func TestFingeringBeyondMIDIRange(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// staffTunings builds n <staff-tuning> lines, every string tuned to E2.
+func staffTunings(n int) string {
+	var b strings.Builder
+	for i := 1; i <= n; i++ {
+		b.WriteString(`<staff-tuning line="` + itoa(i) + `"><tuning-step>E</tuning-step><tuning-octave>2</tuning-octave></staff-tuning>`)
+	}
+	return b.String()
+}
+
+// TestImportTuningOverLimitFallsBack: a staff-details tuning declaring
+// more lines than the 25-string limit is rejected wholesale — warned, and
+// the current (default 6-string standard) tuning kept — never truncated
+// into an invented instrument.
+func TestImportTuningOverLimitFallsBack(t *testing.T) {
+	m := `<attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time>` +
+		`<staff-details><staff-lines>26</staff-lines>` + staffTunings(26) + `</staff-details></attributes>` +
+		note("E", 2, 1920, 6, 0, "") +
+		`<forward><duration>1920</duration></forward>`
+	s, warns, err := Import(wrap(m))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	foundLimit, foundKeep := false, false
+	for _, w := range warns {
+		if strings.Contains(w, "more than the 25-string limit") {
+			foundLimit = true
+		}
+		if strings.Contains(w, "keeping the current tuning") {
+			foundKeep = true
+		}
+	}
+	if !foundLimit || !foundKeep {
+		t.Errorf("warnings = %v, want the over-limit staff rejected and the current tuning kept", warns)
+	}
+	tr := s.Tracks[0]
+	if len(tr.Tuning) != 6 {
+		t.Fatalf("tuning has %d strings, want the 6-string default", len(tr.Tuning))
+	}
+	for i, want := range score.StandardTuning {
+		if tr.Tuning[i] != want {
+			t.Errorf("tuning[%d] = %d, want %d (standard)", i, tr.Tuning[i], want)
+		}
+	}
+}
+
+// TestImportPathologicalChordCompletes is the end-to-end denial-of-service
+// regression: a 40-line tab staff plus a 15-note unfingered chord used to
+// hand the fretting heuristic a ~5e22-leaf search (effectively an infinite
+// hang). The over-limit tuning is now rejected at the XML boundary and the
+// fretting search is budgeted, so the import must finish in well under a
+// second, with warnings, keeping whatever notes fit.
+func TestImportPathologicalChordCompletes(t *testing.T) {
+	var notes strings.Builder
+	notes.WriteString(note("E", 2, 1920, -1, 0, ""))
+	for i := 0; i < 14; i++ {
+		notes.WriteString(note("E", 2, 1920, -1, 0, "<chord/>"))
+	}
+	m := `<attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time>` +
+		`<staff-details><staff-lines>40</staff-lines>` + staffTunings(40) + `</staff-details></attributes>` +
+		notes.String() +
+		`<forward><duration>1920</duration></forward>`
+	start := time.Now()
+	s, warns, err := Import(wrap(m))
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Import took %v, want under 1s (pathological chord not defused?)", elapsed)
+	}
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if len(warns) == 0 {
+		t.Error("want warnings (rejected tuning, dropped chord notes), got none")
+	}
+	if evs := s.Events(); len(evs) == 0 {
+		t.Error("no events survived; want the playable part of the chord kept")
 	}
 }
 
