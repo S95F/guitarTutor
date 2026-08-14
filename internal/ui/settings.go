@@ -279,6 +279,11 @@ type Settings struct {
 	// helpOpen is the ?/F1 key-binding overlay; while it is up nothing
 	// else on the screen reacts.
 	helpOpen bool
+	// sfBusy is true while a SoundFont dialog is up, so repeated
+	// activation cannot stack dialogs. Cleared when the mailbox drains
+	// an outcome — the picker contract is that chosen is ALWAYS called,
+	// with "" on cancel.
+	sfBusy bool
 	// ptr is this frame's mouse, sampled once by Update so every decision
 	// below takes it as a value and can be driven from a test.
 	ptr pointer
@@ -354,9 +359,10 @@ func (s *Settings) focusFirstUnconfigured() {
 // SetFilePicker installs the hook the SoundFont row uses to browse for a
 // .sf2 file. The integrator wires it to the OS file dialog, which blocks
 // while the user browses, so fn must return immediately (start a
-// goroutine) and call chosen with the picked path — or never, if the
-// user cancels. The callback is safe to call from any goroutine: it only
-// posts to a mailbox that the game loop drains. When no picker is
+// goroutine) and call chosen with the picked path — with "" on a cancel
+// or failure, ALWAYS: the callback is also how the row learns the dialog
+// is gone and re-arms itself. It is safe to call from any goroutine: it
+// only posts to a mailbox that the game loop drains. When no picker is
 // installed the SoundFont row shows the current value and offers only
 // "clear".
 func (s *Settings) SetFilePicker(fn func(exts []string, chosen func(string))) {
@@ -692,9 +698,15 @@ func (s *Settings) clearSoundFont() {
 // chooseSoundFont asks the installed picker for a .sf2 file. It is a
 // no-op with no picker installed.
 func (s *Settings) chooseSoundFont() {
-	if s.pick == nil {
+	if s.pick == nil || s.sfBusy {
+		// One dialog at a time: without the guard, every Enter press or
+		// browse click stacked another unparented OS dialog, and the
+		// last one confirmed silently overwrote the others' choices —
+		// the exact failure the start screen's dialogBusy exists to
+		// prevent (verification follow-up).
 		return
 	}
+	s.sfBusy = true
 	s.pick([]string{".sf2"}, func(path string) {
 		// The picker may complete on another screen's frame or another
 		// goroutine entirely, so the path goes to the mailbox and
@@ -858,8 +870,13 @@ func (s *Settings) syncSettings() {
 	s.pendingSF = nil
 	s.mu.Unlock()
 
-	if sf != nil && *sf != s.soundFont {
-		s.applySoundFont(*sf)
+	if sf != nil {
+		// Every dialog outcome re-arms the browse; an empty path is a
+		// cancel and changes nothing.
+		s.sfBusy = false
+		if *sf != "" && *sf != s.soundFont {
+			s.applySoundFont(*sf)
+		}
 	}
 	phase := s.calSnapshot().Phase
 	if phase != s.lastPhase {

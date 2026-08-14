@@ -55,10 +55,13 @@ const (
 	brwListTop    = 156
 	brwRecentRowH = 40
 	brwRecentRows = 10
-	brwStatusY    = 600
-	brwNameScale  = 1.35
-	brwOpenBtnW   = 280.0
-	brwOpenBtnH   = 48.0
+	// brwStatusY leaves room for the worst-case status stack — an error
+	// line plus four warnings plus the overflow line — to end above the
+	// footer at uiFooterY (a browser test pins the arithmetic).
+	brwStatusY   = 582
+	brwNameScale = 1.35
+	brwOpenBtnW  = 280.0
+	brwOpenBtnH  = 48.0
 )
 
 // colMissing tints a recent whose file is no longer on disk. Every other
@@ -117,10 +120,13 @@ type browserRecentRemover interface {
 }
 
 // dialogResult is what the file-dialog goroutine posts back: a chosen
-// path, an error worth showing, or neither (the user cancelled).
+// path, an error worth showing, or neither (the user cancelled). gen is
+// the browser's dialog generation at the moment the result was posted;
+// a result whose generation predates the last piece open is stale.
 type dialogResult struct {
 	path string
 	err  string
+	gen  int
 }
 
 // A Browser is the start screen. It lists recently opened pieces (or the
@@ -176,9 +182,18 @@ type Browser struct {
 	wheelAcc float64
 
 	// mu guards the dialog mailbox, written by the dialog goroutine and
-	// drained by Update on the game loop.
-	mu      sync.Mutex
-	pending *dialogResult
+	// drained by Update on the game loop. dialogGen (also under mu) is
+	// bumped every time a piece opens: a dialog left floating while the
+	// user opened something else by other means must not auto-open its
+	// half-hour-old choice the moment the start screen is next shown
+	// (verification follow-up).
+	mu        sync.Mutex
+	pending   *dialogResult
+	dialogGen int
+	// launchGen is the generation the outstanding dialog was LAUNCHED
+	// under; its result is stamped with this, not with the generation at
+	// the moment the user finally answers — that is the whole point.
+	launchGen int
 }
 
 // NewBrowser builds the start screen for sh, loading the recents list
@@ -232,7 +247,7 @@ func (b *Browser) SetOpenDialog(fn func(startDir string)) { b.openDialog = fn }
 // nothing beyond re-arming the dialog.
 func (b *Browser) OfferDialogResult(path, errMsg string) {
 	b.mu.Lock()
-	b.pending = &dialogResult{path: path, err: errMsg}
+	b.pending = &dialogResult{path: path, err: errMsg, gen: b.launchGen}
 	b.mu.Unlock()
 }
 
@@ -246,6 +261,17 @@ func (b *Browser) drainDialog() {
 		return
 	}
 	b.dialogBusy = false
+	b.mu.Lock()
+	stale := res.gen != b.dialogGen
+	b.mu.Unlock()
+	if stale {
+		// The user opened something else while this dialog floated; its
+		// choice is an answer to a question nobody is asking any more.
+		if res.path != "" {
+			b.errMsg = "ignored " + filepath.Base(res.path) + ", chosen while another piece was opening — press O to open it now"
+		}
+		return
+	}
 	switch {
 	case res.err != "":
 		b.errMsg = "could not open the file dialog: " + res.err
@@ -270,6 +296,9 @@ func (b *Browser) launchOpenDialog(startDir string) {
 	}
 	b.dialogBusy = true
 	b.errMsg = ""
+	b.mu.Lock()
+	b.launchGen = b.dialogGen
+	b.mu.Unlock()
 	b.openDialog(startDir)
 }
 
@@ -284,14 +313,19 @@ func (b *Browser) prefs() Prefs {
 // startDir picks the directory the file dialog opens on: the folder
 // holding the most recent piece if it still exists, otherwise the user's
 // home, otherwise the working directory.
+// It deliberately does NOT stat anything: a recent that is not marked
+// missing had its file probed when it joined the list, and re-checking
+// its folder here would block the game loop for the SMB timeout every
+// time O is pressed while a network share naps — the exact stall the
+// recentStatus cache exists to avoid (verification follow-up). If the
+// folder has since vanished, the OS dialog falls back to its own
+// default, which is the graceful outcome anyway.
 func (b *Browser) startDir() string {
 	for _, e := range b.recents {
 		if e.missing {
 			continue
 		}
-		if d := filepath.Dir(e.path); browserIsDir(d) {
-			return d
-		}
+		return filepath.Dir(e.path)
 	}
 	if h, err := os.UserHomeDir(); err == nil && h != "" {
 		return h
@@ -469,6 +503,11 @@ func (b *Browser) openPath(path string) {
 	delete(b.recentStatus, path)
 	b.reloadRecents()
 	b.setSel(0)
+	// Anything a floating dialog says after this moment answers an
+	// earlier question; see dialogGen.
+	b.mu.Lock()
+	b.dialogGen++
+	b.mu.Unlock()
 }
 
 // forgetRecent (the Delete key) removes the selected recent. It is
@@ -890,7 +929,7 @@ func (b *Browser) drawRecents(screen *ebiten.Image) {
 			sub = "missing — press Del to forget"
 		}
 		drawTextScaled(screen, truncateWScaled(e.name, brwRecentW-16, brwNameScale), brwRecentX+4, float64(y), brwNameScale, nameCol)
-		drawTextSmall(screen, ellipsizeW(sub, brwRecentW-16), brwRecentX+4, float64(y)+22, colDim)
+		drawTextSmall(screen, ellipsizeWSmall(sub, brwRecentW-16), brwRecentX+4, float64(y)+22, colDim)
 	}
 	if len(b.recents) > brwRecentRows {
 		drawTextSmall(screen, fmt.Sprintf("%d–%d of %d", b.top+1,

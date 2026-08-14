@@ -524,3 +524,44 @@ func TestSettingsFallbackNoteClearsOnSelection(t *testing.T) {
 		t.Errorf("prefs hold %q, screen selected %q — the commit did not save", capID, s.capture[s.capIdx].ID)
 	}
 }
+
+// TestSoundFontBrowseBusyGuard (verification follow-up): repeated
+// activation of the SoundFont browse must not stack OS dialogs — the
+// picker contract is one dialog at a time, re-armed by the outcome
+// callback, which fires with "" on cancel.
+func TestSoundFontBrowseBusyGuard(t *testing.T) {
+	s, _ := newSettingsFixture(t, newSettingsAudio())
+	asked := 0
+	var done func(string)
+	s.SetFilePicker(func(_ []string, chosen func(string)) { asked++; done = chosen })
+
+	s.chooseSoundFont()
+	s.chooseSoundFont() // a second Enter while the dialog floats
+	if asked != 1 {
+		t.Fatalf("two activations opened %d dialogs, want 1", asked)
+	}
+
+	// A cancel re-arms without changing the setting.
+	done("")
+	s.syncSettings()
+	if s.sfBusy {
+		t.Error("a cancel outcome should re-arm the browse")
+	}
+	if s.soundFont != "" {
+		t.Errorf("a cancel changed the soundfont to %q", s.soundFont)
+	}
+
+	// And the re-armed browse works: a real pick applies.
+	s.chooseSoundFont()
+	if asked != 2 {
+		t.Fatalf("the re-armed browse did not open a dialog (%d)", asked)
+	}
+	done(`C:\sounds\grand.sf2`)
+	s.syncSettings()
+	if s.soundFont != `C:\sounds\grand.sf2` {
+		t.Errorf("the picked soundfont did not apply, got %q", s.soundFont)
+	}
+	if s.sfBusy {
+		t.Error("an applied outcome should also re-arm the browse")
+	}
+}

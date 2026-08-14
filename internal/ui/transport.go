@@ -30,7 +30,7 @@ import (
 // under the tab because they say the same thing at two scales — where you
 // are in the bar, and where you are in the piece.
 const (
-	ptTransportY = 56.0  // transport buttons and toggle chips
+	ptTransportY = 58.0  // transport buttons and toggle chips, below the header rule
 	ptTracksY    = 100.0 // track strip, live meter on the right
 	ptWarnY      = 160.0 // live-warning banner (overlay)
 	ptWarnH      = 56.0

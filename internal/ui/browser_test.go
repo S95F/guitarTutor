@@ -1179,3 +1179,62 @@ func TestBrowserOKeyLaunchesDialog(t *testing.T) {
 		t.Errorf("O launched the dialog %d times, want 1", calls)
 	}
 }
+
+// TestBrowserStatusStackClearsFooter pins the arithmetic behind
+// brwStatusY (verification follow-up): the worst-case status stack — an
+// error line, four warnings, and the overflow line — must end above the
+// footer hint, or the two draw on top of each other and both become
+// unreadable.
+func TestBrowserStatusStackClearsFooter(t *testing.T) {
+	const worstBottom = brwStatusY + 20 + 4*18 + uiTextH
+	if worstBottom > uiFooterY {
+		t.Errorf("the status stack can reach y=%v, past the footer at y=%v", worstBottom, float64(uiFooterY))
+	}
+}
+
+// TestBrowserStaleDialogResultDiscarded (verification follow-up): a
+// dialog left floating while the user opened a different piece by other
+// means must not auto-open its old choice the moment the start screen is
+// next shown — that pick answered a question nobody is asking any more.
+func TestBrowserStaleDialogResultDiscarded(t *testing.T) {
+	op := &browserFakeOpener{}
+	b := browserFixture(t, &browserFakePrefs{}, op)
+	b.SetOpenDialog(func(string) {})
+
+	// A dialog goes up; before it answers, the user opens a piece some
+	// other way (a drop, a recent).
+	b.launchOpenDialog("")
+	dropped := filepath.Join(t.TempDir(), "dropped.gtab")
+	if err := os.WriteFile(dropped, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b.openPath(dropped)
+	if len(op.opened) != 1 {
+		t.Fatalf("opened %d pieces, want the dropped one only", len(op.opened))
+	}
+
+	// The floating dialog finally answers. Its choice is stale.
+	b.OfferDialogResult(`C:\old\choice.gp`, "")
+	b.drainDialog()
+	if len(op.opened) != 1 {
+		t.Errorf("a stale dialog result auto-opened a piece: %v", op.opened)
+	}
+	if b.dialogBusy {
+		t.Error("draining the stale result should still re-arm the dialog")
+	}
+	if !strings.Contains(b.errMsg, "choice.gp") {
+		t.Errorf("the discard should say what it ignored, got %q", b.errMsg)
+	}
+
+	// A fresh round trip afterwards works normally.
+	b.launchOpenDialog("")
+	fresh := filepath.Join(t.TempDir(), "fresh.gtab")
+	if err := os.WriteFile(fresh, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b.OfferDialogResult(fresh, "")
+	b.drainDialog()
+	if len(op.opened) != 2 {
+		t.Errorf("a fresh dialog result did not open: %v", op.opened)
+	}
+}

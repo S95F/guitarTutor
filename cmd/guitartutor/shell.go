@@ -93,12 +93,20 @@ func (o *shellOpener) showSettings(app *ui.App) {
 	st := ui.NewSettings(o.shell)
 	// The SoundFont row browses with the OS file dialog. The chosen
 	// callback only posts to the settings screen's mailbox, so calling it
-	// from the dialog goroutine is safe; a cancel simply never calls it.
+	// from the dialog goroutine is safe — and it is ALWAYS called, with
+	// "" on cancel, because the row's busy guard re-arms on the outcome.
+	// A real pick is also persisted here, directly: the user can find a
+	// dialog that outlived its settings screen (escape while it floated
+	// behind the window) and their choice must land in the config rather
+	// than in a dead screen's mailbox (verification follow-up).
 	st.SetFilePicker(func(exts []string, chosen func(string)) {
 		go func() {
-			if path := pickSoundFont(); path != "" {
-				chosen(path)
+			path := pickSoundFont()
+			if path != "" {
+				o.prefs.SetSoundFont(path)
+				_ = o.prefs.Save()
 			}
+			chosen(path)
 		}()
 	})
 	if app != nil {

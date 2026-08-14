@@ -181,6 +181,13 @@ func ellipsizeW(s string, maxPx float64) string {
 	return fitToWidth(s, maxPx, faceOf(srcBody, fontBody), true)
 }
 
+// ellipsizeWSmall is ellipsizeW measured with the caption face — for
+// text drawTextSmall draws, which would otherwise be over-truncated by
+// the wider body measurement.
+func ellipsizeWSmall(s string, maxPx float64) string {
+	return fitToWidth(s, maxPx, faceOf(srcSmallSource(), fontSmall), true)
+}
+
 // wrapTextW breaks s into lines of at most maxPx pixels, on spaces,
 // measured with the body face. A single word wider than the line stands
 // alone rather than being cut.

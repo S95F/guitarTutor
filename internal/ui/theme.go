@@ -20,9 +20,13 @@ import (
 // Page metrics. Every screen lays out against these, so the eye finds the
 // same left edge and the same footer line on all of them.
 const (
-	uiPadX     = 24.0            // page margin, left and right
-	uiHeaderY  = 18.0            // title baseline
-	uiHeaderH  = 56.0            // height of the header band
+	uiPadX    = 24.0 // page margin, left and right
+	uiHeaderY = 18.0 // title baseline
+	// uiHeaderH clears a 2x-scale Go Medium title's descenders: the rule
+	// under the header sits at uiHeaderH-10, and the old 56 put it through
+	// the tail of every g, j, p, q and y in a title (verification
+	// follow-up to the typeface change).
+	uiHeaderH  = 64.0
 	uiTitleScl = 2.0             // title text scale
 	uiFooterY  = screenH - 26.0  // key-hint line baseline
 	uiBodyTop  = uiHeaderH + 8.0 // where a screen's own content may start

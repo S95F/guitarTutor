@@ -15,6 +15,7 @@ package main
 
 import (
 	"errors"
+	"os"
 	"strings"
 
 	"github.com/ncruces/zenity"
@@ -49,8 +50,11 @@ func pickPieceFile(startDir string) (path, errMsg string) {
 	}
 	if startDir != "" {
 		// Filename with a trailing separator sets the starting directory
-		// without proposing a file name.
-		opts = append(opts, zenity.Filename(startDir+string(rune('\\'))))
+		// without proposing a file name. The separator must be the
+		// PLATFORM's: a hardcoded backslash is an ordinary character on
+		// macOS and Linux, and rooted the dialog in the parent directory
+		// with a junk proposed name there (verification follow-up).
+		opts = append(opts, zenity.Filename(startDir+string(os.PathSeparator)))
 	}
 	p, err := zenity.SelectFile(opts...)
 	switch {
