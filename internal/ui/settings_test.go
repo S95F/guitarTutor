@@ -1236,20 +1236,23 @@ func TestSettingsWrapText(t *testing.T) {
 	if !ok {
 		t.Fatal("expected a split-device warning")
 	}
-	lines := wrapText(w, 60)
+	const wrapPx = 420.0
+	lines := wrapTextW(w, wrapPx)
 	if len(lines) < 2 {
-		t.Fatalf("warning wrapped to %d lines at width 60", len(lines))
+		t.Fatalf("warning wrapped to %d lines at %v px", len(lines), wrapPx)
 	}
 	for _, l := range lines {
-		if len(l) > 60 {
-			t.Errorf("line exceeds the width: %q", l)
+		// Measured with the face that draws it; a single over-wide word
+		// is the only permitted overflow, and this warning has none.
+		if textW(l) > wrapPx {
+			t.Errorf("line measures %.1fpx, past the %v px width: %q", textW(l), wrapPx, l)
 		}
 	}
 	if got := strings.Join(lines, " "); got != w {
 		t.Errorf("wrapped text = %q, want the original %q", got, w)
 	}
-	if wrapText("   ", 10) != nil {
-		t.Error("wrapText on blank input should produce no lines")
+	if wrapTextW("   ", 100) != nil {
+		t.Error("wrapTextW on blank input should produce no lines")
 	}
 }
 

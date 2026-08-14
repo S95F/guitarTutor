@@ -257,7 +257,7 @@ func (p *FilePicker) Update() error {
 func (p *FilePicker) Draw(dst *ebiten.Image) {
 	dst.Fill(colBG)
 	drawHeader(dst, p.title, strings.Join(p.exts, "  "), colDim)
-	drawText(dst, ellipsize(p.dir, fitChars(screenW-2*uiPadX)), uiPadX, uiBodyTop+8, colDim)
+	drawText(dst, ellipsizeW(p.dir, screenW-2*uiPadX), uiPadX, uiBodyTop+8, colDim)
 
 	const listW = screenW - 2*uiPadX
 	vector.DrawFilledRect(dst, uiPadX-8, pkListTop-8, listW+16, pkRows*pkRowH+16, colPanel, false)
@@ -297,7 +297,7 @@ func (p *FilePicker) Draw(dst *ebiten.Image) {
 				label += "/"
 			}
 		}
-		drawText(dst, truncate(label, fitChars(listW-16)), uiPadX+4, y, col)
+		drawText(dst, truncateW(label, listW-16), uiPadX+4, y, col)
 	}
 	if p.dirErr == "" && len(p.listing) == 0 {
 		drawText(dst, "Nothing here matching "+strings.Join(p.exts, ", "), uiPadX+4, pkListTop, colDim)

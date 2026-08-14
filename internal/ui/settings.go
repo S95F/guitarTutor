@@ -1137,9 +1137,9 @@ const (
 	settingsValueX = 300.0
 	settingsLineH  = uiLineH
 	settingsRowH   = uiRowH
-	// settingsWrap is how many characters of a note fit beside the value
-	// column before it has to wrap.
-	settingsWrap   = 128
+	// settingsWrap is the pixel width a note may occupy beside the value
+	// column before it wraps.
+	settingsWrap   = screenW - settingsValueX - uiPadX
 	settingsBtnH   = 20.0
 	settingsBtnPad = 8.0
 	settingsBtnGap = 6.0
@@ -1195,7 +1195,7 @@ func (b *itemsBuilder) section(title string) {
 }
 
 func (b *itemsBuilder) note(text string, col color.RGBA) {
-	for _, line := range wrapText(text, settingsWrap) {
+	for _, line := range wrapTextW(text, settingsWrap) {
 		b.out = append(b.out, settingsItem{kind: siNote, y: b.y, text: line, col: col, row: -1})
 		b.y += settingsLineH
 	}
@@ -1294,7 +1294,7 @@ func (s *Settings) items() []settingsItem {
 			{label: "browse", act: func(s *Settings) { s.chooseSoundFont() }},
 		}, sfButtons...)
 	}
-	b.addRow("soundfont", ellipsize(s.soundFontText(), 60), colHUD, sfButtons...)
+	b.addRow("soundfont", ellipsizeW(s.soundFontText(), 430), colHUD, sfButtons...)
 	if s.pick == nil {
 		b.note("no file chooser is wired in this build; -sf2 on the command line still works", colBarline)
 	}

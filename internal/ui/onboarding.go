@@ -122,11 +122,11 @@ func (b *Browser) drawSteps(screen *ebiten.Image) {
 			titleCol = colDim
 		}
 		drawText(screen, mark, brwRecentX+4, float64(y)+2, markCol)
-		drawText(screen, truncate(st.title, fitChars(brwRecentW-40)), brwRecentX+34, float64(y)+2, titleCol)
+		drawText(screen, truncateW(st.title, brwRecentW-40), brwRecentX+34, float64(y)+2, titleCol)
 		// The detail is drawn at colDim rather than the dimmer colBarline
 		// the rest of the screen uses for asides: on the selected row it
 		// would otherwise be all but invisible against the highlight.
-		drawText(screen, truncate(st.detail, fitChars(brwRecentW-40)), brwRecentX+34, float64(y)+18, colDim)
+		drawTextSmall(screen, truncateW(st.detail, brwRecentW-40), brwRecentX+34, float64(y)+19, colDim)
 	}
 	y := float64(brwListTop + len(steps)*brwRecentRowH + 14)
 	drawText(screen, "your pieces will be listed here once you have opened one", brwRecentX+4, y, colBarline)

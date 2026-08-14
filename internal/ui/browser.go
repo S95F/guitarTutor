@@ -47,11 +47,7 @@ const (
 	brwBrowseRowH = 22
 	brwBrowseRows = 18
 	brwStatusY    = 578
-	brwNameScale  = 1.7
-	// brwRecentNameChars is how many scaled-up characters fit across the
-	// recents pane: (brwRecentW-16) / (glyphW * brwNameScale), rounded
-	// down. Spelt out because Go will not truncate a constant to int.
-	brwRecentNameChars = 32
+	brwNameScale  = 1.35
 )
 
 // colMissing tints a recent whose file is no longer on disk. Every other
@@ -1030,7 +1026,6 @@ func (b *Browser) drawRecents(screen *ebiten.Image) {
 		return
 	}
 	b.drawPaneFrame(screen, browserPaneRecent, brwRecentX, brwRecentW, "RECENT PIECES")
-	pathChars := fitChars(brwRecentW - 16)
 	for row := 0; row < brwRecentRows; row++ {
 		i := b.recentTop + row
 		if i >= len(b.recents) {
@@ -1047,8 +1042,8 @@ func (b *Browser) drawRecents(screen *ebiten.Image) {
 			nameCol = colMissing
 			sub = "missing - press Del to forget"
 		}
-		drawTextScaled(screen, truncate(e.name, brwRecentNameChars), brwRecentX+4, float64(y), brwNameScale, nameCol)
-		drawText(screen, ellipsize(sub, pathChars), brwRecentX+4, float64(y)+21, colDim)
+		drawTextScaled(screen, truncateWScaled(e.name, brwRecentW-16, brwNameScale), brwRecentX+4, float64(y), brwNameScale, nameCol)
+		drawText(screen, ellipsizeW(sub, brwRecentW-16), brwRecentX+4, float64(y)+21, colDim)
 	}
 	if len(b.recents) > brwRecentRows {
 		drawText(screen, fmt.Sprintf("%d-%d of %d", b.recentTop+1,
@@ -1058,7 +1053,7 @@ func (b *Browser) drawRecents(screen *ebiten.Image) {
 }
 
 func (b *Browser) drawBrowse(screen *ebiten.Image) {
-	title := "BROWSE   " + ellipsize(b.dir, fitChars(brwBrowseW-80))
+	title := "BROWSE   " + ellipsizeW(b.dir, brwBrowseW-80)
 	b.drawPaneFrame(screen, browserPaneBrowse, brwBrowseX, brwBrowseW, title)
 
 	if b.dirErr != "" {
@@ -1066,7 +1061,6 @@ func (b *Browser) drawBrowse(screen *ebiten.Image) {
 		drawText(screen, "press Backspace to go back up", brwBrowseX+4, brwListTop+28, colBarline)
 		return
 	}
-	nameChars := fitChars(brwBrowseW - 16)
 	for row := 0; row < brwBrowseRows; row++ {
 		i := b.browseTop + row
 		if i >= len(b.listing) {
@@ -1086,7 +1080,7 @@ func (b *Browser) drawBrowse(screen *ebiten.Image) {
 				label += "/"
 			}
 		}
-		drawText(screen, truncate(label, nameChars), brwBrowseX+4, float64(y), col)
+		drawText(screen, truncateW(label, brwBrowseW-16), brwBrowseX+4, float64(y), col)
 	}
 	if len(b.listing) == 0 {
 		drawText(screen, "No pieces or folders here.", brwBrowseX+4, brwListTop+8, colDim)
@@ -1102,10 +1096,10 @@ func (b *Browser) drawBrowse(screen *ebiten.Image) {
 // the panes.
 func (b *Browser) drawStatus(screen *ebiten.Image) {
 	const maxWarn = 4
-	width := fitChars(screenW - 2*brwRecentX)
+	const width = screenW - 2*brwRecentX
 	y := float64(brwStatusY)
 	if b.errMsg != "" {
-		drawText(screen, ellipsize(b.errMsg, width), brwRecentX, y, colMiss)
+		drawText(screen, ellipsizeW(b.errMsg, width), brwRecentX, y, colMiss)
 		y += 20
 	}
 	for i, w := range b.warns {
@@ -1113,7 +1107,7 @@ func (b *Browser) drawStatus(screen *ebiten.Image) {
 			drawText(screen, fmt.Sprintf("... and %d more warnings", len(b.warns)-maxWarn), brwRecentX, y, colClose)
 			break
 		}
-		drawText(screen, truncate("warning: "+w, width), brwRecentX, y, colClose)
+		drawText(screen, truncateW("warning: "+w, width), brwRecentX, y, colClose)
 		y += 18
 	}
 }

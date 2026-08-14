@@ -15,7 +15,6 @@ import (
 	"sync"
 
 	"github.com/hajimehoshi/ebiten/v2"
-	"github.com/hajimehoshi/ebiten/v2/text/v2"
 	"github.com/hajimehoshi/ebiten/v2/vector"
 
 	"github.com/S95F/guitarTutor/internal/pitch"
@@ -357,14 +356,4 @@ func (a *App) drawTuner(screen *ebiten.Image) {
 	vector.DrawFilledRect(screen, cx+float32(c/50)*barW/2-3, y0-4, 6, barH+8, mcol, false)
 	drawText(screen, "-50", float64(x0)-30, float64(y0)+4, colBarline)
 	drawText(screen, "+50", float64(x0)+barW+8, float64(y0)+4, colBarline)
-}
-
-// drawTextScaled is drawText with a uniform scale (basicfont has no
-// sizes, so big text is scaled-up 7x13).
-func drawTextScaled(dst *ebiten.Image, s string, x, y, scale float64, col color.RGBA) {
-	op := &text.DrawOptions{}
-	op.GeoM.Scale(scale, scale)
-	op.GeoM.Translate(x, y)
-	op.ColorScale.ScaleWithColor(col)
-	text.Draw(dst, s, face, op)
 }

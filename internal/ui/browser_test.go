@@ -930,25 +930,32 @@ func TestBrowserNilPrefs(t *testing.T) {
 }
 
 // TestBrowserTextShortening pins the two truncation helpers: names keep
-// their front, paths keep their tail.
+// their front, paths keep their tail, and neither ever renders wider
+// than the space it was given — measured with the same face that draws.
 func TestBrowserTextShortening(t *testing.T) {
-	if got := truncate("abcdefghij", 6); got != "abc..." {
-		t.Errorf("truncate = %q, want %q", got, "abc...")
+	const long = "a fairly long piece name that cannot fit"
+	if got := truncateW(long, 120); textW(got) > 120 {
+		t.Errorf("truncateW result %q measures %.1fpx, past the 120px budget", got, textW(got))
 	}
-	if got := truncate("abc", 6); got != "abc" {
-		t.Errorf("truncate on a short string = %q", got)
+	if got := truncateW(long, 120); !strings.HasPrefix(got, "a fairly") || !strings.HasSuffix(got, "…") {
+		t.Errorf("truncateW = %q, want the front kept and an ellipsis appended", got)
 	}
-	if got := ellipsize("/home/me/music/song.gp", 12); got != "...c/song.gp" {
-		t.Errorf("ellipsize = %q, want %q", got, "...c/song.gp")
+	if got := truncateW("abc", 120); got != "abc" {
+		t.Errorf("truncateW on a short string = %q, want it untouched", got)
 	}
-	if got := ellipsize("/home/me/music/song.gp", 40); got != "/home/me/music/song.gp" {
-		t.Errorf("ellipsize with room to spare = %q", got)
+
+	const path = `C:\Users\me\Music\tabs\song.gp`
+	if got := ellipsizeW(path, 110); textW(got) > 110 {
+		t.Errorf("ellipsizeW result %q measures %.1fpx, past the 110px budget", got, textW(got))
 	}
-	if got := ellipsize("abc", 0); got != "" {
-		t.Errorf("ellipsize with no room = %q", got)
+	if got := ellipsizeW(path, 110); !strings.HasSuffix(got, "song.gp") || !strings.HasPrefix(got, "…") {
+		t.Errorf("ellipsizeW = %q, want the tail kept behind an ellipsis", got)
 	}
-	if got := truncate("abcdef", 2); got != "ab" {
-		t.Errorf("truncate with no room for the marker = %q", got)
+	if got := ellipsizeW(path, 1000); got != path {
+		t.Errorf("ellipsizeW with room to spare = %q, want it untouched", got)
+	}
+	if got := ellipsizeW("abc", 0); got != "" {
+		t.Errorf("ellipsizeW with no room = %q, want empty", got)
 	}
 }
 

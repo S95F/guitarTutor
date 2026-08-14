@@ -185,7 +185,7 @@ func (a *App) stateChipY() float64 { return a.tabBottom() + 34 }
 // the timeline reads as an unfinished screen. Anchoring also means a bass
 // and an eight-string do not move the controls the user reaches for.
 const (
-	ptCaptionY  = screenH - 152.0 // "bar 12 of 48   0:24 / 1:52"
+	ptCaptionY  = screenH - 158.0 // "bar 12 of 48   0:24 / 1:52"
 	ptTimelineY = screenH - 134.0 // piece timeline strip
 	ptLegendY   = screenH - 86.0  // verdict legend, live sessions only
 	ptMsgY      = screenH - 64.0  // transient messages
@@ -671,9 +671,9 @@ func (a *App) drawTrackStrip(dst *ebiten.Image, l practiceLayout, p pointer) {
 			// so a click on the wrong chip is an obvious mistake.
 			vector.DrawFilledRect(dst, float32(r.x), float32(r.y), 3, float32(r.h), colInferred, false)
 		}
-		label := truncate(fmt.Sprintf("%d %s", i+1, name), fitChars(r.w-30))
-		drawText(dst, label, r.x+9, r.y+5, col)
-		drawText(dst, a.trackStateText(i), r.x+9, r.y+19, colBarline)
+		label := truncateW(fmt.Sprintf("%d %s", i+1, name), r.w-18)
+		drawText(dst, label, r.x+9, r.y+3, col)
+		drawTextSmall(dst, a.trackStateText(i), r.x+9, r.y+20, colBarline)
 	}
 	if n := a.hiddenTracks(l); n > 0 {
 		drawText(dst, a.hiddenTracksHint(len(l.tracks)-n, n), uiPadX, ptTracksY+chipH+4, colBarline)
@@ -769,8 +769,9 @@ func (a *App) drawTimeline(dst *ebiten.Image, l practiceLayout, p pointer) {
 	if hover && a.drag == dragNone {
 		vector.StrokeLine(dst, float32(p.x), float32(tl.y+tl.h), float32(p.x), float32(tl.y+tl.h+4), 1, colDim, false)
 	}
-	drawText(dst, a.positionCaption(), uiPadX, a.captionY(), colHUD)
-	drawTextRight(dst, "click or drag to move   drag the loop edges to resize", screenW-uiPadX, a.captionY(), colBarline)
+	drawTextMono(dst, a.positionCaption(), uiPadX, a.captionY(), colHUD)
+	drawTextSmall(dst, "click or drag to move   ·   drag the loop edges to resize",
+		screenW-uiPadX-textWSmall("click or drag to move   ·   drag the loop edges to resize"), a.captionY()+2, colBarline)
 }
 
 // positionCaption is the "where am I" line above the timeline: the bar

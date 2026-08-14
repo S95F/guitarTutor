@@ -23,7 +23,7 @@ type band struct {
 
 // practiceBands lists everything the practice view draws in the normal
 // flow, top to bottom, as the vertical space it occupies. Text is 13
-// pixels tall and drawn from its top-left, which is what the glyphH terms
+// pixels tall and drawn from its top-left, which is what the uiTextH terms
 // account for. The live-warning banner is deliberately not here: it is an
 // overlay that covers what is behind it, and TestWarningBannerCoversOnly
 // TheNotation checks the different thing that must be true of it.
@@ -35,12 +35,12 @@ func practiceBands(a *App) []band {
 		{"transport row", l.transport[0].y, l.transport[0].y + l.transport[0].h},
 		{"track strip", ptTracksY, ptTracksY + chipH + uiLineH},
 		{"tab", tab.y, tab.y + tab.h},
-		{"state chip", a.stateChipY(), a.stateChipY() + glyphH*1.5},
-		{"position caption", a.captionY(), a.captionY() + glyphH},
+		{"state chip", a.stateChipY(), a.stateChipY() + uiTextH*1.5},
+		{"position caption", a.captionY(), a.captionY() + uiTextH},
 		{"timeline", a.timelineY() - 4, a.timelineY() + ptTimelineH + 8},
-		{"legend", a.legendY(), a.legendY() + glyphH},
-		{"messages", a.msgY(), a.msgY() + 20 + glyphH},
-		{"footer", uiFooterY, uiFooterY + glyphH},
+		{"legend", a.legendY(), a.legendY() + uiTextH},
+		{"messages", a.msgY(), a.msgY() + 20 + uiTextH},
+		{"footer", uiFooterY, uiFooterY + uiTextH},
 	}
 }
 

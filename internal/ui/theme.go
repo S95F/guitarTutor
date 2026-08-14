@@ -12,20 +12,9 @@ package ui
 
 import (
 	"image/color"
-	"strings"
-	"unicode/utf8"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/vector"
-)
-
-// Glyph metrics of the one face the application draws with. basicfont is
-// a fixed-width 7x13 bitmap, so a character count is a pixel count — that
-// is what makes every centring and wrapping calculation here exact rather
-// than approximate.
-const (
-	glyphW = 7.0
-	glyphH = 13.0
 )
 
 // Page metrics. Every screen lays out against these, so the eye finds the
@@ -53,27 +42,15 @@ var (
 	colOnEdge    = color.RGBA{80, 200, 130, 255}  // an engaged toggle's border
 )
 
-// textW is the pixel width of a string at scale 1. The count is runes,
-// not bytes: the face advances one glyph cell per rune, and a filename or
-// device name with any non-ASCII in it was over-measured, mis-centred and
-// byte-truncated mid-sequence when this said len(s) (audit A9). This is
-// still an approximation for runes the bitmap face has no glyph for, but
-// it errs by a cell, not by a multiple of the string's UTF-8 overhead.
-func textW(s string) float64 { return glyphW * float64(utf8.RuneCountInString(s)) }
-
-// textWScaled is the pixel width of a string drawn at scale.
-func textWScaled(s string, scale float64) float64 { return textW(s) * scale }
-
-// centreX is the x that centres s within [x, x+w) at scale 1.
+// centreX is the x that centres body text within [x, x+w). The width is
+// the shaper's real advance (font.go), so centring survives the move to
+// a proportional face.
 func centreX(s string, x, w float64) float64 { return x + (w-textW(s))/2 }
 
-// centreXScaled is centreX for text drawn at scale.
+// centreXScaled is centreX for heading text drawn at scale.
 func centreXScaled(s string, x, w, scale float64) float64 {
 	return x + (w-textWScaled(s, scale))/2
 }
-
-// fitChars is how many characters fit in w pixels at scale 1.
-func fitChars(w float64) int { return int(w / glyphW) }
 
 // drawTextRight draws s ending at x.
 func drawTextRight(dst *ebiten.Image, s string, x, y float64, col color.RGBA) {
@@ -122,18 +99,18 @@ type chipState struct {
 	disabled bool
 }
 
-// chip metrics. The height fits a label and its key hint; widths are
-// computed per chip from the longer of the two strings.
+// chip metrics. The height fits a body-size label over a small key hint;
+// widths are computed per chip from the longer of the two strings.
 const (
-	chipH    = 34.0
-	chipPadX = 10.0
+	chipH    = 36.0
+	chipPadX = 11.0
 	chipGap  = 8.0
 )
 
 // chipW is the width a chip needs for its two lines of text.
 func chipW(c chipState) float64 {
 	w := textW(c.label)
-	if kw := textW(c.key); kw > w {
+	if kw := textWSmall(c.key); kw > w {
 		w = kw
 	}
 	return w + 2*chipPadX
@@ -141,7 +118,9 @@ func chipW(c chipState) float64 {
 
 // drawChip paints one toggle: filled and outlined when engaged, hollow
 // when not, and greyed when the binding is unavailable. hover lifts the
-// fill so the control the next click would reach is obvious.
+// fill so the control the next click would reach is obvious. The key
+// hint sits under the label at caption size — two full body lines do not
+// fit a chip, which is the point: the hint is a whisper, not a label.
 func drawChip(dst *ebiten.Image, r rect, c chipState, hover bool) {
 	fill, edge, text := colPanel, colPanelEdge, colHUD
 	switch {
@@ -153,13 +132,13 @@ func drawChip(dst *ebiten.Image, r rect, c chipState, hover bool) {
 		fill, edge = colHover, colDim
 	}
 	drawPanel(dst, r, fill, edge)
-	drawText(dst, c.label, centreX(c.label, r.x, r.w), r.y+5, text)
+	drawText(dst, c.label, centreX(c.label, r.x, r.w), r.y+3, text)
 	if c.key != "" {
 		kc := colBarline
 		if hover && !c.disabled {
 			kc = colDim
 		}
-		drawText(dst, c.key, centreX(c.key, r.x, r.w), r.y+19, kc)
+		drawTextSmall(dst, c.key, r.x+(r.w-textWSmall(c.key))/2, r.y+20, kc)
 	}
 }
 
@@ -220,58 +199,4 @@ func fillTriangle(dst *ebiten.Image, x0, y0, x1, y1, x2, y2 float64, col color.R
 	op := &vector.DrawPathOptions{AntiAlias: true}
 	op.ColorScale.ScaleWithColor(col)
 	vector.FillPath(dst, &p, nil, op)
-}
-
-// wrapText breaks s into lines of at most width characters, on spaces.
-// basicfont is fixed-width, so a character count is a pixel count.
-func wrapText(s string, width int) []string {
-	words := strings.Fields(s)
-	if len(words) == 0 {
-		return nil
-	}
-	var out []string
-	line := words[0]
-	for _, w := range words[1:] {
-		if len(line)+1+len(w) > width {
-			out = append(out, line)
-			line = w
-			continue
-		}
-		line += " " + w
-	}
-	return append(out, line)
-}
-
-// truncate shortens a string to max glyphs, keeping the front — the
-// right choice for names. It counts and cuts by rune: a byte cut through
-// the middle of a UTF-8 sequence leaves a mangled glyph on screen.
-func truncate(s string, max int) string {
-	if max <= 0 {
-		return ""
-	}
-	r := []rune(s)
-	if len(r) <= max {
-		return s
-	}
-	if max <= 3 {
-		return string(r[:max])
-	}
-	return string(r[:max-3]) + "..."
-}
-
-// ellipsize shortens a string to max glyphs, keeping the tail — the
-// right choice for paths, where the last folders identify it. Rune-safe
-// for the same reason as truncate.
-func ellipsize(s string, max int) string {
-	if max <= 0 {
-		return ""
-	}
-	r := []rune(s)
-	if len(r) <= max {
-		return s
-	}
-	if max <= 3 {
-		return string(r[len(r)-max:])
-	}
-	return "..." + string(r[len(r)-(max-3):])
 }

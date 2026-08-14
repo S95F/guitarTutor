@@ -517,25 +517,32 @@ func TestChecklistIsClickable(t *testing.T) {
 	}
 }
 
-// TestTextMetricsCountRunes (audit A9): the face advances one cell per
-// rune, so widths, truncation and ellipsis must count runes — a byte cut
-// through a UTF-8 sequence leaves a mangled glyph.
-func TestTextMetricsCountRunes(t *testing.T) {
-	if got, want := textW("étude"), glyphW*5.0; got != want {
-		t.Errorf("textW(étude) = %v, want %v", got, want)
+// TestTextMetricsMeasureWhatIsDrawn (audit A9's successor): with real
+// typefaces the measurement is the shaper's advance, so widths must be
+// positive and monotone-ish, non-ASCII must measure like any other text,
+// and a cut must never split a rune or blow its pixel budget.
+func TestTextMetricsMeasureWhatIsDrawn(t *testing.T) {
+	if w := textW("étude"); w <= 0 {
+		t.Errorf("textW(étude) = %v, want a positive advance", w)
 	}
-	if got := truncate("héllo wörld", 8); got != "héllo..." {
-		t.Errorf("truncate = %q, want %q", got, "héllo...")
+	if textW("wide text here") <= textW("a") {
+		t.Error("a longer string measured narrower than a single glyph")
 	}
-	if got := ellipsize("Música/Étude.gp", 10); got != "...tude.gp" {
-		t.Errorf("ellipsize = %q, want %q", got, "...tude.gp")
+	// The scaled measurement must track the scaled face drawTextScaled
+	// actually uses, or centred headings drift off centre.
+	if textWScaled("Title", 2) <= textW("Title") {
+		t.Error("a heading at scale 2 should measure wider than body text")
 	}
-	// A cut must never split a rune: the result must be valid UTF-8.
-	for _, s := range []string{"ααααααα", "日本語のタブ譜", "naïve—song.gp"} {
-		for max := 0; max <= 10; max++ {
-			for _, f := range []func(string, int) string{truncate, ellipsize} {
-				if out := f(s, max); !utf8.ValidString(out) {
-					t.Fatalf("cut of %q at %d produced invalid UTF-8 %q", s, max, out)
+	// A cut must never split a rune and never exceed its budget.
+	for _, s := range []string{"ααααααα", "日本語のタブ譜", "naïve—song.gp", "héllo wörld"} {
+		for _, px := range []float64{0, 10, 30, 60, 200} {
+			for name, f := range map[string]func(string, float64) string{"truncateW": truncateW, "ellipsizeW": ellipsizeW} {
+				out := f(s, px)
+				if !utf8.ValidString(out) {
+					t.Fatalf("%s(%q, %v) produced invalid UTF-8 %q", name, s, px, out)
+				}
+				if px > 0 && out != s && textW(out) > px {
+					t.Fatalf("%s(%q, %v) = %q measures %.1fpx, past its budget", name, s, px, out, textW(out))
 				}
 			}
 		}

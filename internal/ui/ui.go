@@ -11,9 +11,7 @@ import (
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
-	"github.com/hajimehoshi/ebiten/v2/text/v2"
 	"github.com/hajimehoshi/ebiten/v2/vector"
-	"golang.org/x/image/font/basicfont"
 
 	"github.com/S95F/guitarTutor/internal/engine"
 	"github.com/S95F/guitarTutor/internal/score"
@@ -89,8 +87,6 @@ var (
 	colHelpDim = color.RGBA{10, 10, 14, 240} // help overlay backdrop
 	colWarnBG  = color.RGBA{58, 18, 18, 240} // live-warning banner fill
 )
-
-var face = text.NewGoXFace(basicfont.Face7x13)
 
 // App is the ebiten.Game for one practice session. It also satisfies
 // Screen, so the Shell can host it unchanged: Update returns errQuit when
@@ -878,7 +874,7 @@ func (a *App) drawTab(screen *ebiten.Image) {
 		}
 		x := tickToX(bar.Start)
 		vector.StrokeLine(screen, x, tabTop-14, x, float32(tabTop+(nStr-1)*stringGap+14), 1, colBarline, false)
-		drawText(screen, fmt.Sprintf("%d", bi+1), float64(x)+3, tabTop-32, colBarline)
+		drawTextSmall(screen, fmt.Sprintf("%d", bi+1), float64(x)+4, tabTop-32, colBarline)
 
 		for _, beat := range bar.Beats {
 			for _, n := range beat.Notes {
@@ -908,10 +904,13 @@ func (a *App) drawTab(screen *ebiten.Image) {
 				if waiting[noteKey{beat.Start, n.String}] {
 					col = a.pulseCol()
 				}
-				// Blank out the string line behind the number.
-				w := float32(8 * len(label))
-				vector.DrawFilledRect(screen, nx-2, ny-7, w+3, 14, colNoteBG, false)
-				drawText(screen, label, float64(nx), float64(ny)-7, col)
+				// Blank out the string line behind the number. Fret
+				// numbers are mono so a 12 reads as wide as two 1s and
+				// chord columns stay aligned; the box is the measured
+				// advance, not a per-character guess.
+				w := float32(textWMono(label))
+				vector.DrawFilledRect(screen, nx-2, ny-9, w+4, 18, colNoteBG, false)
+				drawTextMono(screen, label, float64(nx), float64(ny)-9, col)
 			}
 		}
 	}
@@ -958,7 +957,7 @@ func (a *App) drawHUD(screen *ebiten.Image, l practiceLayout) {
 // neutral fallback for a score that carries none.
 func (a *App) pieceTitle() string {
 	if a.sc.Title != "" {
-		return truncate(a.sc.Title, 34)
+		return truncateWScaled(a.sc.Title, 520, uiTitleScl)
 	}
 	return "guitarTutor"
 }
@@ -1006,13 +1005,6 @@ func (a *App) drawBPMEntry(screen *ebiten.Image) {
 func (a *App) drawHelp(screen *ebiten.Image) {
 	drawHelpOverlay(screen, "PRACTICE KEYS", a.helpRows(),
 		"track chips:  click to mute    right-click to solo    the blue edge marks the track the tab is showing")
-}
-
-func drawText(dst *ebiten.Image, s string, x, y float64, col color.RGBA) {
-	op := &text.DrawOptions{}
-	op.GeoM.Translate(x, y)
-	op.ColorScale.ScaleWithColor(col)
-	text.Draw(dst, s, face, op)
 }
 
 // Layout implements ebiten.Game with a fixed logical size.
