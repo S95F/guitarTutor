@@ -344,15 +344,18 @@ type shellOpener struct {
 }
 
 func (o *shellOpener) Open(path string) (ui.Screen, []string, error) {
-	// Whatever the last Open started is finished the moment another piece
-	// is opened. This is the first statement, not something the success
-	// path does at the end: the Shell pops a practice screen (and calls
-	// CloseCurrent) only when the user leaves it, and nothing stops a
-	// second Open — nor does a load that fails halfway — so any later
-	// placement would strand the previous player or live session with its
-	// device still held and no reference left to close it.
-	o.CloseCurrent()
-
+	// Everything that can fail without needing the audio device happens
+	// FIRST; the running piece's audio is released only once this open is
+	// past those failure points. The old order — CloseCurrent as the very
+	// first statement — meant a failed F5 reload tore down the audio of a
+	// piece that then stayed on screen: frozen playhead, silent transport,
+	// a header still claiming "playing" (audit A2). A failed load must
+	// leave the previous session exactly as it was. The browser flow is
+	// unaffected: the practice screen it came from was popped, and its
+	// audio closed, before the browser could open anything, so there is
+	// nothing running to preserve — and on the success path CloseCurrent
+	// still runs before the new session or player is installed, so nothing
+	// is ever stranded.
 	sc, warns, err := load(path)
 	if err != nil {
 		return nil, warns, err
@@ -389,6 +392,14 @@ func (o *shellOpener) Open(path string) (ui.Screen, []string, error) {
 			app.SetLiveWarning("could not re-open the piece: " + err.Error())
 		}
 	})
+	// Q's binding reads "Quit guitarTutor", and under the Shell only this
+	// wiring makes that true — without it Q silently behaved as Escape,
+	// while the help overlay promised otherwise on adjacent lines (audit D4).
+	app.SetQuitAll(func() {
+		if o.shell != nil {
+			o.shell.Quit()
+		}
+	})
 	// The engine takes CountInBeats at construction, so a change mid-piece
 	// cannot apply to the running engine — report that honestly rather
 	// than let the view claim otherwise, and persist it for the re-open.
@@ -397,18 +408,34 @@ func (o *shellOpener) Open(path string) (ui.Screen, []string, error) {
 		_ = o.prefs.Save()
 		return false
 	})
-	if o.shell != nil {
-		o.shell.SetTitle("guitarTutor — " + strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)))
-	}
-
 	// Live scoring turns on when the user has chosen a capture device in
 	// settings; otherwise the piece plays back through oto. setupListen
 	// resolves the backend itself and reports a missing one as an error,
 	// so a build without live audio lands in the same warn-and-fall-back
 	// path as a device that will not open, and says so.
 	captureID, _ := o.prefs.Devices()
+	if captureID == "" {
+		// Pre-flight the one audio resource the playback path still needs
+		// while the previous piece is untouched. The oto context is
+		// process-wide, created once and reused, so probing it here is
+		// free when it already exists — and when its first creation fails,
+		// this open fails before anything was torn down.
+		if _, err := o.audioContext(); err != nil {
+			return nil, warns, err
+		}
+	}
+
+	// Past every failure point that can be checked in advance: the
+	// previous piece's audio is released, and the new session or player
+	// is installed in its place. The one residual window is the live
+	// path, where the duplex device cannot be probed without opening it —
+	// a setupListen failure there falls back to oto playback below, and
+	// only a first-ever oto failure on that fallback can now leave the
+	// open failed after the teardown.
+	o.CloseCurrent()
+
 	if captureID != "" {
-		session, err := setupListen(eng, app, display, "", "")
+		session, err := setupListen(eng, app, display, "", "", o.prefs.snapshot())
 		if err != nil {
 			// Losing live input must not stop practice: fall back to
 			// playback and tell the user in the view.
@@ -416,6 +443,7 @@ func (o *shellOpener) Open(path string) (ui.Screen, []string, error) {
 		} else {
 			o.session = session
 			o.warnOnSplitDevices(app)
+			o.setTitleFor(path)
 			return app, warns, nil
 		}
 	}
@@ -426,13 +454,29 @@ func (o *shellOpener) Open(path string) (ui.Screen, []string, error) {
 	}
 	o.player = ctx.NewPlayer(eng)
 	o.player.Play()
+	o.setTitleFor(path)
 	return app, warns, nil
+}
+
+// setTitleFor names the window after the piece. It runs only once an open
+// has succeeded: a failed open must not retitle the window after a piece
+// it never produced.
+func (o *shellOpener) setTitleFor(path string) {
+	if o.shell != nil {
+		o.shell.SetTitle("guitarTutor — " + strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)))
+	}
 }
 
 // warnOnSplitDevices surfaces the clock-drift risk in the UI rather than
 // only in the docs (ROADMAP Phase 2 deferred item): capture and playback
 // on different physical interfaces run on independent sample clocks that
 // drift apart over a session, which a static calibration cannot fix.
+//
+// The judgement is ui.SameAudioInterface — the same heuristic the
+// settings screen uses. This file used to carry its own first-word
+// comparison, and the two disagreed on ordinary Windows names: settings
+// warned about a pair that the practice view, the screen where scoring
+// actually happens, stayed silent about (audit C2).
 func (o *shellOpener) warnOnSplitDevices(app *ui.App) {
 	b, err := liveBackend()
 	if err != nil {
@@ -443,8 +487,9 @@ func (o *shellOpener) warnOnSplitDevices(app *ui.App) {
 		return
 	}
 	capID, playID := o.prefs.Devices()
-	capName, playName := deviceLabel(capture, capID), deviceLabel(playback, playID)
-	if sameInterface(capName, playName) {
+	capName := resolvedDeviceName(capture, capID)
+	playName := resolvedDeviceName(playback, playID)
+	if ui.SameAudioInterface(capName, playName) {
 		return
 	}
 	app.SetLiveWarning(fmt.Sprintf(
@@ -452,30 +497,26 @@ func (o *shellOpener) warnOnSplitDevices(app *ui.App) {
 		capName, playName))
 }
 
-// sameInterface guesses whether two endpoint names belong to one physical
-// interface by comparing their first significant word — "Focusrite USB
-// (Focusrite USB Audio)" against "Speakers (Focusrite USB Audio)". A guess
-// is the honest ceiling here: the backend exposes no grouping, so this
-// errs toward warning rather than staying silent.
-func sameInterface(a, b string) bool {
-	if a == "" || b == "" {
-		return true // nothing chosen yet; nothing to warn about
-	}
-	ka, kb := interfaceKey(a), interfaceKey(b)
-	return ka != "" && ka == kb
-}
-
-func interfaceKey(name string) string {
-	if i := strings.Index(name, "("); i >= 0 {
-		if j := strings.Index(name[i:], ")"); j > 1 {
-			name = name[i+1 : i+j]
+// resolvedDeviceName names the device an ID will actually resolve to at
+// open time: the enumerated device, or the system default when the ID is
+// empty or no longer present (mirroring fillDeviceID's fallback). An
+// unresolvable name comes back "", which SameAudioInterface treats as
+// unknown-so-do-not-warn. The old code turned an unset ID into the
+// literal display string "system default" and compared THAT — a device
+// name that matches no real interface, raising a permanent unfounded
+// banner over the tab (audit C4).
+func resolvedDeviceName(devs []audio.DeviceInfo, id string) string {
+	for _, d := range devs {
+		if d.ID == id {
+			return d.Name
 		}
 	}
-	fields := strings.Fields(strings.ToLower(name))
-	if len(fields) == 0 {
-		return ""
+	for _, d := range devs {
+		if d.Default {
+			return d.Name
+		}
 	}
-	return fields[0]
+	return ""
 }
 
 func (o *shellOpener) audioContext() (*oto.Context, error) {

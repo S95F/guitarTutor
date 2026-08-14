@@ -157,8 +157,13 @@ func (p *FilePicker) activate() (done bool) {
 	return true
 }
 
-// hitTest maps a cursor position to a row index.
+// hitTest maps a cursor position to a row index. While a directory error
+// is showing the rows are not drawn, so nothing under the cursor may hit:
+// an invisible row that still answered clicks would navigate blind.
 func (p *FilePicker) hitTest(x, y float64) (int, bool) {
+	if p.dirErr != "" {
+		return 0, false
+	}
 	if x < uiPadX || x > screenW-uiPadX || y < pkListTop {
 		return 0, false
 	}
@@ -258,8 +263,13 @@ func (p *FilePicker) Draw(dst *ebiten.Image) {
 	vector.DrawFilledRect(dst, uiPadX-8, pkListTop-8, listW+16, pkRows*pkRowH+16, colPanel, false)
 
 	if p.dirErr != "" {
+		// The error replaces the listing outright. Falling through and
+		// drawing the ".." row painted the selection highlight over this
+		// very message, leaving an unexplained empty pane (audit A5).
 		drawText(dst, "cannot read this folder: "+p.dirErr, uiPadX, pkListTop, colMiss)
 		drawText(dst, "press Backspace to go back up", uiPadX, pkListTop+20, colBarline)
+		drawFooter(dst, "backspace up a folder   esc cancel")
+		return
 	}
 	for row := 0; row < pkRows; row++ {
 		i := p.top + row

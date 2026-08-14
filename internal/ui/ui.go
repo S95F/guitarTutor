@@ -246,6 +246,12 @@ func (a *App) Update() error {
 	// also close on a click outside themselves, because a modal you can
 	// only dismiss from the keyboard is a dead end for anyone who opened
 	// it with the mouse.
+	if a.bpmEntry || a.helpOpen {
+		// A modal owns every input, including a drag that was in flight
+		// when it opened: the gesture dies here rather than resuming on
+		// whatever the cursor points at when the modal closes.
+		a.drag = dragNone
+	}
 	if a.bpmEntry {
 		a.updateBPMEntry()
 		return nil
@@ -374,13 +380,15 @@ func (a *App) openSettings() {
 }
 
 // reloadPiece (F5) re-opens the piece, picking up settings the running
-// engine could not. It also clears the prompt, so a reload that the
-// integrator declines to perform does not leave the offer up forever.
+// engine could not. The prompt is deliberately not cleared here: a reload
+// that succeeds replaces this whole screen, taking the prompt with it,
+// and after one that fails the offer is still true — clearing it made a
+// failed reload silently withdraw the only hint that the session no
+// longer matches the configuration (audit A2).
 func (a *App) reloadPiece() {
 	if a.reload == nil {
 		return
 	}
-	a.settingsTouched = false
 	a.reload()
 }
 
@@ -647,28 +655,6 @@ func (a *App) toggleSolo(i int) {
 	a.applyMutes()
 }
 
-// trackMarks is the two-character mute/solo badge the HUD shows for track
-// i: 'M' when the user muted it, 'm' when it is muted only because another
-// track is soloed, and 'S' on the soloed track itself.
-func (a *App) trackMarks(i int) string {
-	a.ensureMuteState()
-	if i < 0 || i >= len(a.userMuted) {
-		return "  "
-	}
-	m := byte(' ')
-	switch {
-	case a.userMuted[i]:
-		m = 'M'
-	case a.solo > 0 && a.solo != i+1:
-		m = 'm'
-	}
-	s := byte(' ')
-	if a.solo == i+1 {
-		s = 'S'
-	}
-	return string([]byte{m, s})
-}
-
 // --- Count-in ---
 
 // SetCountIn records the count-in the engine was constructed with, so the
@@ -708,24 +694,25 @@ func (a *App) CountInBeats() int {
 // applies when the piece is re-opened, rather than pretending it worked.
 func (a *App) SetCountInApplier(fn func(beats int) bool) { a.countInApply = fn }
 
-// toggleCountIn (the C key) flips the count-in for the next Play.
+// toggleCountIn (the C key and the COUNT-IN chip) flips the count-in for
+// the next Play. The engine takes its count-in at construction, so when
+// no applier could push the change into the running engine the chip alone
+// would be lying — it lights up for a change that will not happen. The
+// old HUD line carried an "(on re-open)" caveat; its replacement is
+// active: with a reloader wired the change raises the settings-changed
+// prompt (press F5 and it really applies), and without one the transient
+// message line says when the choice takes effect (audit A6).
 func (a *App) toggleCountIn() {
 	a.countInOn = !a.countInOn
 	applied := a.countInApply != nil && a.countInApply(a.CountInBeats())
 	a.countInStale = !applied
-}
-
-// countInLabel is the HUD's count-in state, including the honest caveat
-// when the change could not reach the running engine.
-func (a *App) countInLabel() string {
-	s := "count-in off"
-	if b := a.CountInBeats(); b > 0 {
-		s = fmt.Sprintf("count-in %d", b)
+	if applied {
+		return
 	}
-	if a.countInStale {
-		s += " (on re-open)"
+	a.MarkSettingsChanged()
+	if a.reload == nil {
+		a.setBPMMessage("the count-in change applies when the piece is next opened")
 	}
-	return s
 }
 
 // --- Key bindings: one table, two renderings ---

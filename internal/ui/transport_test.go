@@ -440,8 +440,13 @@ func TestReloadPromptNeedsAReloader(t *testing.T) {
 	if reloaded != 1 {
 		t.Errorf("reload ran %d times, want 1", reloaded)
 	}
-	if a.reloadPrompt() != "" {
-		t.Error("the offer should be withdrawn once it has been taken")
+	// The offer stays up: a successful reload replaces this whole screen
+	// (taking the prompt with it), so the only screen that can still show
+	// the prompt is one whose reload failed — where the offer is still
+	// true, and withdrawing it would hide that the session no longer
+	// matches the configuration (audit A2).
+	if a.reloadPrompt() == "" {
+		t.Error("a failed reload must leave the offer standing")
 	}
 }
 
@@ -487,6 +492,120 @@ func TestTrackStripLeavesRoomForTheLiveMeter(t *testing.T) {
 	for i, r := range narrow.tracks {
 		if !r.empty() && r.x+r.w > a.trackStripRight() {
 			t.Errorf("track %d's chip runs under the live meter", i)
+		}
+	}
+}
+
+// --- audit regression tests -------------------------------------------------
+
+// TestTunerHidesTabLoopHandles (audit A3): the tuner replaces the tab, so
+// the tab's loop-edge grab handles must vanish with it — an invisible
+// handle that still answered a click let the cents bar move a loop end.
+// The timeline stays on screen in both views, so its handles remain.
+func TestTunerHidesTabLoopHandles(t *testing.T) {
+	a := newApp(t, 8)
+	a.eng.SetLoop(3840, 7680)
+
+	l := a.layout()
+	if l.loopA.empty() || l.loopB.empty() {
+		t.Fatal("with the tab showing, both loop edges should have grab handles")
+	}
+
+	a.tunerView = true
+	l = a.layout()
+	if !l.loopA.empty() || !l.loopB.empty() {
+		t.Error("the tuner view must not keep invisible tab loop handles")
+	}
+	if l.tlLoopA.empty() || l.tlLoopB.empty() {
+		t.Error("the timeline is drawn in the tuner view, so its handles must stay")
+	}
+
+	// And a click where the tab handle would have been must not grab.
+	a.eng.SeekTick(3840)
+	tab := a.tabRect()
+	a.handleMouse(pointer{x: a.xAtTick(3840), y: tab.y + tab.h/2, down: true, pressed: true}, false)
+	if a.drag == dragLoopA || a.drag == dragLoopB {
+		t.Errorf("clicking the invisible loop edge started drag %v", a.drag)
+	}
+}
+
+// TestRightClickNeverSeeksOrGrabs (audit A4): the right button means one
+// thing — solo a track. A right press that misses every chip must not
+// fall through into the seek and loop gestures.
+func TestRightClickNeverSeeksOrGrabs(t *testing.T) {
+	a := newApp(t, 8)
+	a.eng.SetLoop(0, 3840)
+	l := a.layout()
+
+	rightAt := func(x, y float64) pointer { return pointer{x: x, y: y, right: true} }
+
+	a.handleMouse(rightAt(l.timeline.x+l.timeline.w/2, l.timeline.y+l.timeline.h/2), false)
+	if got := a.eng.PosTick(); got != 0 {
+		t.Errorf("right-clicking the timeline seeked to %d", got)
+	}
+	if a.drag != dragNone {
+		t.Errorf("right-clicking the timeline started drag %v", a.drag)
+	}
+
+	tab := a.tabRect()
+	a.handleMouse(rightAt(screenW*playheadX+200, tab.y+tab.h/2), false)
+	if got := a.eng.PosTick(); got != 0 {
+		t.Errorf("right-clicking the tab seeked to %d", got)
+	}
+
+	a.handleMouse(rightAt(l.loopB.x+l.loopB.w/2, l.loopB.y+10), false)
+	if a.drag != dragNone {
+		t.Errorf("right-clicking a loop edge started drag %v", a.drag)
+	}
+}
+
+// TestStaleDragDiesWithoutActing (audit A8): a gesture that outlives a
+// modal (which swallows the release) must be dropped on the first frame
+// the button is seen up — not resumed on the cursor's current position.
+func TestStaleDragDiesWithoutActing(t *testing.T) {
+	a := newApp(t, 8)
+	tl := a.layout().timeline
+	a.handleMouse(pressAt(tl), false)
+	if a.drag != dragSeekTimeline {
+		t.Fatal("the press should have started a scrub")
+	}
+	pos := a.eng.PosTick()
+
+	// Button is up, cursor has wandered to the far end of the timeline.
+	a.handleMouse(pointer{x: tl.x + tl.w - 1, y: tl.y + 2}, false)
+	if a.drag != dragNone {
+		t.Error("a drag with the button up should be dropped")
+	}
+	if got := a.eng.PosTick(); got != pos {
+		t.Errorf("the dead drag still seeked from %d to %d", pos, got)
+	}
+
+	// And opening a modal kills an in-flight drag outright.
+	a.handleMouse(pressAt(tl), false)
+	a.openHelp()
+	if err := a.Update(); err != nil {
+		t.Fatalf("Update with help open: %v", err)
+	}
+	if a.drag != dragNone {
+		t.Error("a modal taking the frame should cancel the drag")
+	}
+}
+
+// TestHiddenTracksHint (audit A7): the overflow hint must only promise
+// keys that exist — the bindings stop at track 9.
+func TestHiddenTracksHint(t *testing.T) {
+	a := newApp(t, 1)
+	for _, c := range []struct {
+		shown, hidden int
+		want          string
+	}{
+		{5, 3, "+3 more (keys 6-8)"},
+		{6, 3, "+3 more (keys 7-9)"},
+		{6, 6, "+6 more (keys 7-9; tracks past 9 have no key)"},
+		{9, 3, "+3 more (no keys past track 9)"},
+	} {
+		if got := a.hiddenTracksHint(c.shown, c.hidden); got != c.want {
+			t.Errorf("hiddenTracksHint(%d, %d) = %q, want %q", c.shown, c.hidden, got, c.want)
 		}
 	}
 }

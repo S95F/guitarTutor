@@ -232,6 +232,14 @@ type Settings struct {
 	capIdx   int
 	playIdx  int
 	devErr   error
+	// capMissing / playMissing record that the SAVED device was not among
+	// the enumerated ones, so the index above is a fallback. The rows then
+	// say so: showing the fallback as "<- selected" with no caveat let the
+	// user conclude their unplugged interface was fine (audit C3). The
+	// saved ID is deliberately left in the config, so plugging the device
+	// back in restores it.
+	capMissing  bool
+	playMissing bool
 
 	countIn   int
 	soundFont string
@@ -400,6 +408,8 @@ func (s *Settings) refreshDevices() {
 	}
 	s.capIdx = resolveDevice(s.capture, wantCap)
 	s.playIdx = resolveDevice(s.playback, wantPlay)
+	s.capMissing = wantCap != "" && s.capIdx >= 0 && s.capture[s.capIdx].ID != wantCap
+	s.playMissing = wantPlay != "" && s.playIdx >= 0 && s.playback[s.playIdx].ID != wantPlay
 }
 
 // resolveDevice finds id in opts, falling back to the system default and
@@ -924,6 +934,16 @@ func deviceTokens(name string) (norm string, sig map[string]bool) {
 	return all.String(), sig
 }
 
+// SameAudioInterface reports whether two endpoint names look like they
+// belong to the same physical interface. Exported because the application
+// layer asks the same question when it opens a piece live: two heuristics
+// answering it differently had the settings screen and the practice view
+// giving the user contradictory verdicts on the same device pair
+// (audit C2). An empty name means unknown, and unknown never warns.
+func SameAudioInterface(captureName, playbackName string) bool {
+	return sameAudioInterface(captureName, playbackName)
+}
+
 // sameAudioInterface reports whether two endpoint names look like they
 // belong to the same physical interface.
 //
@@ -1207,6 +1227,12 @@ func (s *Settings) items() []settingsItem {
 		b.addRow("playback", deviceText(s.playback, s.playIdx), colHUD,
 			settingsButton{label: "<", act: func(s *Settings) { s.adjustRow(srPlayback, -1) }},
 			settingsButton{label: ">", act: func(s *Settings) { s.adjustRow(srPlayback, +1) }})
+		if s.capMissing {
+			b.note("the saved capture device is not connected: the fallback shown here is what a piece will actually use", colClose)
+		}
+		if s.playMissing {
+			b.note("the saved playback device is not connected: the fallback shown here is what a piece will actually use", colClose)
+		}
 		if w, ok := s.splitDeviceWarning(); ok {
 			b.note(w, colClose)
 		}

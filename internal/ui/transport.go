@@ -241,8 +241,15 @@ func (a *App) layout() practiceLayout {
 	l.timeline = rect{uiPadX, a.timelineY(), screenW - 2*uiPadX, ptTimelineH}
 
 	if la, lb, on := a.eng.Loop(); on {
-		l.loopA = a.loopHandleOnTab(la)
-		l.loopB = a.loopHandleOnTab(lb)
+		// The tab handles exist only while the tab itself is on screen:
+		// in the tuner view the loop edges are not drawn, and an
+		// invisible handle that still grabbed clicks let a click on the
+		// cents bar silently move a loop end (audit A3). The timeline is
+		// drawn in both views, so its handles stay.
+		if !a.tunerView {
+			l.loopA = a.loopHandleOnTab(la)
+			l.loopB = a.loopHandleOnTab(lb)
+		}
 		l.tlLoopA = a.loopHandleOnTimeline(l.timeline, la)
 		l.tlLoopB = a.loopHandleOnTimeline(l.timeline, lb)
 	}
@@ -387,6 +394,16 @@ func (a *App) seekTo(tick int64) {
 // whatever the cursor has wandered over.
 func (a *App) handleMouse(p pointer, shift bool) {
 	if a.drag != dragNone {
+		// A drag ends the moment the button is up, and it ends without
+		// acting. The modal layers and the settings screen can swallow
+		// any number of frames mid-gesture, so a gesture that outlived
+		// them would otherwise resume on the cursor's current position
+		// with no button held and move the loop or the playhead on its
+		// own (audit A8).
+		if !p.down {
+			a.drag = dragNone
+			return
+		}
 		a.continueDrag(p, shift)
 		return
 	}
@@ -407,6 +424,13 @@ func (a *App) handleMouse(p pointer, shift bool) {
 		return
 	}
 	if a.hitChrome(p, l) {
+		return
+	}
+	// Only the left button reaches the seek and loop gestures. The right
+	// button means exactly one thing — solo a track — and a right press
+	// that missed every chip must die here rather than fall through and
+	// jump the playhead (audit A4).
+	if !p.pressed {
 		return
 	}
 	// Loop edges are tested before the surfaces they sit on, so grabbing
@@ -479,9 +503,9 @@ func (a *App) continueDrag(p pointer, shift bool) {
 		}
 		a.moveLoopEdge(a.drag, tick)
 	}
-	if !p.down {
-		a.drag = dragNone
-	}
+	// Ending the drag lives in handleMouse's gate, which clears it on the
+	// release frame before any action — not here, where the stale position
+	// would already have been acted on.
 }
 
 // moveLoopEdge drags one end of the loop to tick, keeping the other where
@@ -632,8 +656,23 @@ func (a *App) drawTrackStrip(dst *ebiten.Image, l practiceLayout, p pointer) {
 		drawText(dst, a.trackStateText(i), r.x+9, r.y+19, colBarline)
 	}
 	if n := a.hiddenTracks(l); n > 0 {
-		drawText(dst, fmt.Sprintf("+%d more (keys %d-9)", n, len(l.tracks)-n+1),
-			uiPadX, ptTracksY+chipH+4, colBarline)
+		drawText(dst, a.hiddenTracksHint(len(l.tracks)-n, n), uiPadX, ptTracksY+chipH+4, colBarline)
+	}
+}
+
+// hiddenTracksHint describes the tracks the strip had no room for. The
+// mute/solo keys stop at 9, so the hint only promises keys for tracks
+// that actually have one — the old wording named keys that could not
+// reach anything past track 9 (audit A7).
+func (a *App) hiddenTracksHint(shown, hidden int) string {
+	first, total := shown+1, shown+hidden
+	switch {
+	case first > 9:
+		return fmt.Sprintf("+%d more (no keys past track 9)", hidden)
+	case total > 9:
+		return fmt.Sprintf("+%d more (keys %d-9; tracks past 9 have no key)", hidden, first)
+	default:
+		return fmt.Sprintf("+%d more (keys %d-%d)", hidden, first, total)
 	}
 }
 

@@ -100,3 +100,28 @@ func TestShellPopWithoutCloser(t *testing.T) {
 		t.Errorf("Update (root finishing) = %v, want errQuit", err)
 	}
 }
+
+// TestShellQuitDropsEveryScreen (audit D4): Quit ends the application at
+// the end of the frame, releasing what each stacked screen owns on the
+// way out — it is what makes the practice view's "Q quit" binding true
+// under the Shell, where returning errQuit only pops one screen.
+func TestShellQuitDropsEveryScreen(t *testing.T) {
+	root := &shellPlainScreen{}
+	sh := NewShell(Services{}, root)
+	top := &shellClosingScreen{}
+	sh.Show(top)
+	if err := sh.Update(); err != nil {
+		t.Fatalf("Update (pushing): %v", err)
+	}
+
+	sh.Quit()
+	if err := sh.Update(); err != errQuit {
+		t.Fatalf("Update after Quit = %v, want errQuit", err)
+	}
+	if top.closes != 1 {
+		t.Errorf("the closing screen was closed %d times on quit, want exactly 1", top.closes)
+	}
+	if sh.Depth() != 0 {
+		t.Errorf("depth after quit = %d, want 0", sh.Depth())
+	}
+}

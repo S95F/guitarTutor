@@ -13,6 +13,7 @@ package ui
 import (
 	"image/color"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/vector"
@@ -52,8 +53,13 @@ var (
 	colOnEdge    = color.RGBA{80, 200, 130, 255}  // an engaged toggle's border
 )
 
-// textW is the pixel width of a string at scale 1.
-func textW(s string) float64 { return glyphW * float64(len(s)) }
+// textW is the pixel width of a string at scale 1. The count is runes,
+// not bytes: the face advances one glyph cell per rune, and a filename or
+// device name with any non-ASCII in it was over-measured, mis-centred and
+// byte-truncated mid-sequence when this said len(s) (audit A9). This is
+// still an approximation for runes the bitmap face has no glyph for, but
+// it errs by a cell, not by a multiple of the string's UTF-8 overhead.
+func textW(s string) float64 { return glyphW * float64(utf8.RuneCountInString(s)) }
 
 // textWScaled is the pixel width of a string drawn at scale.
 func textWScaled(s string, scale float64) float64 { return textW(s) * scale }
@@ -236,32 +242,36 @@ func wrapText(s string, width int) []string {
 	return append(out, line)
 }
 
-// truncate shortens a string to max characters, keeping the front — the
-// right choice for names.
+// truncate shortens a string to max glyphs, keeping the front — the
+// right choice for names. It counts and cuts by rune: a byte cut through
+// the middle of a UTF-8 sequence leaves a mangled glyph on screen.
 func truncate(s string, max int) string {
 	if max <= 0 {
 		return ""
 	}
-	if len(s) <= max {
+	r := []rune(s)
+	if len(r) <= max {
 		return s
 	}
 	if max <= 3 {
-		return s[:max]
+		return string(r[:max])
 	}
-	return s[:max-3] + "..."
+	return string(r[:max-3]) + "..."
 }
 
-// ellipsize shortens a string to max characters, keeping the tail — the
-// right choice for paths, where the last folders identify it.
+// ellipsize shortens a string to max glyphs, keeping the tail — the
+// right choice for paths, where the last folders identify it. Rune-safe
+// for the same reason as truncate.
 func ellipsize(s string, max int) string {
 	if max <= 0 {
 		return ""
 	}
-	if len(s) <= max {
+	r := []rune(s)
+	if len(r) <= max {
 		return s
 	}
 	if max <= 3 {
-		return s[len(s)-max:]
+		return string(r[len(r)-max:])
 	}
-	return "..." + s[len(s)-(max-3):]
+	return "..." + string(r[len(r)-(max-3):])
 }

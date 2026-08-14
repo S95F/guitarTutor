@@ -183,6 +183,25 @@ func (s *Shell) SetTitle(t string) {
 // honest label for leaving.
 func (s *Shell) Depth() int { return len(s.stack) }
 
+// Quit ends the application at the end of the frame: every screen is
+// dropped — releasing what each owns, top-down, exactly as popping them
+// one at a time would — and Update then reports errQuit to Ebitengine.
+// It is what the practice view's Q key does under the Shell; the binding
+// reads "Quit guitarTutor", and until this existed nothing an integrator
+// could wire made that true (audit D4). The Opener's audio is not
+// released here: the application's run function owns that teardown (it
+// deferred CloseCurrent), and the process is ending either way.
+func (s *Shell) Quit() {
+	s.pending = append(s.pending, func() {
+		for i := len(s.stack) - 1; i >= 0; i-- {
+			if c, ok := s.stack[i].(Closer); ok {
+				c.Close()
+			}
+		}
+		s.stack = nil
+	})
+}
+
 // OpenPiece loads a piece through the Opener and shows its practice
 // screen, recording it as recently used. The returned warnings are the
 // importer's; the error is for the caller to display.

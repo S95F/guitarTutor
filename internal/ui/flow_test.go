@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/hajimehoshi/ebiten/v2"
 )
@@ -481,5 +482,76 @@ func TestHintLineDropsUnavailableBindings(t *testing.T) {
 	}
 	if got, want := hintLineOf(rows), "A here"; got != want {
 		t.Errorf("hintLineOf = %q, want %q", got, want)
+	}
+}
+
+// TestChecklistIsClickable (audit A1): hitTest used to bound the left
+// pane by len(recents), which is zero during onboarding by definition —
+// the checklist was mouse-dead for exactly the users it exists for.
+func TestChecklistIsClickable(t *testing.T) {
+	sh := NewShell(Services{Prefs: &settingsFakePrefs{}, Audio: newSettingsAudio()}, nil)
+	b := NewBrowser(sh)
+	if !b.onboarding() {
+		t.Fatal("fixture should be onboarding")
+	}
+	opened := 0
+	b.SetSettingsOpener(func() { opened++ })
+
+	// Row 1 of the checklist (the calibration step) sits one row down in
+	// the recents pane.
+	x, y := brwRecentX+10, brwListTop+brwRecentRowH+2
+	pane, i, ok := b.hitTest(x, y)
+	if !ok || pane != browserPaneRecent || i != 1 {
+		t.Fatalf("hitTest over the second checklist step = %v, %d, %v; want the recents pane, row 1", pane, i, ok)
+	}
+
+	// The screen-wide click rule: a click on an unselected row selects it,
+	// a click on the selected row activates it.
+	b.click(pane, i)
+	if opened != 0 {
+		t.Fatalf("selecting a step already opened settings %d times", opened)
+	}
+	b.click(pane, i)
+	if opened != 1 {
+		t.Errorf("activating the calibration step opened settings %d times, want 1", opened)
+	}
+}
+
+// TestTextMetricsCountRunes (audit A9): the face advances one cell per
+// rune, so widths, truncation and ellipsis must count runes — a byte cut
+// through a UTF-8 sequence leaves a mangled glyph.
+func TestTextMetricsCountRunes(t *testing.T) {
+	if got, want := textW("étude"), glyphW*5.0; got != want {
+		t.Errorf("textW(étude) = %v, want %v", got, want)
+	}
+	if got := truncate("héllo wörld", 8); got != "héllo..." {
+		t.Errorf("truncate = %q, want %q", got, "héllo...")
+	}
+	if got := ellipsize("Música/Étude.gp", 10); got != "...tude.gp" {
+		t.Errorf("ellipsize = %q, want %q", got, "...tude.gp")
+	}
+	// A cut must never split a rune: the result must be valid UTF-8.
+	for _, s := range []string{"ααααααα", "日本語のタブ譜", "naïve—song.gp"} {
+		for max := 0; max <= 10; max++ {
+			for _, f := range []func(string, int) string{truncate, ellipsize} {
+				if out := f(s, max); !utf8.ValidString(out) {
+					t.Fatalf("cut of %q at %d produced invalid UTF-8 %q", s, max, out)
+				}
+			}
+		}
+	}
+}
+
+// TestPickerErrorSuppressesRowHits (audit A5): while the unreadable-folder
+// message is showing the rows are not drawn, so a click where a row would
+// have been must not navigate blind.
+func TestPickerErrorSuppressesRowHits(t *testing.T) {
+	p, _, _ := pickerFixture(t)
+	p.dirErr = "access is denied"
+	if _, ok := p.hitTest(uiPadX+10, pkListTop+2); ok {
+		t.Error("a hidden row answered a hit test")
+	}
+	if p.handleMouse(pointer{x: uiPadX + 10, y: pkListTop + 2, down: true, pressed: true}) {
+		t.Error("a click on the error pane finished the picker")
 	}
 }

@@ -17,6 +17,7 @@ import (
 
 	"github.com/ebitengine/oto/v3"
 
+	"github.com/S95F/guitarTutor/internal/appconfig"
 	"github.com/S95F/guitarTutor/internal/audiofile"
 	"github.com/S95F/guitarTutor/internal/engine"
 	"github.com/S95F/guitarTutor/internal/gpimport"
@@ -261,11 +262,22 @@ func runPlay(args []string) error {
 
 	app := ui.New(eng, sc, display)
 	app.SetInitialMetronome(*met)
+	// The view mirrors the count-in the engine was built with, and only
+	// the shell path used to sync it — `play -countin 4` drew the
+	// COUNT-IN toggle as off while the engine counted in, and pressing C
+	// to "turn it on" turned it off (audit C5).
+	app.SetCountIn(*countIn)
 
 	if *listen {
 		// Live mode: the duplex stream renders the engine inside its own
-		// callback — oto stays out of the picture entirely.
-		session, err := setupListen(eng, app, display, *inQ, *outQ)
+		// callback — oto stays out of the picture entirely. The CLI's
+		// config source is the file on disk; the shell passes its
+		// in-memory config instead (see setupListen).
+		cfg, cfgErr := appconfig.Load()
+		if cfgErr != nil {
+			fmt.Fprintln(os.Stderr, "warning: existing config unreadable, ignoring it:", cfgErr)
+		}
+		session, err := setupListen(eng, app, display, *inQ, *outQ, cfg)
 		if err != nil {
 			return err
 		}
@@ -330,9 +342,17 @@ func runRender(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 	if err := wavio.Write(f, sampleRate, left, right); err != nil {
+		f.Close()
 		return err
+	}
+	// Close before claiming success. The OS buffers the write, and on a
+	// network share or a full disk the failure only surfaces on the final
+	// flush — a deferred Close discarded that error and the success line
+	// below had already printed, handing the user a truncated WAV and
+	// exit status 0 (audit D1).
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("writing %s: %w", *out, err)
 	}
 	fmt.Printf("rendered %.1fs to %s\n", float64(len(left))/sampleRate, *out)
 	return nil

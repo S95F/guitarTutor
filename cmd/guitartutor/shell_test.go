@@ -373,10 +373,18 @@ func TestOpenClosesPreviousSession(t *testing.T) {
 	}
 }
 
-// TestOpenClosesPreviousSessionOnFailedLoad: the release has to happen
-// before anything that can fail, so a second Open that never produces a
-// screen still does not strand the first piece's device.
-func TestOpenClosesPreviousSessionOnFailedLoad(t *testing.T) {
+// TestFailedOpenLeavesPreviousSessionPlaying is the regression test for
+// audit A2. Open used to release the running piece's audio as its very
+// first statement — but ReopenPiece deliberately keeps the current
+// practice screen when a load fails, so a failed F5 reload left a
+// live-looking screen with no audio behind it: frozen playhead, silent
+// transport, a header still claiming "playing". A failed Open must leave
+// the previous session exactly as it was; the teardown happens only once
+// the open is past the failure points, immediately before the new audio
+// is installed. (The browser flow needs no early teardown: the practice
+// screen it came from was popped, and its audio closed, before the
+// browser could open anything.)
+func TestFailedOpenLeavesPreviousSessionPlaying(t *testing.T) {
 	t.Setenv(appconfig.EnvConfigDir, t.TempDir())
 
 	backend := &stubBackend{
@@ -396,18 +404,35 @@ func TestOpenClosesPreviousSessionOnFailedLoad(t *testing.T) {
 	if o.session == nil {
 		t.Fatal("first Open did not take the live path")
 	}
+	firstSession := o.session
 
 	if _, _, err := o.Open(filepath.Join(t.TempDir(), "missing.gtab")); err == nil {
 		t.Fatal("Open of a missing piece returned nil error")
 	}
-	if o.session != nil {
-		t.Error("a failed Open left the previous session installed")
+	if o.session != firstSession {
+		t.Error("a failed Open must leave the previous session installed and playing")
 	}
 	streams := backend.openStreams()
 	if len(streams) != 1 {
-		t.Fatalf("backend opened %d streams, want 1", len(streams))
+		t.Fatalf("backend opened %d streams, want only the first piece's", len(streams))
+	}
+	if _, _, closed := streams[0].counts(); closed != 0 {
+		t.Errorf("the previous stream was closed %d times by a failed open, want 0", closed)
+	}
+
+	// And a following successful open still swaps cleanly: the old
+	// session is closed exactly once, before the new one is installed.
+	if _, _, err := o.Open(oneBarGtab(t)); err != nil {
+		t.Fatalf("recovery Open: %v", err)
+	}
+	if o.session == firstSession {
+		t.Error("the recovery open reused the failed-over session")
+	}
+	streams = backend.openStreams()
+	if len(streams) != 2 {
+		t.Fatalf("backend opened %d streams in total, want 2", len(streams))
 	}
 	if _, _, closed := streams[0].counts(); closed != 1 {
-		t.Errorf("the previous stream was closed %d times, want exactly 1", closed)
+		t.Errorf("the first stream was closed %d times after the recovery open, want exactly 1", closed)
 	}
 }

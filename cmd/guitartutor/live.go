@@ -145,40 +145,67 @@ func deviceLabel(devs []audio.DeviceInfo, id string) string {
 // fillDeviceID resolves one endpoint: an explicit flag query wins, the
 // config's remembered device fills an empty flag, and with neither the
 // concrete system default is chosen.
-func fillDeviceID(devs []audio.DeviceInfo, kind, query, remembered string) (string, error) {
+//
+// A remembered device that is no longer enumerated — unplugged since it
+// was saved — falls back to the default instead of being handed to the
+// backend verbatim, and the fallback is reported in note so no caller
+// stays silent about it. The settings screen already fell back this way
+// for display while this path passed the stale ID straight to the device
+// open: the two disagreed about which device would be used, and the one
+// that was wrong was the one that opened the stream (audit C3).
+func fillDeviceID(devs []audio.DeviceInfo, kind, query, remembered string) (id, note string, err error) {
 	if query == "" && remembered != "" {
-		return remembered, nil
+		for _, d := range devs {
+			if d.ID == remembered {
+				return remembered, "", nil
+			}
+		}
+		id, err = resolveDevice(devs, kind, "")
+		if err != nil {
+			return "", "", err
+		}
+		return id, fmt.Sprintf("the saved %s device is not connected; using %s", kind, deviceLabel(devs, id)), nil
 	}
-	return resolveDevice(devs, kind, query)
+	id, err = resolveDevice(devs, kind, query)
+	return id, "", err
 }
 
 // fillDeviceIDs applies fillDeviceID to both endpoints. Both the listen and
 // calibrate paths resolve through here, so an offset is stored and looked
 // up under the same key. Pure — the seam the tests drive with fake device
-// lists and configs.
-func fillDeviceIDs(capture, playback []audio.DeviceInfo, cfg appconfig.Config, inQ, outQ string) (inID, outID string, err error) {
-	if inID, err = fillDeviceID(capture, "capture", inQ, cfg.CaptureDeviceID); err != nil {
-		return "", "", err
+// lists and configs. notes carries any silent-fallback explanations for
+// the caller to surface.
+func fillDeviceIDs(capture, playback []audio.DeviceInfo, cfg appconfig.Config, inQ, outQ string) (inID, outID string, notes []string, err error) {
+	var note string
+	if inID, note, err = fillDeviceID(capture, "capture", inQ, cfg.CaptureDeviceID); err != nil {
+		return "", "", nil, err
 	}
-	if outID, err = fillDeviceID(playback, "playback", outQ, cfg.PlaybackDeviceID); err != nil {
-		return "", "", err
+	if note != "" {
+		notes = append(notes, note)
 	}
-	return inID, outID, nil
+	if outID, note, err = fillDeviceID(playback, "playback", outQ, cfg.PlaybackDeviceID); err != nil {
+		return "", "", nil, err
+	}
+	if note != "" {
+		notes = append(notes, note)
+	}
+	return inID, outID, notes, nil
 }
 
 // resolveDevices enumerates the backend's devices and resolves the -in/-out
 // flag values with the config's remembered devices filling the gaps (flags
-// win). The device lists are returned for labeling.
-func resolveDevices(b audio.Backend, cfg appconfig.Config, inQ, outQ string) (inID, outID string, capture, playback []audio.DeviceInfo, err error) {
+// win). The device lists are returned for labeling, and notes carries any
+// fallback the caller must tell the user about.
+func resolveDevices(b audio.Backend, cfg appconfig.Config, inQ, outQ string) (inID, outID string, capture, playback []audio.DeviceInfo, notes []string, err error) {
 	capture, playback, err = b.Devices()
 	if err != nil {
-		return "", "", nil, nil, fmt.Errorf("enumerating devices: %w", err)
+		return "", "", nil, nil, nil, fmt.Errorf("enumerating devices: %w", err)
 	}
-	inID, outID, err = fillDeviceIDs(capture, playback, cfg, inQ, outQ)
+	inID, outID, notes, err = fillDeviceIDs(capture, playback, cfg, inQ, outQ)
 	if err != nil {
-		return "", "", nil, nil, err
+		return "", "", nil, nil, nil, err
 	}
-	return inID, outID, capture, playback, nil
+	return inID, outID, capture, playback, notes, nil
 }
 
 // calibratedOffset looks up the stored latency offset for a device pair.
@@ -309,22 +336,31 @@ func mergeNote(buf []pitch.Note, n pitch.Note) []pitch.Note {
 // setupListen wires the live practice loop: duplex stream -> engine
 // playback + pitch analysis -> scorer and wait gate -> UI feeds.
 //
+// cfg is the caller's authoritative configuration, passed in rather than
+// loaded from disk here. The shell keeps its config in memory and writes
+// it through on save; when a save failed, loading from disk in this
+// function silently opened the stream on whatever the file still said —
+// the wrong device, with offset 0 — while every other part of the app
+// (the settings display, the split-device warning, the decision to go
+// live at all) read the in-memory state (audit C1). The CLI path loads
+// the file itself and passes it in, so both callers choose their source
+// explicitly.
+//
 // Every failure path leaves the engine exactly as it was found: in
 // particular the event tap is rolled back, so a caller that falls back to
 // plain playback is not left with an engine feeding expectations into a
 // scorer nobody drains (see the rollback below).
-func setupListen(eng *engine.Engine, app *ui.App, track int, inQ, outQ string) (session *live.Session, err error) {
+func setupListen(eng *engine.Engine, app *ui.App, track int, inQ, outQ string, cfg appconfig.Config) (session *live.Session, err error) {
 	b, err := liveBackend()
 	if err != nil {
 		return nil, err
 	}
-	cfg, cfgErr := appconfig.Load()
-	if cfgErr != nil {
-		fmt.Fprintln(os.Stderr, "warning: existing config unreadable, ignoring it:", cfgErr)
-	}
-	inID, outID, _, _, err := resolveDevices(b, cfg, inQ, outQ)
+	inID, outID, _, _, notes, err := resolveDevices(b, cfg, inQ, outQ)
 	if err != nil {
 		return nil, err
+	}
+	for _, n := range notes {
+		fmt.Fprintln(os.Stderr, "warning:", n)
 	}
 	offset, calibrated := calibratedOffset(cfg, inID, outID)
 	if !calibrated {
@@ -379,6 +415,13 @@ func setupListen(eng *engine.Engine, app *ui.App, track int, inQ, outQ string) (
 		return session.InputLevel(), session.DroppedSamples()
 	})
 	app.SetWaitControl(true)
+	// A device fallback is worth a banner, not only a stderr line the
+	// windowed app has no way to show. The shell's split-device check may
+	// overwrite this with its own warning, which is the more consequential
+	// of the two.
+	if len(notes) > 0 {
+		app.SetLiveWarning(strings.Join(notes, "; "))
+	}
 	fmt.Printf("listening on %s (offset %d frames, calibrated: %v)\n", b.Name(), offset, calibrated)
 	wired = true
 	return session, nil
@@ -501,9 +544,12 @@ func runCalibrate(args []string) error {
 	}
 	// Same resolution as -listen (flags win, remembered devices fill the
 	// gaps), so the offset is stored under the key playback will look up.
-	inID, outID, capture, playback, err := resolveDevices(b, cfg, *inQ, *outQ)
+	inID, outID, capture, playback, notes, err := resolveDevices(b, cfg, *inQ, *outQ)
 	if err != nil {
 		return err
+	}
+	for _, n := range notes {
+		fmt.Fprintln(os.Stderr, "warning:", n)
 	}
 	fmt.Printf("measuring playback [%s] -> capture [%s]\n",
 		deviceLabel(playback, outID), deviceLabel(capture, inID))

@@ -545,15 +545,16 @@ func TestSoloRestoresUserMutes(t *testing.T) {
 	}
 }
 
-// TestSoloMovesAndMarks: soloing another track moves the solo, and the HUD
-// badges distinguish a mute the user asked for from one solo implies.
+// TestSoloMovesAndMarks: soloing another track moves the solo, and the
+// track chips' state text distinguishes a mute the user asked for from
+// one solo implies.
 func TestSoloMovesAndMarks(t *testing.T) {
 	a := newAppTracks(t, 3, 1)
 	a.toggleMute(0)
 	a.toggleSolo(1)
-	for i, want := range []string{"M ", " S", "m "} {
-		if got := a.trackMarks(i); got != want {
-			t.Errorf("trackMarks(%d) under solo of track 2 = %q, want %q", i, got, want)
+	for i, want := range []string{"muted", "solo", "muted by solo"} {
+		if got := a.trackStateText(i); got != want {
+			t.Errorf("trackStateText(%d) under solo of track 2 = %q, want %q", i, got, want)
 		}
 	}
 
@@ -564,16 +565,16 @@ func TestSoloMovesAndMarks(t *testing.T) {
 	if want := []bool{true, true, false}; !sameBools(muteState(a), want) {
 		t.Errorf("after moving the solo: %v, want %v", muteState(a), want)
 	}
-	for i, want := range []string{"M ", "m ", " S"} {
-		if got := a.trackMarks(i); got != want {
-			t.Errorf("trackMarks(%d) after moving the solo = %q, want %q", i, got, want)
+	for i, want := range []string{"muted", "muted by solo", "solo"} {
+		if got := a.trackStateText(i); got != want {
+			t.Errorf("trackStateText(%d) after moving the solo = %q, want %q", i, got, want)
 		}
 	}
 
 	a.toggleSolo(2)
-	for i, want := range []string{"M ", "  ", "  "} {
-		if got := a.trackMarks(i); got != want {
-			t.Errorf("trackMarks(%d) after release = %q, want %q", i, got, want)
+	for i, want := range []string{"muted", "audible", "audible"} {
+		if got := a.trackStateText(i); got != want {
+			t.Errorf("trackStateText(%d) after release = %q, want %q", i, got, want)
 		}
 	}
 }
@@ -588,8 +589,8 @@ func TestMuteWhileSoloed(t *testing.T) {
 	if want := []bool{false, true, true}; !sameBools(muteState(a), want) {
 		t.Fatalf("muting a solo-silenced track changed what is audible: %v, want %v", muteState(a), want)
 	}
-	if got := a.trackMarks(1); got != "M " {
-		t.Errorf("trackMarks(1) = %q, want %q - the user's choice is recorded", got, "M ")
+	if got := a.trackStateText(1); got != "muted" {
+		t.Errorf("trackStateText(1) = %q, want %q - the user's choice is recorded", got, "muted")
 	}
 	a.toggleMute(0) // mute the soloed track: everything goes quiet
 	if want := []bool{true, true, true}; !sameBools(muteState(a), want) {
@@ -625,8 +626,8 @@ func TestMuteSoloOutOfRange(t *testing.T) {
 	if want := []bool{false, false}; !sameBools(muteState(a), want) {
 		t.Errorf("out-of-range keys changed the mutes: %v", muteState(a))
 	}
-	if got := a.trackMarks(9); got != "  " {
-		t.Errorf("trackMarks out of range = %q, want two spaces", got)
+	if got := a.trackStateText(9); got != "audible" {
+		t.Errorf("trackStateText out of range = %q, want the inert %q", got, "audible")
 	}
 }
 
@@ -643,8 +644,8 @@ func TestCountInToggle(t *testing.T) {
 	if a.countInStale {
 		t.Error("count-in reported stale before anything was changed")
 	}
-	if got := a.countInLabel(); got != "count-in 4" {
-		t.Errorf("label = %q, want %q", got, "count-in 4")
+	if a.bpmMessage() != "" {
+		t.Error("a transient message is showing before anything was changed")
 	}
 
 	a.toggleCountIn()
@@ -654,8 +655,10 @@ func TestCountInToggle(t *testing.T) {
 	if !a.countInStale {
 		t.Error("with no applier the change must be reported as pending a re-open")
 	}
-	if got := a.countInLabel(); !strings.Contains(got, "off") || !strings.Contains(got, "re-open") {
-		t.Errorf("label = %q, want it to say off and pending a re-open", got)
+	// With no reloader wired the honesty channel is the transient message:
+	// the chip alone would claim a change the running engine will not honour.
+	if got := a.bpmMessage(); !strings.Contains(got, "next opened") {
+		t.Errorf("transient message = %q, want it to say the change applies on the next open", got)
 	}
 
 	a.toggleCountIn()
@@ -696,15 +699,21 @@ func TestCountInApplier(t *testing.T) {
 	if a.countInStale {
 		t.Error("count-in reported stale even though the applier accepted it")
 	}
-	if lbl := a.countInLabel(); lbl != "count-in 2" {
-		t.Errorf("label = %q, want %q", lbl, "count-in 2")
+	if msg := a.bpmMessage(); msg != "" {
+		t.Errorf("an accepted change should raise no caveat, got %q", msg)
 	}
 
-	// An applier that cannot make it stick must not be believed.
+	// An applier that cannot make it stick must not be believed — and with
+	// a reloader wired, the pending change raises the F5 prompt instead of
+	// the transient message, because F5 is the way to make it real.
 	a.SetCountInApplier(func(int) bool { return false })
+	a.SetReloader(func() {})
 	a.toggleCountIn()
 	if !a.countInStale {
 		t.Error("an applier returning false must leave the change pending")
+	}
+	if a.reloadPrompt() == "" {
+		t.Error("a pending count-in change with a reloader wired should offer F5")
 	}
 }
 

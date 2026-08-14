@@ -109,7 +109,7 @@ func TestFillDeviceIDs(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			in, out, err := fillDeviceIDs(testCapture, testPlayback, c.cfg, c.inQ, c.outQ)
+			in, out, _, err := fillDeviceIDs(testCapture, testPlayback, c.cfg, c.inQ, c.outQ)
 			if c.wantErrPart != "" {
 				if err == nil || !strings.Contains(err.Error(), c.wantErrPart) {
 					t.Fatalf("err = %v, want one containing %q", err, c.wantErrPart)
@@ -499,7 +499,7 @@ func TestSetupListenRollsBackTapOnFailure(t *testing.T) {
 	eng := newEngine(sc, engine.Options{})
 	app := ui.New(eng, sc, 0)
 
-	session, err := setupListen(eng, app, 0, "", "")
+	session, err := setupListen(eng, app, 0, "", "", appconfig.Config{})
 	if err == nil {
 		session.Stop()
 		t.Fatal("setupListen with a refusing backend returned nil error")
@@ -532,12 +532,63 @@ func TestSetupListenKeepsTapOnSuccess(t *testing.T) {
 	eng := newEngine(sc, engine.Options{})
 	app := ui.New(eng, sc, 0)
 
-	session, err := setupListen(eng, app, 0, "", "")
+	session, err := setupListen(eng, app, 0, "", "", appconfig.Config{})
 	if err != nil {
 		t.Fatalf("setupListen: %v", err)
 	}
 	defer session.Stop()
 	if len(installed) != 1 || !installed[0] {
 		t.Errorf("event tap calls = %v, want exactly one install and no rollback", installed)
+	}
+}
+
+// TestFillDeviceIDStaleRemembered is the regression test for audit C3: a
+// remembered device that is no longer enumerated must fall back to the
+// concrete default WITH a note, not be handed to the backend verbatim.
+// The settings screen already displayed the fallback; the open path
+// used the stale ID, so what the user saw and what the stream opened on
+// disagreed.
+func TestFillDeviceIDStaleRemembered(t *testing.T) {
+	cfg := appconfig.Config{CaptureDeviceID: "cap-unplugged", PlaybackDeviceID: "pb-usb"}
+	in, out, notes, err := fillDeviceIDs(testCapture, testPlayback, cfg, "", "")
+	if err != nil {
+		t.Fatalf("fillDeviceIDs: %v", err)
+	}
+	if in != "cap-mic" {
+		t.Errorf("stale capture ID resolved to %q, want the default cap-mic", in)
+	}
+	if out != "pb-usb" {
+		t.Errorf("still-present playback ID resolved to %q, want pb-usb kept", out)
+	}
+	if len(notes) != 1 || !strings.Contains(notes[0], "capture device is not connected") {
+		t.Errorf("notes = %v, want exactly one explaining the capture fallback", notes)
+	}
+
+	// A present remembered device keeps its silence: no note.
+	cfg = appconfig.Config{CaptureDeviceID: "cap-usb", PlaybackDeviceID: "pb-usb"}
+	_, _, notes, err = fillDeviceIDs(testCapture, testPlayback, cfg, "", "")
+	if err != nil || len(notes) != 0 {
+		t.Errorf("present devices produced notes %v (err %v), want none", notes, err)
+	}
+}
+
+// TestResolvedDeviceName is the regression test for audit C4: an unset or
+// stale ID must resolve to the name of the device that will actually be
+// used (the system default), never to a placeholder string that matches
+// no real interface — the old code compared the literal words "system
+// default" and raised a permanent unfounded split-device banner.
+func TestResolvedDeviceName(t *testing.T) {
+	if got := resolvedDeviceName(testPlayback, ""); got != "Speakers" {
+		t.Errorf("unset ID resolved to %q, want the default's name Speakers", got)
+	}
+	if got := resolvedDeviceName(testPlayback, "pb-gone"); got != "Speakers" {
+		t.Errorf("stale ID resolved to %q, want the default's name Speakers", got)
+	}
+	if got := resolvedDeviceName(testPlayback, "pb-usb"); got != "USB Audio Interface" {
+		t.Errorf("present ID resolved to %q, want its own name", got)
+	}
+	noDefault := []audio.DeviceInfo{{ID: "a", Name: "A"}}
+	if got := resolvedDeviceName(noDefault, ""); got != "" {
+		t.Errorf("no default marked resolved to %q, want the unknown \"\"", got)
 	}
 }

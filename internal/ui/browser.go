@@ -831,7 +831,12 @@ func (b *Browser) hitTest(x, y int) (browserPane, int, bool) {
 			return 0, 0, false
 		}
 		i := b.recentTop + row
-		if i >= len(b.recents) {
+		// The bound is paneLen, not len(b.recents): during first-run
+		// onboarding the pane holds the getting-started checklist and
+		// len(b.recents) is zero by definition — bounding on it made the
+		// whole checklist unclickable for exactly the users it exists for
+		// (audit A1).
+		if i >= b.paneLen(browserPaneRecent) {
 			return 0, 0, false
 		}
 		return browserPaneRecent, i, true

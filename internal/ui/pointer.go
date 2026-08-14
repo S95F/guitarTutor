@@ -32,23 +32,15 @@ func (r rect) contains(px, py float64) bool {
 // the "no region" value, and hit tests must not match it.
 func (r rect) empty() bool { return r.w <= 0 || r.h <= 0 }
 
-// grow returns r expanded by n pixels on every side. Used to give a thin
-// target — a loop edge is a two-pixel line — a grabbable width without
-// drawing it any fatter.
-func (r rect) grow(n float64) rect {
-	return rect{r.x - n, r.y - n, r.w + 2*n, r.h + 2*n}
-}
-
 // A pointer is one frame's mouse state, as the game loop saw it. All
 // fields are plain data so a test can construct any situation directly.
 type pointer struct {
 	x, y float64
-	// down is the left button's held state; pressed and released are its
-	// edges this frame. A click is pressed-then-released, but screens act
-	// on pressed so that a press can also begin a drag.
-	down     bool
-	pressed  bool
-	released bool
+	// down is the left button's held state and pressed is its down edge
+	// this frame. Screens act on the press so that the same gesture can
+	// begin a drag; the release is observed as down going false.
+	down    bool
+	pressed bool
 	// right is the right button's press edge. It is the second way to
 	// solo a track, for people who do not reach for shift.
 	right bool
@@ -62,27 +54,17 @@ func readPointer() pointer {
 	x, y := ebiten.CursorPosition()
 	_, wy := ebiten.Wheel()
 	return pointer{
-		x:        float64(x),
-		y:        float64(y),
-		down:     ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft),
-		pressed:  inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft),
-		released: inpututil.IsMouseButtonJustReleased(ebiten.MouseButtonLeft),
-		right:    inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonRight),
-		wheel:    wy,
+		x:       float64(x),
+		y:       float64(y),
+		down:    ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft),
+		pressed: inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft),
+		right:   inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonRight),
+		wheel:   wy,
 	}
 }
 
 // over reports whether the cursor is inside r.
 func (p pointer) over(r rect) bool { return !r.empty() && r.contains(p.x, p.y) }
-
-// clicked reports whether the left button went down inside r this frame.
-// Acting on the press rather than the release is what lets the same
-// gesture start a drag: the tab, the timeline and the loop edges all
-// begin moving on the press and follow the cursor until it is let go.
-func (p pointer) clicked(r rect) bool { return p.pressed && p.over(r) }
-
-// rightClicked reports whether the right button went down inside r.
-func (p pointer) rightClicked(r rect) bool { return p.right && p.over(r) }
 
 // A hotspot is one clickable region with the action it performs. Screens
 // build a slice of these while drawing and then hand the slice to the
@@ -120,17 +102,6 @@ func (p pointer) hit(spots []hotspot) bool {
 		return p.pressed || p.right
 	}
 	return false
-}
-
-// hovered returns the index of the hotspot under the cursor, or -1. Draw
-// code uses it to light the control the next click would reach.
-func (p pointer) hovered(spots []hotspot) int {
-	for i, s := range spots {
-		if p.over(s.r) {
-			return i
-		}
-	}
-	return -1
 }
 
 // wheelSteps splits an accumulated wheel delta into whole notches and the
