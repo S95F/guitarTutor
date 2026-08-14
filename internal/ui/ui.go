@@ -124,13 +124,16 @@ type App struct {
 	solo      int
 
 	// Count-in state for the next Play. countInBeats is the configured
-	// length, countInOn the C toggle, and countInStale records that the
-	// user changed it but no applier could push it into the running
-	// engine — the HUD then says so rather than lying.
-	countInBeats int
-	countInOn    bool
-	countInStale bool
-	countInApply func(beats int) bool
+	// length, countInOn the C toggle, and engineCountIn what the running
+	// engine was actually constructed with (0 = none). countInStale is
+	// true while the user's choice differs from engineCountIn and no
+	// applier could push it through — a comparison, not a latch, so a
+	// toggle-and-back withdraws the reload offer it raised.
+	countInBeats  int
+	countInOn     bool
+	engineCountIn int
+	countInStale  bool
+	countInApply  func(beats int) bool
 
 	// helpOpen is the ?/F1 key-binding overlay; while it is up Update
 	// routes every key to it so nothing acts on the piece behind it.
@@ -393,9 +396,13 @@ func (a *App) reloadPiece() {
 }
 
 // reloadPrompt is the line offering a reload, or "" when there is
-// nothing to offer.
+// nothing to offer. Two independent conditions raise it: the settings
+// screen reported an open-time change on the way back (settingsTouched),
+// or the C key holds a count-in the running engine was not built with
+// (countInStale). The second withdraws itself when the toggle round-trips
+// back to the engine's value.
 func (a *App) reloadPrompt() string {
-	if !a.settingsTouched {
+	if !a.settingsTouched && !a.countInStale {
 		return ""
 	}
 	return "settings changed: press F5 to re-open this piece with them"
@@ -664,8 +671,10 @@ func (a *App) toggleSolo(i int) {
 func (a *App) SetCountIn(beats int) {
 	if beats > 0 {
 		a.countInBeats, a.countInOn = beats, true
+		a.engineCountIn = beats
 	} else {
 		a.countInBeats, a.countInOn = defaultCountInBeats, false
+		a.engineCountIn = 0
 	}
 	a.countInStale = false
 }
@@ -699,18 +708,26 @@ func (a *App) SetCountInApplier(fn func(beats int) bool) { a.countInApply = fn }
 // no applier could push the change into the running engine the chip alone
 // would be lying — it lights up for a change that will not happen. The
 // old HUD line carried an "(on re-open)" caveat; its replacement is
-// active: with a reloader wired the change raises the settings-changed
-// prompt (press F5 and it really applies), and without one the transient
-// message line says when the choice takes effect (audit A6).
+// active: with a reloader wired a PENDING change raises the F5 prompt,
+// and without one the transient message line says when the choice takes
+// effect (audit A6).
+//
+// Pending is a comparison against what the engine was built with, not a
+// latch: toggling to a new value and back is no change at all, and an
+// early version that latched on every unapplied press left a permanent
+// false "settings changed" prompt after a C-C round trip (verification
+// follow-up to A6). settingsTouched is untouched here — it belongs to
+// the settings screen's own round-trip-guarded comparison.
 func (a *App) toggleCountIn() {
 	a.countInOn = !a.countInOn
 	applied := a.countInApply != nil && a.countInApply(a.CountInBeats())
-	a.countInStale = !applied
 	if applied {
+		a.engineCountIn = a.CountInBeats()
+		a.countInStale = false
 		return
 	}
-	a.MarkSettingsChanged()
-	if a.reload == nil {
+	a.countInStale = a.CountInBeats() != a.engineCountIn
+	if a.countInStale && a.reload == nil {
 		a.setBPMMessage("the count-in change applies when the piece is next opened")
 	}
 }
@@ -748,7 +765,7 @@ func (b practiceBinding) enabled(a *App) bool { return b.Enabled == nil || b.Ena
 // help overlay.
 var practiceBindings = []practiceBinding{
 	{Group: "transport", Keys: "space", Hint: "space play/pause", Desc: "Start or pause playback"},
-	{Group: "transport", Keys: "left / right", Hint: "arrows seek", Desc: "Jump to the previous / next bar"},
+	{Group: "transport", Keys: "left / right", Hint: "arrows seek", Desc: "Jump to the previous / next bar; inside a loop, right wraps to the loop start"},
 	{Group: "transport", Keys: "home", Desc: "Jump back to the first bar"},
 	{Group: "transport", Keys: "click / drag", Desc: "On the tab or the timeline: move the playhead"},
 

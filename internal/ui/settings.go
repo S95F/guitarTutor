@@ -408,8 +408,23 @@ func (s *Settings) refreshDevices() {
 	}
 	s.capIdx = resolveDevice(s.capture, wantCap)
 	s.playIdx = resolveDevice(s.playback, wantPlay)
-	s.capMissing = wantCap != "" && s.capIdx >= 0 && s.capture[s.capIdx].ID != wantCap
-	s.playMissing = wantPlay != "" && s.playIdx >= 0 && s.playback[s.playIdx].ID != wantPlay
+	s.refreshMissing()
+}
+
+// refreshMissing recomputes whether the shown selection is a fallback for
+// a saved device that is not connected. It runs on every device commit as
+// well as at construction: the flags describe the CURRENT saved IDs, and
+// an early version computed them once, so the "not connected" note kept
+// showing after the user explicitly selected a connected device — at
+// which point both of the note's claims were false (verification
+// follow-up to C3).
+func (s *Settings) refreshMissing() {
+	var wantCap, wantPlay string
+	if p := s.prefs(); p != nil {
+		wantCap, wantPlay = p.Devices()
+	}
+	s.capMissing = wantCap != "" && s.capIdx >= 0 && s.capIdx < len(s.capture) && s.capture[s.capIdx].ID != wantCap
+	s.playMissing = wantPlay != "" && s.playIdx >= 0 && s.playIdx < len(s.playback) && s.playback[s.playIdx].ID != wantPlay
 }
 
 // resolveDevice finds id in opts, falling back to the system default and
@@ -635,6 +650,9 @@ func (s *Settings) commitDevices() {
 	}
 	s.resetCalibration()
 	s.refreshOffset()
+	// The selection just became the saved device, so any "saved device is
+	// not connected" note about the OLD saved ID has expired.
+	s.refreshMissing()
 }
 
 const maxCountIn = 8

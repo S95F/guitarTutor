@@ -214,3 +214,51 @@ func TestCapoShiftsRange(t *testing.T) {
 		t.Errorf("key 42 with capo 2 = %v, want 6/0", got[1][0])
 	}
 }
+
+// TestAssignWideTuningJointFingering is the regression test for the B4
+// verification follow-up: a legitimate 14-string tuning — inside the
+// import cap, an instrument the cap's own comment calls real — with an
+// 8-note chord whose only legal joint fingering sits at high frets. With
+// the span rule checked only at the leaves, the fret-ascending search
+// burned its whole node budget in low-fret subtrees and the greedy
+// fallback falsely dropped a note as "no free string in chord"; interior
+// span pruning finds the joint fingering in milliseconds.
+func TestAssignWideTuningJointFingering(t *testing.T) {
+	tuning := score.Tuning{69, 64, 59, 54, 50, 46, 42, 40, 37, 34, 30, 27, 22, 18}
+	keys := []int{55, 64, 42, 51, 65, 53, 62, 63}
+	beats := [][]int{keys}
+
+	start := time.Now()
+	positions, unplayable := Assign(beats, tuning, 0)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("assignment took %v, want well under a second", elapsed)
+	}
+	if len(unplayable) != 0 {
+		t.Fatalf("a jointly-fingerable chord reported unplayables: %v", unplayable)
+	}
+	if len(positions[0]) != len(keys) {
+		t.Fatalf("placed %d of %d notes", len(positions[0]), len(keys))
+	}
+	seen := map[int]bool{}
+	minF, maxF := 0, 0
+	for _, p := range positions[0] {
+		if p.String == 0 {
+			t.Fatalf("a note came back unplaced: %v", positions[0])
+		}
+		if seen[p.String] {
+			t.Fatalf("two notes on string %d: %v", p.String, positions[0])
+		}
+		seen[p.String] = true
+		if p.Fret > 0 {
+			if minF == 0 || p.Fret < minF {
+				minF = p.Fret
+			}
+			if p.Fret > maxF {
+				maxF = p.Fret
+			}
+		}
+	}
+	if maxF-minF > MaxSpan {
+		t.Errorf("fingering spans frets %d-%d, past MaxSpan %d", minF, maxF, MaxSpan)
+	}
+}

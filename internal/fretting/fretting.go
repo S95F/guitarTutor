@@ -218,29 +218,54 @@ func enumerate(beat int, keys []int, tuning score.Tuning, capo int, unplayable *
 	// many-stringed tuning) therefore stops after maxNodes steps instead
 	// of running for years; if it stops with nothing, the greedy fallback
 	// below takes over, so the beat chain still stays intact.
+	//
+	// The span rule is enforced INSIDE the recursion, not only at the
+	// leaves: a branch dies the moment two of its fretted notes sit more
+	// than MaxSpan apart. This matters far beyond speed. With leaf-only
+	// checking, the fret-ascending walk burned the whole node budget in
+	// low-fret subtrees whose every leaf was span-illegal, and a
+	// perfectly playable 8-note chord on a real 14-string tuning — one
+	// the pre-budget code fingered in milliseconds — exhausted the budget
+	// with zero candidates and had a note falsely dropped as unplayable
+	// (verification follow-up to B4). Pruning is admissible because a
+	// partial assignment's fretted span only ever grows.
 	var cands []candidate
 	pos := make([]Position, len(keyIdx))
 	var used uint64 // bitmask of taken string numbers (options caps strings at maxStrings=63)
 	budget := maxNodes
-	var rec func(k int) bool
-	rec = func(k int) bool {
+	// minF/maxF carry the fretted-note span of the partial assignment;
+	// zero means no fretted note yet (fretted frets are always >= 1).
+	var rec func(k, minF, maxF int) bool
+	rec = func(k, minF, maxF int) bool {
 		if budget <= 0 || len(cands) >= maxCands {
 			return false
 		}
 		budget--
 		if k == len(keyIdx) {
-			if spanOK(pos) {
-				cands = append(cands, finish(keyIdx, pos))
-			}
+			// Span-legal by construction: every fretted note was checked
+			// against the running span on the way down.
+			cands = append(cands, finish(keyIdx, pos))
 			return true
 		}
 		for _, p := range opts[k] {
 			if used&(1<<p.String) != 0 {
 				continue
 			}
+			nMin, nMax := minF, maxF
+			if p.Fret > 0 {
+				if nMin == 0 || p.Fret < nMin {
+					nMin = p.Fret
+				}
+				if p.Fret > nMax {
+					nMax = p.Fret
+				}
+				if nMax-nMin > MaxSpan {
+					continue
+				}
+			}
 			used |= 1 << p.String
 			pos[k] = p
-			ok := rec(k + 1)
+			ok := rec(k+1, nMin, nMax)
 			used &^= 1 << p.String
 			if !ok {
 				return false
@@ -248,7 +273,7 @@ func enumerate(beat int, keys []int, tuning score.Tuning, capo int, unplayable *
 		}
 		return true
 	}
-	rec(0)
+	rec(0, 0, 0)
 
 	if len(cands) == 0 {
 		// No joint fingering (too many notes, the span rule ruled every

@@ -591,6 +591,46 @@ func TestStaleDragDiesWithoutActing(t *testing.T) {
 	}
 }
 
+// TestNextBarInsideLoopWraps is the regression test for the E1
+// verification follow-up: with the engine now engaging a loop at a
+// position exactly on its end, a next-bar step onto the loop end while
+// PLAYING warped to the loop start only once rendering resumed, and
+// while PAUSED parked on B to warp later — the same keypress did two
+// different things. The UI now owns the decision: forward bar navigation
+// inside an armed loop wraps to the loop start, immediately, in both
+// transport states. Navigation outside the loop is untouched.
+func TestNextBarInsideLoopWraps(t *testing.T) {
+	a := newApp(t, 8)
+	a.eng.SetLoop(3840, 11520) // bars 2-3
+	a.eng.SeekTick(7680)       // bar 3, the loop's last bar
+
+	a.seekNextBar()
+	if got := a.eng.PosTick(); got != 3840 {
+		t.Errorf("next-bar from the loop's last bar landed at %d, want the loop start 3840", got)
+	}
+
+	// Outside the loop the key is a plain step: from bar 1 it enters the
+	// loop's first bar, and past the loop it walks bars normally.
+	a.eng.SeekTick(0)
+	a.seekNextBar()
+	if got := a.eng.PosTick(); got != 3840 {
+		t.Errorf("next-bar from bar 1 landed at %d, want 3840", got)
+	}
+	a.eng.SeekTick(11520) // bar 4, past the loop
+	a.seekNextBar()
+	if got := a.eng.PosTick(); got != 15360 {
+		t.Errorf("next-bar past the loop landed at %d, want 15360", got)
+	}
+
+	// And backward navigation can still leave the loop: stepping behind
+	// the start is a rewind, from which playback re-enters naturally.
+	a.eng.SeekTick(3840)
+	a.seekPrevBar()
+	if got := a.eng.PosTick(); got != 0 {
+		t.Errorf("prev-bar from the loop start landed at %d, want 0", got)
+	}
+}
+
 // TestHiddenTracksHint (audit A7): the overflow hint must only promise
 // keys that exist — the bindings stop at track 9.
 func TestHiddenTracksHint(t *testing.T) {

@@ -585,12 +585,32 @@ func (a *App) seekPrevBar() {
 	a.eng.SeekTick(b.Start)
 }
 
-// seekNextBar jumps to the start of the following bar.
+// seekNextBar jumps to the start of the following bar — and inside an
+// armed loop, stepping forward off the loop's last bar wraps to the loop
+// start instead.
+//
+// The wrap is the UI's own decision, not a side effect: the engine now
+// engages a loop at a position exactly on its end (audit E1), so a seek
+// onto B would wrap anyway once playing — but only then, which made the
+// paused and playing cases differ and read as a warp the user did not
+// ask for (verification follow-up to E1). Doing it here makes bar
+// navigation inside a practice loop deliberate and immediate: the loop
+// is a boundary the user set, and forward motion respects it the same
+// way playback does. Backward navigation is untouched — stepping behind
+// the loop start is a rewind, and playback re-enters the loop naturally.
+// Leaving forward is one keypress (L) or a timeline click past the end.
 func (a *App) seekNextBar() {
 	bars := a.displayed().Bars
-	if i := a.barAt(a.eng.PosTick()); i+1 < len(bars) {
-		a.eng.SeekTick(bars[i+1].Start)
+	i := a.barAt(a.eng.PosTick())
+	if i < 0 || i+1 >= len(bars) {
+		return
 	}
+	target := bars[i+1].Start
+	if la, lb, on := a.eng.Loop(); on && target == lb && a.eng.PosTick() >= la {
+		a.eng.SeekTick(la)
+		return
+	}
+	a.eng.SeekTick(target)
 }
 
 func (a *App) zoomIn() {

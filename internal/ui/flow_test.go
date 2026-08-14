@@ -555,3 +555,79 @@ func TestPickerErrorSuppressesRowHits(t *testing.T) {
 		t.Error("a click on the error pane finished the picker")
 	}
 }
+
+// ---- verification follow-ups ----------------------------------------------
+
+// TestQuitBeatsSameFrameStackEdits: pending edits run in queue order, so
+// a Show queued after a Quit in the same frame — Q and a chip click can
+// both fire in one Update — must not resurrect the emptied stack and
+// leave the application running with its screens gone.
+func TestQuitBeatsSameFrameStackEdits(t *testing.T) {
+	root := &shellPlainScreen{}
+	sh := NewShell(Services{}, root)
+	sh.Quit()
+	sh.Show(&shellPlainScreen{}) // queued after the quit, same frame
+	if err := sh.Update(); err != errQuit {
+		t.Fatalf("Update = %v, want errQuit — the later Show must not undo the quit", err)
+	}
+	if sh.Depth() != 0 {
+		t.Errorf("depth = %d after quit, want 0", sh.Depth())
+	}
+
+	// And edits queued on LATER frames stay inert too: quitting is
+	// terminal, not a one-frame race winner.
+	sh.Replace(&shellPlainScreen{})
+	if err := sh.Update(); err != errQuit {
+		t.Errorf("Update after a post-quit Replace = %v, want errQuit", err)
+	}
+}
+
+// TestCountInRoundTripWithdrawsThePrompt: pending is a comparison against
+// the engine's constructed count-in, not a latch — toggling C twice is no
+// change, and the F5 offer it raised must go away with it.
+func TestCountInRoundTripWithdrawsThePrompt(t *testing.T) {
+	a := newApp(t, 1)
+	a.SetCountIn(4)
+	a.SetReloader(func() {})
+	a.SetCountInApplier(func(int) bool { return false }) // the shell's shape
+
+	a.toggleCountIn() // 4 -> off: genuinely pending
+	if a.reloadPrompt() == "" {
+		t.Fatal("a pending count-in change should offer F5")
+	}
+	a.toggleCountIn() // off -> 4: back to what the engine was built with
+	if got := a.reloadPrompt(); got != "" {
+		t.Errorf("after a round trip the offer is still up: %q", got)
+	}
+
+	// A change the settings screen reported is NOT withdrawn by count-in
+	// arithmetic: the two conditions are independent.
+	a.MarkSettingsChanged()
+	a.toggleCountIn()
+	a.toggleCountIn()
+	if a.reloadPrompt() == "" {
+		t.Error("a count-in round trip must not clear the settings screen's change")
+	}
+}
+
+// TestSettingsFallbackNoteClearsOnSelection: the "saved device is not
+// connected" note describes the current saved ID; explicitly selecting a
+// connected device makes that device the saved one, and the note must go
+// with the staleness it described.
+func TestSettingsFallbackNoteClearsOnSelection(t *testing.T) {
+	audio := newSettingsAudio()
+	s, pr := newSettingsFixture(t, audio)
+	pr.SetDevices("cap-unplugged", "play-focus")
+	s = NewSettings(s.sh)
+	if !s.capMissing {
+		t.Fatal("a stale saved capture ID should raise the fallback note")
+	}
+
+	s.cycleCapture(+1) // an explicit selection commits and saves
+	if s.capMissing {
+		t.Error("selecting a connected device left the not-connected note up")
+	}
+	if capID, _ := pr.Devices(); capID != s.capture[s.capIdx].ID {
+		t.Errorf("prefs hold %q, screen selected %q — the commit did not save", capID, s.capture[s.capIdx].ID)
+	}
+}

@@ -131,7 +131,12 @@ type Shell struct {
 	// frame, so a screen can Show or finish from inside its own Update
 	// without the slice changing under the caller.
 	pending []func()
-	title   string
+	// quitting is set by Quit's deferred edit and makes it terminal: any
+	// stack edit queued after the quit in the same frame becomes a no-op,
+	// so nothing can resurrect an emptied stack and leave the application
+	// running with its screens gone.
+	quitting bool
+	title    string
 }
 
 // NewShell creates the application host with root as its first screen.
@@ -144,8 +149,20 @@ func (s *Shell) Services() Services { return s.svc }
 
 // Show pushes a screen on top of the current one. Safe to call from
 // inside a screen's Update: the push takes effect at the end of the frame.
+//
+// The quitting guard here (and in Replace) is what makes Quit terminal:
+// pending edits run in the order they were queued, so a Show queued in
+// the same frame AFTER a Quit — the Q key and a chip click can both fire
+// in one Update — would otherwise re-populate the stack Quit just
+// emptied, and the application would go on running with the piece's
+// audio orphaned instead of exiting.
 func (s *Shell) Show(sc Screen) {
-	s.pending = append(s.pending, func() { s.stack = append(s.stack, sc) })
+	s.pending = append(s.pending, func() {
+		if s.quitting {
+			return
+		}
+		s.stack = append(s.stack, sc)
+	})
 }
 
 // Pop finishes the current screen and reveals the one beneath. Popping
@@ -161,6 +178,9 @@ func (s *Shell) Pop() {
 // Replace swaps the current screen for another without growing the stack.
 func (s *Shell) Replace(sc Screen) {
 	s.pending = append(s.pending, func() {
+		if s.quitting {
+			return
+		}
 		if n := len(s.stack); n > 0 {
 			s.stack[n-1] = sc
 		} else {
@@ -193,6 +213,7 @@ func (s *Shell) Depth() int { return len(s.stack) }
 // deferred CloseCurrent), and the process is ending either way.
 func (s *Shell) Quit() {
 	s.pending = append(s.pending, func() {
+		s.quitting = true
 		for i := len(s.stack) - 1; i >= 0; i-- {
 			if c, ok := s.stack[i].(Closer); ok {
 				c.Close()
