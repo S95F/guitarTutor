@@ -1,10 +1,12 @@
 package mxlimport
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/S95F/guitarTutor/internal/fretting"
 	"github.com/S95F/guitarTutor/internal/score"
 )
 
@@ -202,6 +204,147 @@ func TestMixedChordKeepsEveryNote(t *testing.T) {
 	for _, ev := range evs {
 		if ev.Start != 0 || ev.End != 3840 {
 			t.Errorf("event %v does not span the whole bar; the chord was split", ev)
+		}
+	}
+}
+
+// TestMixedChordInferredNoteJoinsAuthoredShape: the unfingered note of a
+// mixed chord must be fingered where the authored notes put the hand. The
+// chord here is authored at the 12th fret; key 67's cheapest position on
+// its own is string 1 fret 3, and the heuristic — handed only the strings
+// the authored notes left free, and nothing about the frets they hold —
+// chose exactly that: a chord spanning nine frets, never dropped but not
+// something anyone could play as written. With the authored positions
+// passed through as context it lands on string 3 fret 12, inside the shape.
+func TestMixedChordInferredNoteJoinsAuthoredShape(t *testing.T) {
+	m := attrs44div480 +
+		note("E", 3, 1920, 6, 12, "") + // authored: string 6 fret 12, key 52
+		note("A", 3, 1920, 5, 12, "<chord/>") + // authored: string 5 fret 12, key 57
+		note("G", 4, 1920, -1, 0, "<chord/>") // unfingered, key 67
+	s, warns, err := Import(wrap(m))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if len(warns) != 0 {
+		t.Errorf("warnings = %v, want none", warns)
+	}
+	evs := s.Events()
+	if len(evs) != 3 {
+		t.Fatalf("got %d events %v, want all three chord notes", len(evs), evs)
+	}
+	byKey := eventsByKey(evs)
+	inferred, ok := byKey[67]
+	if !ok {
+		t.Fatal("the unfingered chord note (key 67) was dropped")
+	}
+	if inferred.String != 3 || inferred.Fret != 12 {
+		t.Errorf("inferred note = string %d fret %d, want string 3 fret 12, in the authored shape",
+			inferred.String, inferred.Fret)
+	}
+	minF, maxF := 0, 0
+	for _, ev := range evs {
+		if ev.Fret == 0 {
+			continue // open strings need no hand and do not count
+		}
+		if minF == 0 || ev.Fret < minF {
+			minF = ev.Fret
+		}
+		if ev.Fret > maxF {
+			maxF = ev.Fret
+		}
+	}
+	if maxF-minF > fretting.MaxSpan {
+		t.Errorf("chord spans frets %d-%d, past MaxSpan %d: one hand cannot hold it",
+			minF, maxF, fretting.MaxSpan)
+	}
+}
+
+// TestMixedChordMatrix sweeps a mixed two-note chord over every authored
+// string, a range of authored frets, and a range of unfingered pitches,
+// and asserts the properties the mixed-chord path exists to hold:
+//
+//   - both notes survive the import, or a warning names the one that did
+//     not — no note is ever dropped in silence;
+//   - the inferred note never lands on the authored note's string, which
+//     is what the same-string truncation would turn into a lost note;
+//   - when some free string offers a fret within reach of the authored
+//     hand, the inferred note is fingered there rather than wherever the
+//     fretboard is cheapest.
+//
+// The last one is the placement quality the authored positions buy: over
+// this sweep's 811 chords it moves 225 into reach of the authored hand and
+// none out of it.
+func TestMixedChordMatrix(t *testing.T) {
+	steps := []struct {
+		name string
+		semi int
+	}{{"C", 0}, {"D", 2}, {"E", 4}, {"F", 5}, {"G", 7}, {"A", 9}, {"B", 11}}
+	// inReach reports whether any string other than aStr can sound key
+	// within MaxSpan of an authored note at aFret (an open string always
+	// can: it needs no hand).
+	inReach := func(aStr, aFret, key int) bool {
+		for s := 1; s <= len(score.StandardTuning); s++ {
+			fret := key - score.StandardTuning[s-1]
+			switch {
+			case s == aStr || fret < 0 || fret > fretting.MaxFret:
+			case fret == 0:
+				return true
+			case fret-aFret <= fretting.MaxSpan && aFret-fret <= fretting.MaxSpan:
+				return true
+			}
+		}
+		return false
+	}
+	for aStr := 1; aStr <= 6; aStr++ {
+		for aFret := 2; aFret <= 20; aFret += 2 {
+			aKey := score.StandardTuning[aStr-1] + aFret
+			aStep, aOct := "", -1
+			for _, s := range steps {
+				if (aKey-s.semi)%12 == 0 {
+					aStep, aOct = s.name, (aKey-s.semi)/12-1
+				}
+			}
+			if aStep == "" || aOct < 0 || aOct > 9 {
+				continue // the authored pitch needs an accidental; skip it
+			}
+			for _, s := range steps {
+				for oct := 2; oct <= 5; oct++ {
+					key := 12*(oct+1) + s.semi
+					if key == aKey {
+						continue // unison: the same-string rules own that case
+					}
+					m := attrs44div480 +
+						note(aStep, aOct, 1920, aStr, aFret, "") +
+						note(s.name, oct, 1920, -1, 0, "<chord/>")
+					sc, warns, err := Import(wrap(m))
+					if err != nil {
+						t.Fatalf("Import(%s%d on %d/%d + %s%d): %v", aStep, aOct, aStr, aFret, s.name, oct, err)
+					}
+					where := fmt.Sprintf("authored %s%d on string %d fret %d + unfingered key %d",
+						aStep, aOct, aStr, aFret, key)
+					byKey := eventsByKey(sc.Events())
+					if _, ok := byKey[aKey]; !ok {
+						t.Fatalf("%s: the AUTHORED note vanished; warnings %v", where, warns)
+					}
+					ev, ok := byKey[key]
+					if !ok {
+						if len(findWarn(warns, fmt.Sprintf("key %d", key))) == 0 {
+							t.Fatalf("%s: the note vanished with no warning naming it; warnings %v", where, warns)
+						}
+						continue
+					}
+					if ev.String == aStr {
+						t.Fatalf("%s: landed on the authored string at fret %d", where, ev.Fret)
+					}
+					if ev.Fret == 0 || !inReach(aStr, aFret, key) {
+						continue
+					}
+					if d := ev.Fret - aFret; d > fretting.MaxSpan || -d > fretting.MaxSpan {
+						t.Errorf("%s: fingered at string %d fret %d, %d frets from the authored hand, "+
+							"though a string within MaxSpan was free", where, ev.String, ev.Fret, d)
+					}
+				}
+			}
 		}
 	}
 }

@@ -2,6 +2,7 @@ package fretting
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -260,5 +261,121 @@ func TestAssignWideTuningJointFingering(t *testing.T) {
 	}
 	if maxF-minF > MaxSpan {
 		t.Errorf("fingering spans frets %d-%d, past MaxSpan %d", minF, maxF, MaxSpan)
+	}
+}
+
+// TestAssignEmptyTuning: an instrument with no strings places nothing and
+// says so. mxlimport used to screen this case out before calling (it built
+// a sub-tuning of the free strings, which could come out empty); the check
+// belongs here, where the panic would be.
+func TestAssignEmptyTuning(t *testing.T) {
+	got, unp := Assign([][]int{{40, 64}}, score.Tuning{}, 0)
+	if len(unp) != 2 {
+		t.Fatalf("unplayable = %v, want both keys reported", unp)
+	}
+	for _, u := range unp {
+		if !strings.Contains(u.Reason, "no strings") {
+			t.Errorf("key %d reason = %q, want it to name the empty tuning", u.Key, u.Reason)
+		}
+	}
+	for _, p := range got[0] {
+		if p != (Position{}) {
+			t.Errorf("got %v, want no position at all", p)
+		}
+	}
+}
+
+// TestAssignWithFixedHoldsHandPosition: a chord authored at the 12th fret
+// with one note left unfingered. Judged on its own, key 67's cheapest
+// position is string 1 fret 3 — playable, but nine frets from the hand
+// already holding the chord, which no guitarist would write. Given the
+// authored positions, the search stays inside their span.
+func TestAssignWithFixedHoldsHandPosition(t *testing.T) {
+	fixed := [][]Position{{{String: 6, Fret: 12}, {String: 5, Fret: 12}}}
+	got, unp := AssignWith([][]int{{67}}, fixed, score.StandardTuning, 0)
+	if len(unp) != 0 {
+		t.Fatalf("unplayable = %v, want none", unp)
+	}
+	if got[0][0] != (Position{String: 3, Fret: 12}) {
+		t.Errorf("key 67 beside a 12th-fret shape = %v, want 3/12", got[0][0])
+	}
+	// The contrast that motivates the context argument.
+	bare, _ := Assign([][]int{{67}}, score.StandardTuning, 0)
+	if bare[0][0] != (Position{String: 1, Fret: 3}) {
+		t.Errorf("key 67 alone = %v, want 1/3 (the position the context has to override)", bare[0][0])
+	}
+}
+
+// TestAssignWithFixedHoldsItsStrings: a fixed position keeps its string
+// even when it is open and so implies no hand position at all. Handing the
+// same string to another note is how the mixed-chord bug lost notes.
+func TestAssignWithFixedHoldsItsStrings(t *testing.T) {
+	fixed := [][]Position{{{String: 1, Fret: 0}}}
+	got, unp := AssignWith([][]int{{64}}, fixed, score.StandardTuning, 0)
+	if len(unp) != 0 {
+		t.Fatalf("unplayable = %v, want none", unp)
+	}
+	if got[0][0].String == 1 {
+		t.Errorf("key 64 = %v, but string 1 is held by a fixed note", got[0][0])
+	}
+	if got[0][0] != (Position{String: 2, Fret: 5}) {
+		t.Errorf("key 64 = %v, want the next-cheapest free string 2/5", got[0][0])
+	}
+}
+
+// TestAssignWithWideFixedChordStillPlaces: authored music does contain
+// chords wider than MaxSpan. Measuring the added note against MaxSpan
+// alone would rule every position out and drop the beat into the greedy
+// fallback (string 1 fret 3 here, nowhere near the hand); the beat's
+// allowance widens to the authored chord's own span instead, so the note
+// lands inside it.
+func TestAssignWithWideFixedChordStillPlaces(t *testing.T) {
+	fixed := [][]Position{{{String: 6, Fret: 10}, {String: 5, Fret: 17}}}
+	got, unp := AssignWith([][]int{{67}}, fixed, score.StandardTuning, 0)
+	if len(unp) != 0 {
+		t.Fatalf("unplayable = %v, want none", unp)
+	}
+	if got[0][0] != (Position{String: 3, Fret: 12}) {
+		t.Errorf("key 67 beside a 10-17 stretch = %v, want 3/12, inside it", got[0][0])
+	}
+}
+
+// TestAssignWithUnreachableFixedKeepsNote: when no position at all is
+// within reach of the fixed hand, the note is still placed — an awkward
+// fingering beats a missing note, which is the property the mixed-chord
+// path exists to protect.
+func TestAssignWithUnreachableFixedKeepsNote(t *testing.T) {
+	// Key 71 is only ever fret 7 or higher; the fixed note is at fret 1.
+	fixed := [][]Position{{{String: 6, Fret: 1}}}
+	got, unp := AssignWith([][]int{{71}}, fixed, score.StandardTuning, 0)
+	if len(unp) != 0 {
+		t.Fatalf("unplayable = %v, want none — the note is playable, just far", unp)
+	}
+	if got[0][0].String == 0 {
+		t.Fatal("key 71 came back unplaced")
+	}
+	if got[0][0].String == 6 {
+		t.Errorf("key 71 = %v, but string 6 is held by the fixed note", got[0][0])
+	}
+}
+
+// TestAssignWithShortFixedLeavesBeatsFree: fixed may cover a prefix of the
+// beats (or none of them); the rest are assigned as Assign would.
+func TestAssignWithShortFixedLeavesBeatsFree(t *testing.T) {
+	beats := [][]int{{67}, {67}}
+	fixed := [][]Position{{{String: 6, Fret: 12}, {String: 5, Fret: 12}}}
+	got, unp := AssignWith(beats, fixed, score.StandardTuning, 0)
+	if len(unp) != 0 {
+		t.Fatalf("unplayable = %v, want none", unp)
+	}
+	if got[0][0] != (Position{String: 3, Fret: 12}) {
+		t.Errorf("beat 0 = %v, want 3/12 beside the fixed shape", got[0][0])
+	}
+	if got[1][0].Fret > MaxFret || got[1][0].String == 0 {
+		t.Fatalf("beat 1 = %v, want a real position", got[1][0])
+	}
+	if got[1][0].Fret < 8 {
+		t.Errorf("beat 1 = %v; with no fixed notes of its own it still pays to "+
+			"stay near beat 0's hand rather than jump to fret 3", got[1][0])
 	}
 }

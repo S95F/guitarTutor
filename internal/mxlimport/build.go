@@ -9,7 +9,7 @@ import (
 )
 
 // fretAssign is internal/fretting's assignment, indirected for tests.
-var fretAssign = fretting.Assign
+var fretAssign = fretting.AssignWith
 
 // A barSpec is one bar of the shared bar structure.
 type barSpec struct {

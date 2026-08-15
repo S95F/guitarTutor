@@ -16,6 +16,15 @@
 //     distance between the beats' mean fretted frets (all-open beats have
 //     no hand position and move for free).
 //
+// A beat may also arrive with some of its notes already fingered — an
+// import whose file authored part of a chord and left the rest to the
+// heuristic. AssignWith takes those positions as context: their strings
+// are unavailable, their frets count toward the beat's span and hand
+// position, and every note placed beside them costs a further 2 per fret
+// of distance from their mean fret. The notes filled in therefore land in
+// the authored shape's position rather than wherever the fretboard happens
+// to be cheapest.
+//
 // Ties are broken by enumeration order, which is fixed, so the assignment
 // is deterministic: the same input always yields the same output.
 package fretting
@@ -56,6 +65,8 @@ const maxCands = 512
 
 // MaxSpan is the largest allowed difference between the highest and lowest
 // fretted fret within one chord. Open strings do not count toward the span.
+// Fingerings passed to AssignWith count: a note placed beside an authored
+// chord has to be reachable by the hand already holding it.
 const MaxSpan = 4
 
 // PreferMaxFret is the highest fret reachable without the extra
@@ -91,6 +102,29 @@ type Unplayable struct {
 // joint fingering under the span rule, Assign falls back to placing its
 // notes one at a time, lowest fret first, and reports the leftovers.
 func Assign(beats [][]int, tuning score.Tuning, capo int) ([][]Position, []Unplayable) {
+	return AssignWith(beats, nil, tuning, capo)
+}
+
+// AssignWith is Assign for beats that are partly fingered already:
+// fixed[i] holds the positions other notes of beat i are known to occupy
+// — an importer's authored fingerings, say — which this call must place
+// around rather than replace. A short or nil fixed leaves the remaining
+// beats unconstrained.
+//
+// The fixed positions are context only: they are not returned, and their
+// keys are not in beats. Their strings are unavailable to the beat, their
+// frets count toward its span (see MaxSpan) and its hand position, and
+// notes placed beside them are pulled toward their mean fret by the same
+// per-fret cost that moving the hand between beats pays.
+//
+// A fixed chord wider than MaxSpan (authored music does contain such
+// stretches) widens the beat's span allowance to its own width instead of
+// ruling every fingering out — a note that fits inside the authored range
+// never makes the chord harder to hold. If nothing fits even so, the beat
+// falls back to the same greedy per-note placement Assign uses, on the
+// strings the fixed positions left free: an awkward fingering, but never a
+// lost note.
+func AssignWith(beats [][]int, fixed [][]Position, tuning score.Tuning, capo int) ([][]Position, []Unplayable) {
 	out := make([][]Position, len(beats))
 	var unplayable []Unplayable
 
@@ -98,7 +132,11 @@ func Assign(beats [][]int, tuning score.Tuning, capo int) ([][]Position, []Unpla
 	cands := make([][]candidate, len(beats))
 	for i, keys := range beats {
 		out[i] = make([]Position, len(keys))
-		cands[i] = enumerate(i, keys, tuning, capo, &unplayable)
+		var pre []Position
+		if i < len(fixed) {
+			pre = fixed[i]
+		}
+		cands[i] = enumerate(i, keys, newAnchor(pre), tuning, capo, &unplayable)
 	}
 
 	// cost[c] is the cheapest total cost of any chain ending in candidate
@@ -156,6 +194,54 @@ type candidate struct {
 	fretted bool       // any non-open note (avg is meaningful)
 }
 
+// An anchor summarizes the fingerings already fixed at one beat: the
+// strings they hold and the fretted frets they occupy. The zero anchor
+// means nothing is fixed, which is the ordinary Assign case.
+type anchor struct {
+	used       uint64 // bitmask of string numbers the fixed notes hold
+	minF, maxF int    // fretted span of the fixed notes (0 = none fretted)
+	sum, n     int    // fretted-fret total and count, for the mean
+}
+
+// newAnchor summarizes fixed positions. Open (and zero-value) positions
+// hold their string but imply no hand position, exactly as open strings
+// within a beat do. A string number outside the package's mask range is
+// unrepresentable, and no option is ever generated for one either, so it
+// simply reserves nothing.
+func newAnchor(fixed []Position) anchor {
+	var a anchor
+	for _, p := range fixed {
+		if p.String >= 1 && p.String <= maxStrings {
+			a.used |= 1 << p.String
+		}
+		if p.Fret <= 0 {
+			continue
+		}
+		if a.minF == 0 || p.Fret < a.minF {
+			a.minF = p.Fret
+		}
+		if p.Fret > a.maxF {
+			a.maxF = p.Fret
+		}
+		a.sum += p.Fret
+		a.n++
+	}
+	return a
+}
+
+// avg is the fixed notes' mean fretted fret — the hand position they
+// imply. Only meaningful when a.n > 0.
+func (a anchor) avg() float64 { return float64(a.sum) / float64(a.n) }
+
+// span is the fretted span this beat may cover: MaxSpan, widened to the
+// fixed notes' own span when they already exceed it.
+func (a anchor) span() int {
+	if s := a.maxF - a.minF; s > MaxSpan {
+		return s
+	}
+	return MaxSpan
+}
+
 // options returns the legal positions for key on tuning+capo, sorted by
 // fret then by string number, both ascending.
 func options(key int, tuning score.Tuning, capo int) []Position {
@@ -181,15 +267,21 @@ func options(key int, tuning score.Tuning, capo int) []Position {
 // when the search yields no joint fingering (the chord admits none, or a
 // pathological input exhausted the budget first). It always returns at
 // least one candidate (possibly an empty fingering) so the beat chain
-// stays intact.
-func enumerate(beat int, keys []int, tuning score.Tuning, capo int, unplayable *[]Unplayable) []candidate {
-	lowest, highest := tuning[0]+capo, tuning[0]+capo
-	for _, open := range tuning {
-		if open+capo < lowest {
-			lowest = open + capo
+// stays intact. Positions already fixed at this beat arrive as a, whose
+// strings are off limits and whose frets seed the span and hand position.
+//
+// A tuning with no strings places nothing rather than panicking on its
+// first entry: Assign is exported, and its mxlimport caller no longer
+// screens the tuning it passes.
+func enumerate(beat int, keys []int, a anchor, tuning score.Tuning, capo int, unplayable *[]Unplayable) []candidate {
+	lowest, highest := 0, 0
+	for i, open := range tuning {
+		k := open + capo
+		if i == 0 || k < lowest {
+			lowest = k
 		}
-		if open+capo > highest {
-			highest = open + capo
+		if i == 0 || k > highest {
+			highest = k
 		}
 	}
 
@@ -200,6 +292,8 @@ func enumerate(beat int, keys []int, tuning score.Tuning, capo int, unplayable *
 		if len(o) == 0 {
 			reason := "no playable position"
 			switch {
+			case len(tuning) == 0:
+				reason = "the instrument has no strings"
 			case key < lowest:
 				reason = "below the lowest open string"
 			case key > highest+MaxFret:
@@ -231,10 +325,13 @@ func enumerate(beat int, keys []int, tuning score.Tuning, capo int, unplayable *
 	// partial assignment's fretted span only ever grows.
 	var cands []candidate
 	pos := make([]Position, len(keyIdx))
-	var used uint64 // bitmask of taken string numbers (options caps strings at maxStrings=63)
+	used := a.used // bitmask of taken string numbers (options caps strings at maxStrings=63)
+	span := a.span()
 	budget := maxNodes
-	// minF/maxF carry the fretted-note span of the partial assignment;
-	// zero means no fretted note yet (fretted frets are always >= 1).
+	// minF/maxF carry the fretted-note span of the partial assignment,
+	// seeded with the fixed notes' span so a note placed beside them has
+	// to be within reach of the same hand; zero means no fretted note yet
+	// (fretted frets are always >= 1).
 	var rec func(k, minF, maxF int) bool
 	rec = func(k, minF, maxF int) bool {
 		if budget <= 0 || len(cands) >= maxCands {
@@ -244,7 +341,7 @@ func enumerate(beat int, keys []int, tuning score.Tuning, capo int, unplayable *
 		if k == len(keyIdx) {
 			// Span-legal by construction: every fretted note was checked
 			// against the running span on the way down.
-			cands = append(cands, finish(keyIdx, pos))
+			cands = append(cands, finish(keyIdx, pos, a))
 			return true
 		}
 		for _, p := range opts[k] {
@@ -259,7 +356,7 @@ func enumerate(beat int, keys []int, tuning score.Tuning, capo int, unplayable *
 				if p.Fret > nMax {
 					nMax = p.Fret
 				}
-				if nMax-nMin > MaxSpan {
+				if nMax-nMin > span {
 					continue
 				}
 			}
@@ -273,16 +370,18 @@ func enumerate(beat int, keys []int, tuning score.Tuning, capo int, unplayable *
 		}
 		return true
 	}
-	rec(0, 0, 0)
+	rec(0, a.minF, a.maxF)
 
 	if len(cands) == 0 {
 		// No joint fingering (too many notes, the span rule ruled every
 		// combination out, or the node budget ran dry before a fingering
 		// was found): place notes greedily, lowest fret first, and
-		// report whatever will not fit.
+		// report whatever will not fit. The fixed strings stay off limits
+		// even here — an inferred note stacked onto an authored one is a
+		// note the merge downstream would silently lose.
 		var kis []int
 		var ps []Position
-		used = 0
+		used = a.used
 		for k, ki := range keyIdx {
 			placed := false
 			for _, p := range opts[k] {
@@ -300,14 +399,18 @@ func enumerate(beat int, keys []int, tuning score.Tuning, capo int, unplayable *
 				})
 			}
 		}
-		cands = append(cands, finish(kis, ps))
+		cands = append(cands, finish(kis, ps, a))
 	}
 	return cands
 }
 
 // finish builds a candidate from a fingering, computing its intrinsic cost
-// and hand position per the package cost model.
-func finish(keyIdx []int, pos []Position) candidate {
+// and hand position per the package cost model. Notes already fixed at the
+// beat (a) are not part of the fingering but are part of the hand: they
+// pull each placed note toward their mean fret at the hand-movement rate,
+// and they count toward the candidate's own hand position, so the beats
+// around a partly authored one move relative to where the hand really is.
+func finish(keyIdx []int, pos []Position, a anchor) candidate {
 	c := candidate{
 		keyIdx: append([]int(nil), keyIdx...),
 		pos:    append([]Position(nil), pos...),
@@ -321,14 +424,25 @@ func finish(keyIdx []int, pos []Position) candidate {
 		if p.Fret > PreferMaxFret {
 			c.cost += 8 * float64(p.Fret-PreferMaxFret)
 		}
+		if a.n > 0 {
+			c.cost += 2 * abs(float64(p.Fret)-a.avg())
+		}
 		sum += p.Fret
 		n++
 	}
-	if n > 0 {
+	if n+a.n > 0 {
 		c.fretted = true
-		c.avg = float64(sum) / float64(n)
+		c.avg = float64(sum+a.sum) / float64(n+a.n)
 	}
 	return c
+}
+
+// abs is the absolute value of a fret distance.
+func abs(v float64) float64 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 // movement is the hand-movement cost between consecutive beats' candidates:
@@ -338,9 +452,5 @@ func movement(a, b candidate) float64 {
 	if !a.fretted || !b.fretted {
 		return 0
 	}
-	d := a.avg - b.avg
-	if d < 0 {
-		d = -d
-	}
-	return 2 * d
+	return 2 * abs(a.avg-b.avg)
 }
