@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 
+	"github.com/S95F/guitarTutor/internal/fretting"
 	"github.com/S95F/guitarTutor/internal/score"
 )
 
@@ -546,9 +547,9 @@ func (im *importer) recordTempo(measureStart, cursor, divisions int64, bpm float
 
 // finish completes a parsed part: notes are sorted, notes without authored
 // fingering get one from internal/fretting (marked Inferred; unplayable
-// keys are dropped with a warning) on strings the authored notes at the
-// same onset have not already claimed, and overlapping notes on the same
-// string are truncated (strings are monophonic).
+// keys are dropped with a warning) placed around the fingerings the
+// authored notes at the same onset already hold, and overlapping notes on
+// the same string are truncated (strings are monophonic).
 func (im *importer) finish(pd *partData) {
 	label := fmt.Sprintf("part %d (%s)", pd.index+1, pd.id)
 	sort.SliceStable(pd.notes, func(i, j int) bool {
@@ -558,30 +559,27 @@ func (im *importer) finish(pd *partData) {
 		return pd.notes[i].key < pd.notes[j].key
 	})
 
-	// Strings an authored fingering already holds, per onset. A chord that
-	// mixes authored and unfingered notes used to lose a note here: the
-	// heuristic, told nothing about the authored notes, could put an
+	// The fingerings an authored note already holds, per onset. A chord
+	// that mixes authored and unfingered notes used to lose a note here:
+	// the heuristic, told nothing about the authored notes, could put an
 	// inferred one on a string an authored note already held, and the
 	// same-string truncation below then shortened the earlier note to
 	// nothing and dropped it. The player was shown an incomplete chord and
 	// scored on it.
-	claimed := map[int64]map[int]bool{}
+	claimed := map[int64][]fretting.Position{}
 	for _, n := range pd.notes {
 		if !n.hasFing {
 			continue
 		}
-		if claimed[n.start] == nil {
-			claimed[n.start] = map[int]bool{}
-		}
-		claimed[n.start][n.str] = true
+		claimed[n.start] = append(claimed[n.start], fretting.Position{String: n.str, Fret: n.fret})
 	}
 
 	// Group the unfingered notes by onset and hand the sequence to the
 	// fretting heuristic, so chords get joint fingerings and consecutive
 	// beats a playable hand path. Onsets that also carry an authored note
-	// are pulled out of that sequence and fingered against the strings
-	// those notes left free; the authored notes anchor the hand position
-	// there anyway, so little is lost by breaking the chain at them.
+	// are pulled out of that sequence and fingered against those notes'
+	// own positions; the authored notes fix the hand position there
+	// anyway, so little is lost by breaking the chain at them.
 	var plain, mixed [][]*rawNote
 	for _, n := range pd.notes {
 		if n.hasFing {
@@ -601,7 +599,7 @@ func (im *importer) finish(pd *partData) {
 		im.assignFingerings(pd, label, plain, nil)
 	}
 	for _, g := range mixed {
-		im.assignFingerings(pd, label, [][]*rawNote{g}, claimed[g[0].start])
+		im.assignFingerings(pd, label, [][]*rawNote{g}, [][]fretting.Position{claimed[g[0].start]})
 	}
 	if len(plain) > 0 || len(mixed) > 0 {
 		kept := pd.notes[:0]
@@ -647,30 +645,15 @@ func (im *importer) finish(pd *partData) {
 // assignFingerings fingers a sequence of unfingered onsets with
 // internal/fretting.
 //
-// taken names the strings an authored note already holds at these onsets.
-// Those strings are withheld by handing the search a tuning of only the
-// free strings and mapping its string numbers back afterwards, so a mixed
-// chord is fingered by the same machinery as a fully unfingered one rather
-// than by a second, divergent placement rule. A note that still finds no
-// position is warned about, never dropped in silence.
-func (im *importer) assignFingerings(pd *partData, label string, groups [][]*rawNote, taken map[int]bool) {
-	sub := make(score.Tuning, 0, len(pd.tuning))
-	strNum := make([]int, 0, len(pd.tuning)) // sub index -> real string number
-	for s := 1; s <= len(pd.tuning); s++ {
-		if taken[s] {
-			continue
-		}
-		sub = append(sub, pd.tuning[s-1])
-		strNum = append(strNum, s)
-	}
-	if len(sub) == 0 {
-		for _, g := range groups {
-			for _, n := range g {
-				im.warnf("%s: no string left free for the note (key %d) at tick %d; note dropped", label, n.key, n.start)
-			}
-		}
-		return
-	}
+// fixed[i] holds the fingerings an authored note already occupies at
+// groups[i]'s onset. The heuristic places around them: it keeps off their
+// strings, and it fingers what is left within reach of the hand they
+// imply, so an inferred note joins the authored shape instead of landing
+// at whatever fret is cheapest on its own. A mixed chord is therefore
+// fingered by the same machinery as a fully unfingered one rather than by
+// a second, divergent placement rule. A note that still finds no position
+// is warned about, never dropped in silence.
+func (im *importer) assignFingerings(pd *partData, label string, groups [][]*rawNote, fixed [][]fretting.Position) {
 	beats := make([][]int, len(groups))
 	for i, g := range groups {
 		beats[i] = make([]int, len(g))
@@ -678,14 +661,14 @@ func (im *importer) assignFingerings(pd *partData, label string, groups [][]*raw
 			beats[i][j] = n.key
 		}
 	}
-	positions, unplayable := fretAssign(beats, sub, pd.capo)
+	positions, unplayable := fretAssign(beats, fixed, pd.tuning, pd.capo)
 	for i, g := range groups {
 		for j, n := range g {
 			p := positions[i][j]
-			if p.String < 1 || p.String > len(strNum) {
+			if p.String < 1 {
 				continue // unplayable; reported below and filtered out
 			}
-			n.str, n.fret = strNum[p.String-1], p.Fret
+			n.str, n.fret = p.String, p.Fret
 			n.inferred = true
 		}
 	}
