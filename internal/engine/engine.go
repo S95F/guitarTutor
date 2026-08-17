@@ -31,6 +31,7 @@ package engine
 import (
 	"encoding/binary"
 	"math"
+	"runtime"
 	"sync"
 	"sync/atomic"
 
@@ -87,9 +88,13 @@ type Engine struct {
 	events   []score.NoteEvent // flattened score, sorted by Start
 	scoreEnd int64             // tick just past the last bar
 
-	voices    []synth.Voice // one per track
-	muted     []bool        // one per track
-	userTrack []bool        // one per track: Role == score.RoleUser
+	voices []synth.Voice // one per track
+	// artic is the same voice again where it can sound a NoteSpec, and nil
+	// where it cannot. Which one a voice is never changes, so the question
+	// is asked once here rather than on every note.
+	artic     []synth.Articulator
+	muted     []bool // one per track
+	userTrack []bool // one per track: Role == score.RoleUser
 
 	// Transport and control state.
 	playing bool
@@ -169,12 +174,28 @@ type Engine struct {
 	aWaiting atomic.Bool
 	aWaitGen atomic.Uint64
 	aDiscont atomic.Int64
+
+	// The Pos snapshot (see PlayPos). Its fields only mean anything read
+	// together — a tick paired with the rate and the frame it was true at
+	// — which a bag of independent atomics cannot promise: a reader can
+	// land between two of publish's stores and pair a new tick with the
+	// old rate. aPosSeq is a sequence lock around the group: publish makes
+	// it odd before writing and even after, so a reader that sees the same
+	// even value either side of its own reads knows the set is consistent.
+	// Only publish writes, and only under mu, so writers never race each
+	// other and the lock needs no writer-side mutual exclusion of its own.
+	aPosSeq  atomic.Uint64
+	aPosTick atomic.Uint64 // float64 bits
+	aPosRate atomic.Uint64 // float64 bits
+	aPosAdv  atomic.Bool
+	aPosDisc atomic.Int64
 }
 
 // An activeNote is a sounding note awaiting its NoteOff at end.
 type activeNote struct {
 	track int
 	key   int
+	str   int   // the string it is sounding on; 0 when the score names none
 	end   int64 // tick, exclusive
 }
 
@@ -201,10 +222,12 @@ func New(sc *score.Score, opts Options) *Engine {
 		waitRelTrack:     -1,
 	}
 	e.voices = make([]synth.Voice, len(sc.Tracks))
+	e.artic = make([]synth.Articulator, len(sc.Tracks))
 	e.muted = make([]bool, len(sc.Tracks))
 	e.userTrack = make([]bool, len(sc.Tracks))
 	for i, tr := range sc.Tracks {
 		e.voices[i] = opts.Voices(sr, tr.Program)
+		e.artic[i], _ = e.voices[i].(synth.Articulator)
 		e.userTrack[i] = tr.Role == score.RoleUser
 	}
 	e.active = make([]activeNote, 0, len(e.events)+1)
@@ -441,6 +464,60 @@ func (e *Engine) TrackMuted(track int) bool {
 
 // PosTick returns the current playback position in ticks.
 func (e *Engine) PosTick() int64 { return e.aPos.Load() }
+
+// A PlayPos is one consistent snapshot of where the transport is and how
+// fast it is moving. PosTick answers only the first half, and answers it in
+// whole ticks refreshed once per render block, which is a staircase: a
+// caller that draws it directly steps forward once per block and stands
+// still in between. The rate and the frame stamp here are what let a caller
+// carry the position smoothly between publishes and still be anchored to
+// the engine's clock rather than keeping a private one.
+type PlayPos struct {
+	// Tick is the fractional playback position at the moment of publish.
+	// PosTick is this floored.
+	Tick float64
+	// TicksPerSecond is the rate the position advances at here: the score
+	// tempo at Tick times the practice scale. It is reported even while
+	// frozen, so a caller knows the speed a resume will pick up at.
+	TicksPerSecond float64
+	// Advancing reports whether the position is actually moving. It is
+	// false while paused or stopped, during a count-in, and while halted
+	// at a wait point — every case where frames keep flowing but the
+	// position deliberately does not.
+	Advancing bool
+	// Discontinuity is DiscontinuityFrame at publish time: the frame the
+	// position last jumped under the player. A caller that interpolates
+	// uses it to tell a jump it must follow instantly from ordinary
+	// motion it should glide through.
+	Discontinuity int64
+}
+
+// Pos returns the transport position, its rate, and the output frame both
+// were true at, as one consistent set. Lock-free snapshot, safe from any
+// goroutine — including, unlike the methods that take mu, from a caller
+// polling every display frame while the render thread is inside a block.
+func (e *Engine) Pos() PlayPos {
+	for {
+		seq := e.aPosSeq.Load()
+		if seq&1 != 0 {
+			// A publish is mid-write; nothing readable until it finishes.
+			runtime.Gosched()
+			continue
+		}
+		p := PlayPos{
+			Tick:           math.Float64frombits(e.aPosTick.Load()),
+			TicksPerSecond: math.Float64frombits(e.aPosRate.Load()),
+			Advancing:      e.aPosAdv.Load(),
+			Discontinuity:  e.aPosDisc.Load(),
+		}
+		if e.aPosSeq.Load() == seq {
+			return p
+		}
+		// A publish landed inside the read: the fields may be from either
+		// side of it. Take them again.
+		runtime.Gosched()
+	}
+}
 
 // PassCount returns completed loop passes since the loop was set.
 func (e *Engine) PassCount() int { return int(e.aPasses.Load()) }

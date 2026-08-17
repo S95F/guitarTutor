@@ -18,6 +18,7 @@ package ui
 import (
 	"fmt"
 	"image/color"
+	"math"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/vector"
@@ -287,14 +288,17 @@ func (a *App) loopHandleOnTimeline(tl rect, tick int64) rect {
 
 // --- tick and pixel conversions -------------------------------------------
 
-// xAtTick is where a tick sits on the tab this frame.
+// xAtTick is where a tick sits on the tab this frame. It is measured
+// against the DRAWN position, not the engine's published one, so that a hit
+// region and the pixels it belongs to agree even mid-glide — the same
+// one-layout-two-readers rule this file opens with, applied to time.
 func (a *App) xAtTick(tick int64) float64 {
-	return screenW*playheadX + float64(tick-a.eng.PosTick())*a.pxPerTick()
+	return screenW*playheadX + (float64(tick)-a.posF())*a.pxPerTick()
 }
 
 // tickAtX inverts xAtTick.
 func (a *App) tickAtX(x float64) int64 {
-	return a.eng.PosTick() + int64((x-screenW*playheadX)/a.pxPerTick())
+	return int64(math.Round(a.posF() + (x-screenW*playheadX)/a.pxPerTick()))
 }
 
 // pieceEnd is the last tick of the displayed track — the end of the
@@ -313,8 +317,14 @@ func (a *App) pieceEnd() int64 {
 }
 
 // timelineX is where a tick sits on the timeline strip.
-func (a *App) timelineX(tl rect, tick int64) float64 {
-	f := float64(tick) / float64(a.pieceEnd())
+func (a *App) timelineX(tl rect, tick int64) float64 { return a.timelineXf(tl, float64(tick)) }
+
+// timelineXf is timelineX for a fractional tick. The strip squeezes a whole
+// piece into a few hundred pixels, so a whole-tick playhead there moves in
+// jumps of well under a pixel — but it is the same position as the tab's and
+// is drawn from the same number, rather than from a second rounding of it.
+func (a *App) timelineXf(tl rect, tick float64) float64 {
+	f := tick / float64(a.pieceEnd())
 	if f < 0 {
 		f = 0
 	} else if f > 1 {
@@ -580,12 +590,13 @@ func (a *App) togglePlay() {
 // the playhead is already sitting on it.
 func (a *App) seekPrevBar() {
 	bars := a.displayed().Bars
-	i := a.barAt(a.eng.PosTick())
+	pos := a.posTick()
+	i := a.barAt(pos)
 	if i < 0 || len(bars) == 0 {
 		return
 	}
 	b := bars[i]
-	if a.eng.PosTick()-b.Start < b.Len()/8 && i > 0 {
+	if pos-b.Start < b.Len()/8 && i > 0 {
 		a.eng.SeekTick(bars[i-1].Start)
 		return
 	}
@@ -608,12 +619,13 @@ func (a *App) seekPrevBar() {
 // Leaving forward is one keypress (L) or a timeline click past the end.
 func (a *App) seekNextBar() {
 	bars := a.displayed().Bars
-	i := a.barAt(a.eng.PosTick())
+	pos := a.posTick()
+	i := a.barAt(pos)
 	if i < 0 || i+1 >= len(bars) {
 		return
 	}
 	target := bars[i+1].Start
-	if la, lb, on := a.eng.Loop(); on && target == lb && a.eng.PosTick() >= la {
+	if la, lb, on := a.eng.Loop(); on && target == lb && pos >= la {
 		a.eng.SeekTick(la)
 		return
 	}
@@ -773,7 +785,7 @@ func (a *App) drawTimeline(dst *ebiten.Image, l practiceLayout, p pointer) {
 		}
 	}
 
-	x := float32(a.timelineX(tl, a.eng.PosTick()))
+	x := float32(a.timelineXf(tl, a.posF()))
 	vector.StrokeLine(dst, x, float32(tl.y-4), x, float32(tl.y+tl.h+4), 2, colPlayhead, false)
 
 	// A caret under the cursor shows where a click would land before it
@@ -795,12 +807,13 @@ func (a *App) drawTimeline(dst *ebiten.Image, l practiceLayout, p pointer) {
 // piece really does take three and a bit.
 func (a *App) positionCaption() string {
 	bars := a.displayed().Bars
-	bar := a.barAt(a.eng.PosTick()) + 1
+	pos := a.posTick()
+	bar := a.barAt(pos) + 1
 	scale := a.eng.TempoScale()
 	if scale <= 0 {
 		scale = 1
 	}
-	at := a.sc.Tempos.TimeAt(a.eng.PosTick()) / scale
+	at := a.sc.Tempos.TimeAt(pos) / scale
 	total := a.sc.Tempos.TimeAt(a.pieceEnd()) / scale
 	return fmt.Sprintf("bar %d of %d     %s / %s", bar, len(bars), clockText(at), clockText(total))
 }

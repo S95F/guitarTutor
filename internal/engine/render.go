@@ -4,6 +4,7 @@ import (
 	"math"
 
 	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/guitarTutor/internal/synth"
 )
 
 // A boundaryKind says what happens when a segment's end tick is reached.
@@ -229,6 +230,17 @@ func (e *Engine) applyActionsAt(af int) {
 	for i := 0; i < len(e.active); {
 		a := e.active[i]
 		if a.end < e.boundary && e.frameOf(a.end) == af {
+			if e.continuedAt(af, i) {
+				// A slide or a hammer-on onto this same string fires on
+				// this same frame, and consecutive beats tile: the note
+				// being slid INTO begins exactly where this one ends.
+				// Releasing here would damp the string a moment before
+				// the note that is supposed to keep it ringing, which is
+				// the difference between a slide and two plucks. The
+				// note-on below takes the entry over instead.
+				i++
+				continue
+			}
 			e.voices[a.track].NoteOff(a.key)
 			last := len(e.active) - 1
 			e.active[i] = e.active[last]
@@ -246,8 +258,7 @@ func (e *Engine) applyActionsAt(af int) {
 			e.tap(*ev, e.absFrame)
 		}
 		if !e.muted[ev.Track] {
-			e.voices[ev.Track].NoteOn(ev.Key, ev.Velocity)
-			e.active = append(e.active, activeNote{track: ev.Track, key: ev.Key, end: ev.End})
+			e.soundEvent(ev)
 		}
 		if e.waitReleased && e.releaseOwedTo(ev.Track) {
 			// The released wait's held events are firing now: consume the
@@ -260,6 +271,117 @@ func (e *Engine) applyActionsAt(af int) {
 		e.startClick((e.nextBeat-e.meterBase)%e.barLen == 0)
 		e.nextBeat += e.beatLen
 	}
+}
+
+// soundEvent plays one event on its track's voice and records it as active.
+//
+// This is the only place the score's techniques reach the synthesis. They
+// change how a note is SOUNDED and nothing else: the event schedule, the
+// tap, and every wait point are identical whether or not a voice can
+// articulate, because what the player is expected to do is written in the
+// score and not in the timbre. Caller holds mu.
+func (e *Engine) soundEvent(ev *score.NoteEvent) {
+	artic := e.artic[ev.Track]
+	if artic == nil {
+		// A voice that cannot articulate hears every note as a fresh
+		// attack — and every note it is given has to be released once, so
+		// the continuation machinery stays entirely out of its way.
+		// continuedAt asks the same question before damping a string, and
+		// the two answers must agree: suppressing the release here without
+		// a voice that takes the note over leaves the old note sounding
+		// with nothing left to stop it.
+		e.voices[ev.Track].NoteOn(ev.Key, ev.Velocity)
+		e.active = append(e.active, activeNote{track: ev.Track, key: ev.Key, str: ev.String, end: ev.End})
+		return
+	}
+
+	spec := synth.NoteSpec{
+		Key:      ev.Key,
+		Velocity: ev.Velocity,
+		Vibrato:  ev.Tech&score.TechVibrato != 0,
+	}
+	// A continuation needs a note still sounding on the same string of the
+	// same track to continue FROM. With none — a slide into the first note
+	// of a piece, a gap between the two, a track unmuted mid-phrase — the
+	// note is attacked normally, which is the one outcome that is never
+	// silent.
+	prev := -1
+	if attack, ok := continuationAttack(ev.Tech); ok {
+		if i := e.activeOn(ev.Track, ev.String); i >= 0 {
+			spec.Attack, spec.From, prev = attack, e.active[i].key, i
+		}
+	}
+	artic.NoteOnSpec(spec)
+	if prev >= 0 {
+		// The string was already ringing and still is: the same entry now
+		// stands for the new note, so its release is scheduled once, at
+		// the new note's end.
+		e.active[prev].key, e.active[prev].end = ev.Key, ev.End
+		return
+	}
+	e.active = append(e.active, activeNote{track: ev.Track, key: ev.Key, str: ev.String, end: ev.End})
+}
+
+// continuationAttack maps the techniques that continue a ringing string
+// onto how the string is re-pitched, and reports whether the note is a
+// continuation at all. A slide travels; a hammer-on and a pull-off arrive
+// at once. Everything else is picked.
+func continuationAttack(t score.Technique) (synth.Attack, bool) {
+	switch {
+	case t&score.TechSlide != 0:
+		return synth.AttackSlide, true
+	case t&(score.TechHammer|score.TechPull) != 0:
+		return synth.AttackLegato, true
+	}
+	return synth.AttackPluck, false
+}
+
+// activeOn returns the index in active of the note sounding on a track's
+// string, or -1. String 0 means the score named no string, which cannot be
+// continued from: two such notes are not known to share a string.
+func (e *Engine) activeOn(track, str int) int {
+	if str == 0 {
+		return -1
+	}
+	for i := range e.active {
+		if a := &e.active[i]; a.track == track && a.str == str {
+			return i
+		}
+	}
+	return -1
+}
+
+// continuedAt reports whether the active note at index i is taken over by
+// an event firing on segment frame af — the question the note-off loop asks
+// before damping a string. Caller holds mu.
+//
+// A suppressed release is a release that will never happen unless soundEvent
+// takes the entry over, so this has to answer for exactly the entry it will
+// pick: the voice has to be able to articulate at all, and — for the
+// malformed score that has two notes overlapping on one string — the entry
+// has to be the one activeOn resolves to. Answering for the other one would
+// leave it ringing with nothing left to stop it.
+func (e *Engine) continuedAt(af, i int) bool {
+	a := &e.active[i]
+	if a.str == 0 || e.artic[a.track] == nil {
+		return false
+	}
+	if e.activeOn(a.track, a.str) != i {
+		return false
+	}
+	for ei := e.nextEvent; ei < len(e.events); ei++ {
+		ev := &e.events[ei]
+		if ev.Start >= e.boundary || e.frameOf(ev.Start) != af {
+			break
+		}
+		if ev.Track != a.track || ev.String != a.str {
+			continue
+		}
+		if _, ok := continuationAttack(ev.Tech); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // handleBoundary runs when the position reaches the segment's end tick.
@@ -454,4 +576,32 @@ func (e *Engine) publish() {
 	e.aCiLeft.Store(int64(e.ciBeatsLeft))
 	e.aFrames.Store(e.absFrame)
 	e.aWaiting.Store(e.waiting)
+	e.publishPos(usq)
+}
+
+// publishPos writes the Pos snapshot under its sequence lock. usq is the
+// microseconds-per-quarter already looked up by publish. Caller holds mu.
+//
+// The rate comes from the tempo map rather than from the segment's frames
+// per tick, because fpt is only meaningful while the segment is valid: a
+// publish right after a seek or a tempo change would otherwise hand out the
+// rate of the span the position has just left.
+func (e *Engine) publishPos(usq int64) {
+	rate := 0.0
+	if usq > 0 {
+		rate = 1e6 * score.PPQ * e.scale / float64(usq)
+	}
+	// The position advances only where processFrames runs it forward: a
+	// count-in and a wait both keep rendering frames with the position
+	// deliberately parked, and so does a stopped transport ringing out its
+	// tails. Reporting those as motion is what would make an interpolating
+	// caller sail past the note it is waiting for.
+	advancing := e.playing && !e.waiting && e.ciBeatsLeft == 0
+
+	e.aPosSeq.Add(1)
+	e.aPosTick.Store(math.Float64bits(e.pos))
+	e.aPosRate.Store(math.Float64bits(rate))
+	e.aPosAdv.Store(advancing)
+	e.aPosDisc.Store(e.aDiscont.Load())
+	e.aPosSeq.Add(1)
 }

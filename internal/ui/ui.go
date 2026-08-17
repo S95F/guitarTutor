@@ -7,6 +7,7 @@ package ui
 import (
 	"fmt"
 	"image/color"
+	"math"
 	"strconv"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -165,6 +166,10 @@ type App struct {
 	drag     dragTarget
 	wheelAcc float64
 
+	// ph is the drawn playback position (playhead.go): the engine's, but
+	// carried smoothly between its once-per-block publishes.
+	ph playhead
+
 	// liveUI carries the Phase 2 live-feedback state and feed mailbox
 	// (live.go). Its zero value is fully inert: no feeds, Phase 1
 	// behavior.
@@ -254,6 +259,10 @@ func (a *App) SetQuitAll(fn func()) { a.quitAll = fn }
 func (a *App) Update() error {
 	a.frame++
 	a.syncLive()
+	// Before any input: the playhead advances one display frame here and
+	// only here, so a seek made further down this Update is picked up on
+	// the next one, as the jump it is.
+	a.stepPlayhead()
 	a.ptr = readPointer()
 
 	// Modal layers take the whole keyboard. The BPM entry must swallow
@@ -452,7 +461,7 @@ func (a *App) updateHelp() {
 // end if a loop is already set past it. No-op when the displayed track has
 // no bars (barAt returns -1).
 func (a *App) loopSetA() {
-	i := a.barAt(a.eng.PosTick())
+	i := a.barAt(a.posTick())
 	if i < 0 {
 		return
 	}
@@ -468,7 +477,7 @@ func (a *App) loopSetA() {
 // the start if a loop is already set before it. No-op when the displayed
 // track has no bars.
 func (a *App) loopSetB() {
-	i := a.barAt(a.eng.PosTick())
+	i := a.barAt(a.posTick())
 	if i < 0 {
 		return
 	}
@@ -589,7 +598,7 @@ func (a *App) commitBPMEntry() {
 // scaling. A missing or invalid tempo map falls back to the SMF default of
 // 120 BPM, which is what score.TempoMap.At already assumes.
 func (a *App) baseBPM() float64 {
-	us := a.sc.Tempos.At(a.eng.PosTick())
+	us := a.sc.Tempos.At(a.posTick())
 	if us <= 0 {
 		us = 500000
 	}
@@ -899,18 +908,21 @@ func (a *App) Draw(screen *ebiten.Image) {
 }
 
 func (a *App) drawTab(screen *ebiten.Image) {
-	pos := a.eng.PosTick()
+	// The drawn position is fractional: a tab that scrolled in whole ticks
+	// would still step, just more finely.
+	pos := a.posF()
+	posTick := int64(math.Round(pos))
 	ppt := a.pxPerTick()
 	phX := float32(screenW * playheadX)
 	tr := a.displayed()
 	nStr := len(tr.Tuning)
 
 	tickToX := func(t int64) float32 {
-		return phX + float32(float64(t-pos)*ppt)
+		return phX + float32((float64(t)-pos)*ppt)
 	}
 	// Visible tick range with a little slack.
-	minTick := pos - int64(float64(phX)/ppt) - score.PPQ
-	maxTick := pos + int64(float64(screenW-float64(phX))/ppt) + score.PPQ
+	minTick := posTick - int64(float64(phX)/ppt) - score.PPQ
+	maxTick := posTick + int64(float64(screenW-float64(phX))/ppt) + score.PPQ
 
 	// String lines.
 	for si := 0; si < nStr; si++ {
@@ -956,10 +968,10 @@ func (a *App) drawTab(screen *ebiten.Image) {
 				if n.Inferred {
 					col = colInferred
 				}
-				if beat.Start <= pos && pos < beat.Start+beat.Dur {
+				if float64(beat.Start) <= pos && pos < float64(beat.Start+beat.Dur) {
 					col = colSounding
 				}
-				if v, ok := a.verdictAt(beat.Start, n.String, pos); ok {
+				if v, ok := a.verdictAt(beat.Start, n.String, posTick); ok {
 					col = verdictColor(v)
 				}
 				if waiting[noteKey{beat.Start, n.String}] {

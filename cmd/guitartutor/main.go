@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/ebitengine/oto/v3"
 
@@ -45,6 +46,31 @@ const (
 // maxRenderFrames caps the playing portion of a render (~30 minutes of
 // audio) as a runaway guard.
 const maxRenderFrames = 30 * 60 * sampleRate
+
+// playerReadAhead is how far ahead of the speaker oto is allowed to pull
+// audio out of the engine.
+//
+// It matters far more than a buffer size usually does, because the engine
+// publishes its playback position as it RENDERS: whatever oto has read but
+// not yet played is music the tab has already scrolled past. oto's own
+// default is half a second, which put the playhead half a second ahead of
+// what you could hear and moved it in whatever gulps the refill loop
+// happened to take. A tenth of a second is still a generous cushion for a
+// non-realtime source — the synthesis costs microseconds per block, so the
+// buffer only ever has to cover a scheduling hiccup — and it brings the
+// display to within a frame or two of the sound.
+//
+// The live duplex path does not go through oto at all: there the engine
+// renders straight into the device buffer, and the lead is one period.
+const playerReadAhead = 100 * time.Millisecond
+
+// playerBufferBytes is playerReadAhead as oto's SetBufferSize wants it:
+// bytes of interleaved stereo float32 at the project sample rate.
+func playerBufferBytes() int {
+	const bytesPerFrame = 2 * 4 // stereo, float32
+	n := int(int64(playerReadAhead) * sampleRate / int64(time.Second))
+	return n * bytesPerFrame
+}
 
 var version = "0.1.0-dev"
 
@@ -301,6 +327,7 @@ func runPlay(args []string) error {
 	}
 	<-ready
 	player := ctx.NewPlayer(eng)
+	player.SetBufferSize(playerBufferBytes())
 	player.Play()
 	defer player.Close()
 
