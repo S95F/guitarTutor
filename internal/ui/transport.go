@@ -652,11 +652,14 @@ func (a *App) drawTransport(dst *ebiten.Image, l practiceLayout, p pointer) {
 	if a.eng.Playing() {
 		icons[2] = iconPause
 	}
+	dt := uiFrameSeconds()
+	names := [4]string{"transport:start", "transport:prev", "transport:play", "transport:next"}
 	for i, r := range l.transport {
-		drawIconButton(dst, r, icons[i], p.over(r))
+		drawIconButton(dst, r, icons[i], a.anim.step(names[i], p.over(r), p.down, dt))
 	}
 	for i, c := range a.chipStates() {
-		drawChip(dst, l.chips[i], c, p.over(l.chips[i]))
+		r := l.chips[i]
+		drawChip(dst, r, c, a.anim.step("chip:"+c.label, p.over(r), p.down, dt))
 	}
 }
 

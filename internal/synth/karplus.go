@@ -13,12 +13,6 @@ const (
 	// Delay lines are preallocated for its period at construction;
 	// lower keys clamp up to it.
 	pluckMinKey = 24
-	// pluckSustain is the feedback loop gain per period while a note is
-	// held: long, guitar-like sustain.
-	pluckSustain = 0.996
-	// pluckRelease is the loop gain per period after NoteOff: the string
-	// keeps ringing but dies much faster.
-	pluckRelease = 0.85
 	// pluckExcite scales the excitation noise burst at velocity 1.
 	pluckExcite = 0.5
 	// pluckDrive is the soft-clip drive. Each output channel is bounded
@@ -36,6 +30,103 @@ const (
 	// slot. It is far under audibility (-100 dBFS) and also keeps decayed
 	// delay lines from churning denormals.
 	pluckFloor = 1e-5
+)
+
+// How long a string rings. These are stated as T60 — the time to fall 60
+// dB — rather than as the loop gain the model actually applies, because
+// T60 is the thing that has a right answer: it is measurable off a real
+// instrument, it is what a listener hears, and it is comparable between
+// two notes. Loop gain is not. A single gain per PERIOD, which is what
+// this voice used to carry, sounds like nothing on earth: the loop runs
+// once per cycle, so a fixed per-period gain gives every note the same
+// number of cycles of ring and therefore a decay time proportional to its
+// wavelength. At the 0.996 it was set to, the low E rang for twenty
+// seconds and the high E for five — a bass note that outlasts the bar it
+// is in, and the single most unguitar-like thing about the old voice.
+//
+// The real relationship runs the other way and is much flatter: a wound
+// bass string carries more energy and loses proportionally less of it per
+// cycle, a thin treble string rather more, and the whole range lands
+// between about five seconds and two. Interpolating between the two ends
+// of the fretboard is not physics, but it is within a hair of measured
+// decay curves across the range a guitar actually plays.
+const (
+	// pluckT60Bass and pluckT60Treble are the -60 dB times at the bottom
+	// and top of the range, in seconds.
+	pluckT60Bass   = 5.0
+	pluckT60Treble = 2.0
+	// The keys those two times are measured at: the open low E, and the
+	// high E string at the twelfth fret.
+	pluckT60BassKey   = 40
+	pluckT60TrebleKey = 76
+	// pluckT60Release is the -60 dB time after NoteOff — a fretting hand
+	// lifting off, not a palm coming down. It is deliberately one number
+	// for every pitch: the old per-period release damped a high note four
+	// times faster than a low one, which is the opposite of a hand.
+	pluckT60Release = 0.45
+	// pluckLoopMaxGain caps the per-period gain below 1. A long T60 on a
+	// short loop rounds to a gain of exactly 1 in float32, and a loop that
+	// does not lose energy never stops.
+	pluckLoopMaxGain = 0.99999
+)
+
+// Where the string is struck, and what that does to its tone. This is the
+// single biggest difference between a plucked string and a filtered noise
+// burst, and it costs one subtraction per sample of the excitation.
+//
+// A string plucked at a fraction b of its length from the bridge cannot
+// sound the harmonics with a node at that point: every multiple of 1/b is
+// missing from the spectrum. That comb of notches is what the ear reads as
+// WHERE on the string a note was played — near the bridge is thin and
+// nasal, over the sound hole is round and hollow — and a Karplus-Strong
+// string excited with plain noise has no notches at all, which is why the
+// unfiltered version sounds synthetic in a way no amount of decay tuning
+// fixes. Implementing it is exactly the physics: subtract the excitation
+// from a copy of itself delayed by b of a period.
+//
+// One thing that is deliberately NOT here, having been built and measured
+// and taken out again: the other half of the pluck spectrum, the steep
+// fall with harmonic number that a string released from a pointed
+// displacement has and a flat noise burst does not. Adding it as a
+// one-pole rolloff a few harmonics up is textbook, it makes single notes
+// rounder, and it breaks chord detection — not through anything subtle
+// about the filter, but because it lifts the low harmonics, and the low
+// harmonics of an open G are where three pairs of doubled pitch classes
+// sit on top of each other. Two of internal/pitch's tests measure exactly
+// that chord: its sustained spectral flux rose to the onset threshold (a
+// held chord reading as a second strum) and its chroma put F#, the third
+// harmonic of the B, over the D that is actually being played. The
+// thresholds those tests defend are the difference between "you played it"
+// and "you missed", so the filter went and they stayed. Bringing it back
+// means giving the model the stiffness that stops a real string's partials
+// coinciding in the first place — see delayFor, which faces the same
+// problem from the other side.
+const (
+	// pluckPickPos is the picking point as a fraction of the speaking
+	// length, measured from the bridge. An eighth is roughly where a pick
+	// falls over the neck pickup of an electric or between the sound hole
+	// and the bridge of an acoustic: bright, but not the glassy
+	// near-the-bridge tone a smaller fraction gives.
+	pluckPickPos = 0.16
+	// pluckPickDepth is how completely the delayed copy is subtracted. At
+	// 1 the notches are perfect nulls, which is what an idealised rigid
+	// pick on an ideal string gives; a real pick has width and a real
+	// string has stiffness, so the nulls are partial. It is also the knob
+	// that keeps the comb's SLOPE in hand: 1 - z^-m is a highpass as well
+	// as a comb, and at full depth it lifts the third harmonic seven
+	// decibels over the fundamental — audibly a nasal, hollow guitar, and
+	// measurably a chroma whose strongest class is the fifth of the note
+	// being played rather than the note (internal/pitch's chord tests
+	// caught exactly that).
+	pluckPickDepth = 0.85
+	// pluckExciteLPSoft and pluckExciteLPHard are the excitation's own
+	// lowpass coefficient at the quietest and loudest velocities. A harder
+	// pick puts a sharper edge into the string, so the burst it leaves is
+	// brighter; this is what makes velocity change the TONE and not only
+	// the level, which is most of what makes a run of notes sound played
+	// rather than sequenced.
+	pluckExciteLPSoft = 0.32
+	pluckExciteLPHard = 0.72
 )
 
 // Articulation tunables (see NoteSpec). A slide and a hammer-on are the
@@ -211,10 +302,12 @@ type pluck struct {
 	rng        uint64 // xorshift64 state for excitation noise
 	voices     [pluckPolyphony]ksVoice
 	// scratch is where an excitation burst is built before it reaches a
-	// delay line; sized for the longest one at construction. Note-ons are
-	// serialized with Render on the one render goroutine, so a single
-	// shared buffer is enough.
+	// delay line, and pickBuf holds the copy the pick-position filter reads
+	// from while it overwrites scratch. Both are sized for the longest
+	// burst at construction. Note-ons are serialized with Render on the one
+	// render goroutine, so a single shared pair is enough.
 	scratch []float32
+	pickBuf []float32
 }
 
 // NewPluck returns the built-in Karplus-Strong plucked-string Voice, a
@@ -228,6 +321,7 @@ func NewPluck(sampleRate, program int) Voice {
 		p.voices[i].buf = make([]float32, maxDelay)
 	}
 	p.scratch = make([]float32, maxDelay)
+	p.pickBuf = make([]float32, maxDelay)
 	return p
 }
 
@@ -240,6 +334,36 @@ var (
 // 440 Hz).
 func keyFreq(key int) float64 {
 	return 440 * math.Pow(2, float64(key-69)/12)
+}
+
+// t60For is how long a held note at key takes to fall 60 dB, interpolated
+// between the two ends of the fretboard and flat outside them.
+func t60For(key int) float64 {
+	t := float64(key-pluckT60BassKey) / float64(pluckT60TrebleKey-pluckT60BassKey)
+	if t < 0 {
+		t = 0
+	}
+	if t > 1 {
+		t = 1
+	}
+	return pluckT60Bass + t*(pluckT60Treble-pluckT60Bass)
+}
+
+// setDecay tunes a voice to lose 60 dB in t60 seconds. The loop applies
+// its gain once per period, so the per-period figure depends on the loop
+// length — while the per-SAMPLE envelope estimate, which is what frees the
+// slot, does not depend on it at all: falling by a fixed amount per second
+// is the whole point of stating the decay as a time.
+func (p *pluck) setDecay(v *ksVoice, t60 float64) {
+	if t60 <= 0 {
+		t60 = pluckT60Release
+	}
+	g := math.Pow(10, -3*v.d/(float64(p.sampleRate)*t60))
+	if g > pluckLoopMaxGain {
+		g = pluckLoopMaxGain
+	}
+	v.decay = float32(g)
+	v.perSample = float32(math.Pow(10, -3/(float64(p.sampleRate)*t60)))
 }
 
 // noise returns the next excitation sample in [-1, 1) from an xorshift64
@@ -377,8 +501,10 @@ func (p *pluck) NoteOnSpec(spec NoteSpec) {
 	} else {
 		v.d, v.dst, v.dStep = target, target, 0
 		// The fretting hand puts a little energy in; without it a
-		// hammer-on onto a quiet string is inaudible.
-		p.excite(v, float32(velocity)*pluckExcite*pluckLegatoExcite, false)
+		// hammer-on onto a quiet string is inaudible. It is a finger and
+		// not a pick, so the burst it leaves is the soft, dull one however
+		// hard the note is marked.
+		p.excite(v, float32(velocity)*pluckExcite*pluckLegatoExcite, 0, false)
 	}
 
 	// The note is held again from here: whatever the predecessor's NoteOff
@@ -386,8 +512,7 @@ func (p *pluck) NoteOnSpec(spec NoteSpec) {
 	v.key = key
 	v.age = p.counter
 	p.counter++
-	v.decay = pluckSustain
-	v.perSample = float32(math.Pow(pluckSustain, 1/target))
+	p.setDecay(v, t60For(key))
 	if lvl := float32(velocity) * pluckExcite; v.level < lvl {
 		v.level = lvl
 	}
@@ -407,7 +532,7 @@ func (p *pluck) pluckNote(key int, velocity, target float64, spec NoteSpec) {
 	// further back than the note has yet written, and a stolen slot's
 	// leftovers are the wrong string.
 	clear(v.buf)
-	p.excite(v, float32(velocity)*pluckExcite, true)
+	p.excite(v, float32(velocity)*pluckExcite, velocity, true)
 
 	// Slight deterministic per-key pan so chords have width. key*7 walks
 	// pitch classes far apart in pan, so adjacent chord tones spread.
@@ -419,8 +544,7 @@ func (p *pluck) pluckNote(key int, velocity, target float64, spec NoteSpec) {
 	v.key = key
 	v.age = p.counter
 	p.counter++
-	v.decay = pluckSustain
-	v.perSample = float32(math.Pow(pluckSustain, 1/target))
+	p.setDecay(v, t60For(key))
 	v.level = float32(velocity) * pluckExcite
 	v.amp = 1
 	v.killing = false
@@ -428,38 +552,59 @@ func (p *pluck) pluckNote(key int, velocity, target float64, spec NoteSpec) {
 	v.setVibrato(spec.Vibrato, p.sampleRate)
 }
 
-// excite puts a lowpass-filtered, zero-mean noise burst into the samples
-// the loop is about to read back: the n samples ENDING at the write head,
-// which is left where it is, so the first sample read back is the start of
-// the burst. replace fills them (a pick); otherwise the burst is added to
-// whatever the string is already carrying, which is the smaller nudge a
-// fretting finger gives a string that is already ringing.
+// excite puts a lowpass-filtered, zero-mean, pick-position-filtered noise
+// burst into the samples the loop is about to read back: the n samples
+// ENDING at the write head, which is left where it is, so the first sample
+// read back is the start of the burst. replace fills them (a pick);
+// otherwise the burst is added to whatever the string is already carrying,
+// which is the smaller nudge a fretting finger gives a string that is
+// already ringing. velocity is how hard the string was struck and sets the
+// burst's brightness; a legato nudge passes 0 and gets the dullest one.
 //
-// The burst is built in scratch first because its mean is only known once
-// all of it exists, and the additive path cannot use the delay line as its
-// own workspace without destroying what it is adding to.
-func (p *pluck) excite(v *ksVoice, amp float32, replace bool) {
+// The burst is built in scratch first because neither its mean nor its
+// pick-position filter can be applied until all of it exists, and the
+// additive path cannot use the delay line as its own workspace without
+// destroying what it is adding to.
+func (p *pluck) excite(v *ksVoice, amp float32, velocity float64, replace bool) {
 	n := int(math.Ceil(v.d)) + 1
 	if n > len(v.buf) {
 		n = len(v.buf)
 	}
 	burst := p.scratch[:n]
+
+	// A harder pick leaves a brighter burst.
+	if velocity < 0 {
+		velocity = 0
+	}
+	if velocity > 1 {
+		velocity = 1
+	}
+	a := float32(pluckExciteLPSoft + velocity*(pluckExciteLPHard-pluckExciteLPSoft))
 	var lp, sum float32
 	for k := range burst {
-		lp += 0.5 * (p.noise() - lp) // soften the burst: less initial fizz
+		lp += a * (p.noise() - lp) // soften the burst: less initial fizz
 		burst[k] = lp
 		sum += lp
 	}
 	// Zero-mean: DC in the burst is a step the loop circulates forever,
 	// because the decay scales it but never removes it.
 	mean := sum / float32(n)
+	before := 0.0
+	for k := range burst {
+		burst[k] -= mean
+		if a := math.Abs(float64(burst[k])); a > before {
+			before = a
+		}
+	}
+	p.pickFilter(burst, int(math.Round(pluckPickPos*v.d)))
+	rescale(burst, before)
 
 	i := v.w - n
 	if i < 0 {
 		i += len(v.buf)
 	}
 	for k := range burst {
-		s := amp * (burst[k] - mean)
+		s := amp * burst[k]
 		if replace {
 			v.buf[i] = s
 		} else {
@@ -469,6 +614,63 @@ func (p *pluck) excite(v *ksVoice, amp float32, replace bool) {
 		if i == len(v.buf) {
 			i = 0
 		}
+	}
+}
+
+// pickFilter notches out the harmonics a string plucked m samples from the
+// bridge cannot sound: y[k] = x[k] - g·x[k-m]. The delay wraps around the
+// burst rather than running off its front, because the burst is one period
+// of a waveform the loop is about to repeat forever — the wrap is where
+// the previous period's samples genuinely are.
+func (p *pluck) pickFilter(burst []float32, m int) {
+	n := len(burst)
+	if m <= 0 || m >= n {
+		return
+	}
+	prev := p.pickBuf[:n]
+	copy(prev, burst)
+	const g = float32(pluckPickDepth)
+	for k := range burst {
+		j := k - m
+		if j < 0 {
+			j += n
+		}
+		burst[k] = prev[k] - g*prev[j]
+	}
+}
+
+// rescale returns a burst to the PEAK it had before it was filtered.
+// Without this the filters change the level of every note as well as its
+// tone — by several decibels, depending on the note and on how the noise
+// happens to correlate with itself — and level is not a free parameter
+// here: the practice pipeline's input gate and its onset detector are both
+// calibrated against what this voice puts out.
+//
+// Peak and not energy, which is the version this started as and is worth
+// recording as a trap. Restoring ENERGY after a filter that has removed
+// most of the band multiplies what is left by whatever it takes — a
+// lowpass at a few harmonics of a low E throws away nearly all of a noise
+// burst's spectrum, so the surviving fundamental came back an order of
+// magnitude taller than it went in. That overdrove the delay line into the
+// output soft-clipper, and a clipped string is a broadband one: the chroma
+// detector, fed a voice that was distorting on every note, could not pick
+// the played pitch classes out of the harmonics it had grown.
+func rescale(burst []float32, want float64) {
+	if want <= 0 {
+		return
+	}
+	have := 0.0
+	for _, s := range burst {
+		if a := math.Abs(float64(s)); a > have {
+			have = a
+		}
+	}
+	if have <= 0 {
+		return
+	}
+	g := float32(want / have)
+	for k := range burst {
+		burst[k] *= g
 	}
 }
 
@@ -491,8 +693,7 @@ func (p *pluck) NoteOff(key int) {
 	for i := range p.voices {
 		v := &p.voices[i]
 		if v.active && !v.killing && v.key == key {
-			v.decay = pluckRelease
-			v.perSample = float32(math.Pow(pluckRelease, 1/v.d))
+			p.setDecay(v, pluckT60Release)
 		}
 	}
 }

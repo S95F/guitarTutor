@@ -10,15 +10,27 @@ import (
 	"github.com/S95F/guitarTutor/internal/score"
 )
 
-// Format-level limits and defaults (see docs/TEXTFORMAT.md).
+// The format's limits and defaults (see docs/TEXTFORMAT.md). These are
+// exported because the editor authors pieces in this format and has to
+// refuse — and default to — exactly what the format does; two copies of
+// "the highest fret" that disagree is a piece that will not save.
 const (
-	// maxFret is the highest fret number the format accepts.
-	maxFret = 30
-	// defaultBPM is the tempo used when the source has no \tempo directive.
-	defaultBPM = 120
-	// defaultProgram is the General MIDI program used when a track has no
-	// \program directive (25 = steel-string acoustic guitar).
-	defaultProgram = 25
+	// MaxFret is the highest fret number the format accepts, for a capo as
+	// well as for a note.
+	MaxFret = 30
+	// DefaultBPM is the tempo a piece has when it states none.
+	DefaultBPM = 120
+	// DefaultProgram is the General MIDI program a track has when it states
+	// none (25 = steel-string acoustic guitar).
+	DefaultProgram = 25
+)
+
+// Unexported aliases, so the parser and writer below read as they did
+// before these limits acquired a second audience.
+const (
+	maxFret        = MaxFret
+	defaultBPM     = DefaultBPM
+	defaultProgram = DefaultProgram
 )
 
 // A parser holds the state of one Parse call: the scanner, the score

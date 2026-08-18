@@ -66,6 +66,27 @@ func pickPieceFile(startDir string) (path, errMsg string) {
 	return p, ""
 }
 
+// pickSavePath shows the save dialog for a piece the editor is writing,
+// proposing suggest as the name. Blocking, like the others; a cancel and
+// a failure both come back empty, and the editor's busy guard re-arms on
+// either. The overwrite prompt is the operating system's, which is the
+// one the user already knows.
+func pickSavePath(suggest string) string {
+	opts := []zenity.Option{
+		zenity.Title("Save the piece"),
+		zenity.ConfirmOverwrite(),
+		zenity.FileFilter{Name: "guitarTutor tab (.gtab)", Patterns: []string{"*.gtab"}, CaseFold: true},
+	}
+	if suggest != "" {
+		opts = append(opts, zenity.Filename(suggest))
+	}
+	p, err := zenity.SelectFileSave(opts...)
+	if err != nil {
+		return ""
+	}
+	return p
+}
+
 // pickSoundFont shows the open dialog for a SoundFont. Blocking, like
 // pickPieceFile; a cancel or a failure both come back empty — the
 // settings row simply keeps its current value, which is the only sane

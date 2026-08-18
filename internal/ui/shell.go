@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
 )
@@ -72,6 +73,44 @@ type Services struct {
 	// or machine has no duplex backend: the settings screen then shows
 	// why live mode is unavailable instead of an empty device list.
 	Audio AudioServices
+	// Library lists and describes the pieces the application manages —
+	// the ones written in its own editor and kept in its own folder. Nil
+	// means this build manages none, and the start screen shows the two
+	// path-based lists without a library pane rather than an empty one.
+	Library Library
+}
+
+// A PieceInfo describes one piece in the library. It is what makes that
+// pane different in kind from the two beside it: a recent is a PATH, and
+// what it points at is anybody's guess until it is opened, whereas the
+// application has read every piece in its own folder and can say what is
+// in it.
+type PieceInfo struct {
+	// Path is the file. Name is its base name without the extension, and
+	// Title the piece's own title, which is usually but not always the
+	// same thing.
+	Path  string
+	Name  string
+	Title string
+	// Summary is one line describing the music: meter, tempo, how many
+	// bars, how many tracks.
+	Summary string
+	// Modified is the file's timestamp, for sorting and for saying how
+	// long ago it was touched.
+	Modified time.Time
+	// Problem explains why a file in the folder could not be described —
+	// it is listed anyway, because a piece that will not parse is exactly
+	// the one the user needs to find and fix.
+	Problem string
+}
+
+// A Library lists the pieces the application manages.
+type Library interface {
+	// Dir is the folder the pieces live in, for display.
+	Dir() string
+	// Scan reads the folder and describes what is in it. It touches the
+	// disk and parses every piece, so callers run it off the game loop.
+	Scan() ([]PieceInfo, error)
 }
 
 // Prefs is the persisted-settings facade the UI works against, so no
@@ -79,6 +118,19 @@ type Services struct {
 type Prefs interface {
 	// Recents returns recently-opened piece paths, most recent first.
 	Recents() []string
+	// Created returns recently-WRITTEN piece paths, most recent first.
+	// The two lists answer different questions — what was I practising,
+	// and what was I working on — and a piece legitimately appears in
+	// both.
+	Created() []string
+	// AddCreated records a piece as written.
+	AddCreated(path string)
+	// HintHidden reports whether the start screen's getting-started strip
+	// has been dismissed, and SetHintHidden puts it away (or back).
+	// Everything the strip points at is also in settings, so it has to be
+	// possible to be done with it for good.
+	HintHidden() bool
+	SetHintHidden(hidden bool)
 	// AddRecent records a piece as opened.
 	AddRecent(path string)
 	// SoundFont returns the configured .sf2 path ("" = built-in pluck).

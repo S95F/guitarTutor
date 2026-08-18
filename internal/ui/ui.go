@@ -9,6 +9,7 @@ import (
 	"image/color"
 	"math"
 	"strconv"
+	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
@@ -154,6 +155,19 @@ type App struct {
 	// the view showing something the configuration no longer describes.
 	// Rather than pretend otherwise, the view offers this.
 	reload func()
+	// anim eases the transport buttons and the chips; see anim.go.
+	anim animator
+
+	// outLatency reports how much rendered audio has not been heard yet,
+	// and latency is that figure smoothed over display frames. Together
+	// they are what puts the playhead on the note that is SOUNDING rather
+	// than the one being rendered (see playhead.go). latencyArmed marks
+	// the first reading, which is taken whole instead of being eased into
+	// from zero.
+	outLatency   func() time.Duration
+	latency      float64
+	latencyArmed bool
+
 	// settingsTouched is set when the settings screen this view opened
 	// changed something that only applies at open time, and drives the
 	// reload prompt.
@@ -889,6 +903,7 @@ func (a *App) hintLine() string { return hintLineOf(a.helpRows()) }
 // that order, help being fully modal.
 func (a *App) Draw(screen *ebiten.Image) {
 	screen.Fill(colBG)
+	a.anim.tick()
 	l := a.layout()
 	if a.tunerView {
 		a.drawTuner(screen)

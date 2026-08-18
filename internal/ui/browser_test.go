@@ -8,11 +8,13 @@ package ui
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
 )
@@ -48,8 +50,10 @@ func (o *browserFakeOpener) CloseCurrent() { o.closed++ }
 // implement browserRecentRemover, so the session-only forget path is
 // what the tests exercise by default; browserRemovingPrefs adds it.
 type browserFakePrefs struct {
-	recents []string
-	saves   int
+	recents  []string
+	created  []string
+	hideHint bool
+	saves    int
 }
 
 func (p *browserFakePrefs) Recents() []string { return p.recents }
@@ -62,6 +66,18 @@ func (p *browserFakePrefs) AddRecent(path string) {
 	}
 	p.recents = out
 }
+func (p *browserFakePrefs) Created() []string { return p.created }
+func (p *browserFakePrefs) AddCreated(path string) {
+	out := []string{path}
+	for _, r := range p.created {
+		if r != path {
+			out = append(out, r)
+		}
+	}
+	p.created = out
+}
+func (p *browserFakePrefs) HintHidden() bool          { return p.hideHint }
+func (p *browserFakePrefs) SetHintHidden(h bool)      { p.hideHint = h }
 func (p *browserFakePrefs) SoundFont() string         { return "" }
 func (p *browserFakePrefs) SetSoundFont(string)       {}
 func (p *browserFakePrefs) CountIn() int              { return 0 }
@@ -316,11 +332,11 @@ func TestBrowserSelectionClampsAndScrolls(t *testing.T) {
 	if b.sel != 39 {
 		t.Errorf("down past the end selected %d, want 39", b.sel)
 	}
-	if want := 40 - brwRecentRows; b.top != want {
+	if want := 40 - b.rowsPerPane(); b.top != want {
 		t.Errorf("viewport top = %d, want %d", b.top, want)
 	}
-	if b.sel < b.top || b.sel >= b.top+brwRecentRows {
-		t.Errorf("selection %d outside viewport [%d,%d)", b.sel, b.top, b.top+brwRecentRows)
+	if b.sel < b.top || b.sel >= b.top+b.rowsPerPane() {
+		t.Errorf("selection %d outside viewport [%d,%d)", b.sel, b.top, b.top+b.rowsPerPane())
 	}
 
 	// The wheel scrolls the viewport without moving the selection.
@@ -333,28 +349,32 @@ func TestBrowserSelectionClampsAndScrolls(t *testing.T) {
 		t.Errorf("scrolling moved the selection to %d, want %d", b.sel, sel)
 	}
 	b.scrollBy(1000)
-	if want := 40 - brwRecentRows; b.top != want {
+	if want := 40 - b.rowsPerPane(); b.top != want {
 		t.Errorf("scroll to the bottom left top=%d, want %d", b.top, want)
 	}
 }
 
 // TestBrowserSelectionStaysInBounds: the selection clamps at both ends
-// of the short checklist, and Enter never indexes past the end of the
-// recents — even if the selection somehow outlived a shrink.
+// of an empty pane, and Enter never indexes past the end of a list —
+// even if the selection somehow outlived a shrink.
 func TestBrowserSelectionStaysInBounds(t *testing.T) {
-	// With no recents at all the list is the checklist, and its ends
-	// still clamp.
+	// An EMPTY pane is the case that has no row to land on at all, and
+	// moving in it must not walk the cursor off either end.
 	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
+	if b.listLen() != 0 {
+		t.Fatalf("the fixture has %d rows, want an empty pane", b.listLen())
+	}
 	b.move(-1)
 	if b.sel != 0 || b.top != 0 {
-		t.Errorf("up at the top of the checklist left sel=%d top=%d, want 0/0", b.sel, b.top)
+		t.Errorf("up in an empty pane left sel=%d top=%d, want 0/0", b.sel, b.top)
 	}
 	for i := 0; i < 50; i++ {
 		b.move(1)
 	}
-	if b.sel != b.listLen()-1 {
-		t.Errorf("down past the checklist's end selected %d, want %d", b.sel, b.listLen()-1)
+	if b.sel != 0 || b.top != 0 {
+		t.Errorf("down in an empty pane left sel=%d top=%d, want 0/0", b.sel, b.top)
 	}
+	b.activate() // must not index past the slice
 
 	// A selection past the recents — standing in for any frame where the
 	// list shrank before setSel re-clamped — activates to nothing rather
@@ -386,17 +406,17 @@ func TestBrowserMissingRecentFlaggedAndForgotten(t *testing.T) {
 	op := &browserFakeOpener{}
 	b := browserFixture(t, pr, op)
 
-	if len(b.recents) != 2 {
-		t.Fatalf("recents = %v", browserNames(b.recents))
+	if len(b.panes[paneRecent]) != 2 {
+		t.Fatalf("recents = %v", browserNames(b.panes[paneRecent]))
 	}
-	if !b.recents[0].missing {
+	if !b.panes[paneRecent][0].missing {
 		t.Error("the deleted recent is not flagged missing")
 	}
-	if b.recents[1].missing {
+	if b.panes[paneRecent][1].missing {
 		t.Error("an existing recent is flagged missing")
 	}
-	if b.recents[1].parent != filepath.Clean(root) {
-		t.Errorf("recent parent = %q, want %q", b.recents[1].parent, root)
+	if b.panes[paneRecent][1].sub != filepath.Clean(root) {
+		t.Errorf("recent parent = %q, want %q", b.panes[paneRecent][1].sub, root)
 	}
 
 	b.setSel(0)
@@ -409,14 +429,14 @@ func TestBrowserMissingRecentFlaggedAndForgotten(t *testing.T) {
 	}
 
 	b.forgetRecent()
-	if len(b.recents) != 1 || b.recents[0].path != here {
-		t.Fatalf("after forgetting, recents = %v", browserNames(b.recents))
+	if len(b.panes[paneRecent]) != 1 || b.panes[paneRecent][0].path != here {
+		t.Fatalf("after forgetting, recents = %v", browserNames(b.panes[paneRecent]))
 	}
 	// The Prefs double cannot remove, so the entry is suppressed for the
 	// session and stays suppressed across a reload.
 	b.reloadRecents()
-	if len(b.recents) != 1 {
-		t.Errorf("a forgotten recent came back: %v", browserNames(b.recents))
+	if len(b.panes[paneRecent]) != 1 {
+		t.Errorf("a forgotten recent came back: %v", browserNames(b.panes[paneRecent]))
 	}
 	if b.sel != 0 {
 		t.Errorf("selection = %d after the list shrank, want 0", b.sel)
@@ -496,10 +516,10 @@ func TestBrowserOpenSuccess(t *testing.T) {
 	if len(b.warns) != 1 || b.warns[0] != "tempo track ignored" {
 		t.Errorf("warnings = %v", b.warns)
 	}
-	if len(b.recents) != 1 || b.recents[0].path != good {
-		t.Errorf("recents = %v, want the piece just opened", browserNames(b.recents))
+	if len(b.panes[paneRecent]) != 1 || b.panes[paneRecent][0].path != good {
+		t.Errorf("recents = %v, want the piece just opened", browserNames(b.panes[paneRecent]))
 	}
-	if b.recents[0].missing {
+	if b.panes[paneRecent][0].missing {
 		t.Error("a piece that just opened is flagged missing")
 	}
 	if b.dialogBusy {
@@ -573,22 +593,27 @@ func TestBrowserHitTestAndClick(t *testing.T) {
 	op := &browserFakeOpener{}
 	b, paths := browserRecentsFixture(t, op, 3)
 
-	// Above the list is nothing.
-	if _, ok := b.hitTest(brwRecentX+10, 20); ok {
-		t.Error("the header hit-tested as a row")
+	l := b.layout()
+	pane := l.panes[0]
+	rowY := func(row int) float64 { return pane.y + brwPaneHeadH + float64(row)*brwRowH + 4 }
+
+	// Above the panes is nothing.
+	if _, _, _, onPane := b.paneHit(l, pane.x+10, 20); onPane {
+		t.Error("the header hit-tested as a pane")
 	}
-	// The open card is not a list row.
-	if _, ok := b.hitTest(brwCardX+10, brwListTop+4); ok {
-		t.Error("the open card hit-tested as a row")
+	// A pane's heading is on the pane but not on a row: clicking it moves
+	// the focus without changing what is selected.
+	if _, _, onRow, onPane := b.paneHit(l, pane.x+10, pane.y+4); onRow || !onPane {
+		t.Errorf("the pane heading hit-tested onRow=%v onPane=%v; want false, true", onRow, onPane)
 	}
-	// Past the last entry is nothing.
-	if _, ok := b.hitTest(brwRecentX+10, brwListTop+b.listLen()*brwRecentRowH+4); ok {
-		t.Error("empty space below the list hit-tested as a row")
+	// Past the last entry is on the pane but not on a row.
+	if _, _, onRow, _ := b.paneHit(l, pane.x+10, rowY(b.listLen())); onRow {
+		t.Error("empty space below the rows hit-tested as a row")
 	}
 
-	i, ok := b.hitTest(brwRecentX+10, brwListTop+2*brwRecentRowH+4)
-	if !ok || i != 2 {
-		t.Fatalf("hitTest = %d, %v; want row 2", i, ok)
+	p, i, ok, _ := b.paneHit(l, pane.x+10, rowY(2))
+	if !ok || i != 2 || p != paneRecent {
+		t.Fatalf("paneHit = pane %d row %d, %v; want the recent pane's row 2", p, i, ok)
 	}
 
 	// First click selects, it does not open.
@@ -741,17 +766,22 @@ func TestBrowserStartsOnTheLastPiecesFolder(t *testing.T) {
 	}
 }
 
-// TestBrowserStartsOnTheChecklistWithNoRecents: a first run has no
-// pieces to list, so the list is the getting-started checklist — with
-// something selectable on it — and the file dialog still has somewhere
-// sensible to open.
-func TestBrowserStartsOnTheChecklistWithNoRecents(t *testing.T) {
+// TestBrowserFirstRunShowsTheHint: a first run has no pieces in any
+// pane, so the getting-started strip is what carries the screen — and
+// the file dialog still has somewhere sensible to open.
+func TestBrowserFirstRunShowsTheHint(t *testing.T) {
 	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
-	if !b.onboarding() {
-		t.Fatal("with no recents the screen should be onboarding")
+	if !b.hintOpen {
+		t.Error("the getting-started strip is not showing on a first run")
 	}
-	if b.listLen() == 0 {
-		t.Error("the checklist reports nothing to select")
+	if len(b.stepList()) == 0 {
+		t.Error("the strip has no steps")
+	}
+	if b.hasAnyPiece() {
+		t.Error("a first run reports pieces it does not have")
+	}
+	if b.listLen() != 0 {
+		t.Errorf("the recent pane has %d rows on a first run, want 0", b.listLen())
 	}
 	if b.startDir() == "" {
 		t.Error("the file dialog has no starting directory")
@@ -788,8 +818,8 @@ func TestNewBrowserShell(t *testing.T) {
 func TestBrowserNilPrefs(t *testing.T) {
 	sh := NewShell(Services{Opener: &browserFakeOpener{}}, nil)
 	b := NewBrowser(sh)
-	if len(b.recents) != 0 {
-		t.Errorf("recents = %v with no Prefs", browserNames(b.recents))
+	if len(b.panes[paneRecent]) != 0 {
+		t.Errorf("recents = %v with no Prefs", browserNames(b.panes[paneRecent]))
 	}
 	b.forgetRecent() // must not panic
 	b.reloadRecents()
@@ -912,10 +942,10 @@ func TestBrowserRecentsProbeEachPathOnce(t *testing.T) {
 	if probes[unreachable] != 1 {
 		t.Fatalf("the first load probed the unreachable recent %d times, want 1", probes[unreachable])
 	}
-	if !b.recents[0].missing {
+	if !b.panes[paneRecent][0].missing {
 		t.Error("the unreachable recent is not flagged missing")
 	}
-	if b.recents[1].missing {
+	if b.panes[paneRecent][1].missing {
 		t.Error("a present recent is flagged missing")
 	}
 
@@ -926,9 +956,9 @@ func TestBrowserRecentsProbeEachPathOnce(t *testing.T) {
 	if probes[unreachable] != 1 {
 		t.Errorf("the unreachable recent was probed %d times across the session, want 1", probes[unreachable])
 	}
-	if !b.recents[0].missing || b.recents[1].missing {
+	if !b.panes[paneRecent][0].missing || b.panes[paneRecent][1].missing {
 		t.Errorf("carried-forward status is wrong: missing = %v, %v; want true, false",
-			b.recents[0].missing, b.recents[1].missing)
+			b.panes[paneRecent][0].missing, b.panes[paneRecent][1].missing)
 	}
 
 	b.setSel(1)
@@ -966,8 +996,8 @@ func TestBrowserReopeningAForgottenRecentShowsItAgain(t *testing.T) {
 
 	b.setSel(0)
 	b.forgetRecent()
-	if len(b.recents) != 0 {
-		t.Fatalf("after Delete, recents = %v, want none", browserNames(b.recents))
+	if len(b.panes[paneRecent]) != 0 {
+		t.Fatalf("after Delete, recents = %v, want none", browserNames(b.panes[paneRecent]))
 	}
 
 	// The user finds the same file again in the dialog.
@@ -982,17 +1012,17 @@ func TestBrowserReopeningAForgottenRecentShowsItAgain(t *testing.T) {
 	if b.forgotten[song] {
 		t.Error("the forget flag survived a successful open of that exact file")
 	}
-	if len(b.recents) != 1 || b.recents[0].path != song {
+	if len(b.panes[paneRecent]) != 1 || b.panes[paneRecent][0].path != song {
 		t.Fatalf("recents = %v after re-opening a forgotten piece, want it listed again",
-			browserNames(b.recents))
+			browserNames(b.panes[paneRecent]))
 	}
-	if b.recents[0].missing {
+	if b.panes[paneRecent][0].missing {
 		t.Error("a piece that just opened is flagged missing")
 	}
 	// And it stays visible across the reloads later frames trigger.
 	b.reloadRecents()
-	if len(b.recents) != 1 {
-		t.Errorf("the re-opened recent vanished again: %v", browserNames(b.recents))
+	if len(b.panes[paneRecent]) != 1 {
+		t.Errorf("the re-opened recent vanished again: %v", browserNames(b.panes[paneRecent]))
 	}
 }
 
@@ -1180,15 +1210,31 @@ func TestBrowserOKeyLaunchesDialog(t *testing.T) {
 	}
 }
 
-// TestBrowserStatusStackClearsFooter pins the arithmetic behind
-// brwStatusY (verification follow-up): the worst-case status stack — an
-// error line, four warnings, and the overflow line — must end above the
-// footer hint, or the two draw on top of each other and both become
-// unreadable.
+// TestBrowserStatusStackClearsFooter pins the arithmetic behind the
+// reserved status band (verification follow-up): the worst-case stack —
+// an error line, four warnings, and the overflow line — must end above
+// the footer hint, or the two draw on top of each other and both become
+// unreadable. The panes stop above the band whether or not there is
+// anything in it, so they cannot reach it either.
 func TestBrowserStatusStackClearsFooter(t *testing.T) {
-	const worstBottom = brwStatusY + 20 + 4*18 + uiTextH
-	if worstBottom > uiFooterY {
-		t.Errorf("the status stack can reach y=%v, past the footer at y=%v", worstBottom, float64(uiFooterY))
+	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
+	for _, hint := range []bool{true, false} {
+		b.hintOpen = hint
+		l := b.layout()
+		worstBottom := l.statusY + 20 + brwStatusWarnings*18 + uiTextH
+		if worstBottom > uiFooterY {
+			t.Errorf("hint=%v: the status stack can reach y=%v, past the footer at y=%v",
+				hint, worstBottom, float64(uiFooterY))
+		}
+		for i, p := range l.panes {
+			if bottom := p.y + p.h; bottom > l.statusY {
+				t.Errorf("hint=%v: pane %d ends at y=%v, inside the status band at y=%v",
+					hint, i, bottom, l.statusY)
+			}
+		}
+		if l.rows < 4 {
+			t.Errorf("hint=%v: only %d rows fit in a pane", hint, l.rows)
+		}
 	}
 }
 
@@ -1237,4 +1283,325 @@ func TestBrowserStaleDialogResultDiscarded(t *testing.T) {
 	if len(op.opened) != 2 {
 		t.Errorf("a fresh dialog result did not open: %v", op.opened)
 	}
+}
+
+// --- writing a piece from the start screen -------------------------------
+
+func TestBrowserNewPieceKeyAndButton(t *testing.T) {
+	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
+	calls := 0
+	b.SetNewPiece(func() { calls++ })
+	if err := b.handleKey(ebiten.KeyN); err != nil {
+		t.Fatalf("N = %v, want nil", err)
+	}
+	if calls != 1 {
+		t.Errorf("N opened the editor %d times, want 1", calls)
+	}
+	r := b.actionRect(t, "new")
+	b.handleMouse(pointer{x: r.x + 4, y: r.y + 4, pressed: true, down: true})
+	if calls != 2 {
+		t.Errorf("the button opened the editor %d times in total, want 2", calls)
+	}
+}
+
+func TestBrowserNewPieceIsInertWithoutAnEditor(t *testing.T) {
+	// A build that wired no editor must not crash on the key; it just does
+	// nothing, and the footer does not advertise it.
+	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
+	if err := b.handleKey(ebiten.KeyN); err != nil {
+		t.Fatalf("N = %v, want nil", err)
+	}
+	if strings.Contains(b.hintLine(), "new piece") {
+		t.Errorf("the footer advertises N with no editor wired: %q", b.hintLine())
+	}
+}
+
+func TestBrowserEditSelectedPiece(t *testing.T) {
+	dir := t.TempDir()
+	browserTree(t, dir, "one.gtab", "two.gp")
+	pr := &browserFakePrefs{recents: []string{
+		filepath.Join(dir, "one.gtab"),
+		filepath.Join(dir, "two.gp"),
+	}}
+	b := browserFixture(t, pr, &browserFakeOpener{})
+	var edited []string
+	b.SetEditPiece(func(p string) { edited = append(edited, p) })
+
+	b.setSel(0)
+	if err := b.handleKey(ebiten.KeyE); err != nil {
+		t.Fatalf("E = %v, want nil", err)
+	}
+	if len(edited) != 1 || edited[0] != pr.recents[0] {
+		t.Fatalf("E edited %v, want [%s]", edited, pr.recents[0])
+	}
+	// An imported format is offered too: the editor opens it and makes the
+	// user save it as .gtab, which is a better answer than refusing here.
+	b.setSel(1)
+	b.handleKey(ebiten.KeyE)
+	if len(edited) != 2 || edited[1] != pr.recents[1] {
+		t.Errorf("E edited %v, want the .gp second", edited)
+	}
+}
+
+func TestBrowserEditIsOffWithoutASelection(t *testing.T) {
+	// The onboarding checklist has no pieces on it, so there is nothing to
+	// edit and the binding says so rather than doing nothing quietly.
+	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
+	b.SetEditPiece(func(string) { t.Error("E edited something on the checklist") })
+	if _, ok := b.editableSelection(); ok {
+		t.Error("the checklist offered a piece to edit")
+	}
+	b.handleKey(ebiten.KeyE)
+}
+
+func TestBrowserEditIsOffForAMissingFile(t *testing.T) {
+	pr := &browserFakePrefs{recents: []string{filepath.Join(t.TempDir(), "gone.gtab")}}
+	b := browserFixture(t, pr, &browserFakeOpener{})
+	b.SetEditPiece(func(string) { t.Error("E opened a file that is not there") })
+	if _, ok := b.editableSelection(); ok {
+		t.Error("a missing recent was offered for editing")
+	}
+	b.handleKey(ebiten.KeyE)
+}
+
+// actionRect finds one of the action row's buttons by id, so a test can
+// click it without repeating the layout arithmetic.
+func (b *Browser) actionRect(t *testing.T, id string) rect {
+	t.Helper()
+	l := b.layout()
+	for i, a := range b.actionList() {
+		if a.id == id && i < len(l.actions) {
+			return l.actions[i]
+		}
+	}
+	t.Fatalf("no action button %q", id)
+	return rect{}
+}
+
+// --- the library pane ----------------------------------------------------
+
+// stubLibrary is a Library over a fixed list, so the pane can be driven
+// without a folder. A nil list is a build that manages an empty library,
+// which is a different thing from managing none at all.
+type stubLibrary struct {
+	dir    string
+	pieces []PieceInfo
+	err    error
+}
+
+func (l stubLibrary) Dir() string { return l.dir }
+func (l stubLibrary) Scan() ([]PieceInfo, error) {
+	return l.pieces, l.err
+}
+
+// waitForLibrary drives the scan through its mailbox: rescanLibrary posts
+// from a goroutine and drainLibrary applies it on the game loop, so a test
+// has to let the one finish before it asks the other.
+func waitForLibrary(t *testing.T, b *Browser) {
+	t.Helper()
+	for i := 0; i < 200; i++ {
+		b.drainLibrary()
+		if !b.libScanning {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("the library scan never finished")
+}
+
+func TestBrowserLibraryPaneDescribesPieces(t *testing.T) {
+	lib := stubLibrary{dir: `C:\pieces`, pieces: []PieceInfo{
+		{Path: `C:\pieces\a.gtab`, Name: "a", Title: "Warmup in A", Summary: "4/4 · 92 BPM · 8 bars"},
+		{Path: `C:\pieces\b.gtab`, Name: "b", Summary: "3/4 · 60 BPM · 4 bars"},
+	}}
+	b := browserLibFixture(t, lib)
+	waitForLibrary(t, b)
+
+	rows := b.panes[paneLibrary]
+	if len(rows) != 2 {
+		t.Fatalf("the library pane has %d rows, want 2", len(rows))
+	}
+	// A piece with a title is listed BY that title: the library is the
+	// pane that knows what the music is.
+	if rows[0].name != "Warmup in A" {
+		t.Errorf("row 0 is named %q, want the piece's title", rows[0].name)
+	}
+	if rows[0].sub != "4/4 · 92 BPM · 8 bars" {
+		t.Errorf("row 0's description is %q", rows[0].sub)
+	}
+	// One with no title falls back to the file name rather than a blank.
+	if rows[1].name != "b" {
+		t.Errorf("an untitled piece is named %q, want its file name", rows[1].name)
+	}
+	if note, isErr := b.libraryNote(); note != `C:\pieces` || isErr {
+		t.Errorf("the pane's note is %q (error=%v), want the folder", note, isErr)
+	}
+}
+
+func TestBrowserLibraryPaneAbsentWithoutTheService(t *testing.T) {
+	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
+	if b.hasLibrary() {
+		t.Error("a build with no Library reports one")
+	}
+	if got := len(b.paneOrder()); got != 2 {
+		t.Errorf("got %d panes, want 2 without a library", got)
+	}
+	// And the focus cannot be moved onto a pane that is not there.
+	b.focusPane(paneLibrary)
+	if b.focus == paneLibrary {
+		t.Error("the focus moved to a library pane that does not exist")
+	}
+	for i := 0; i < 5; i++ {
+		b.stepPane(1)
+	}
+	if b.focus != paneCreated {
+		t.Errorf("stepping right landed on pane %d, want the last one (%d)", b.focus, paneCreated)
+	}
+}
+
+func TestBrowserWrittenPaneListsCreatedPieces(t *testing.T) {
+	dir := t.TempDir()
+	browserTree(t, dir, "mine.gtab", "opened.gp")
+	pr := &browserFakePrefs{
+		recents: []string{filepath.Join(dir, "opened.gp")},
+		created: []string{filepath.Join(dir, "mine.gtab")},
+	}
+	b := browserFixture(t, pr, &browserFakeOpener{})
+	if got := len(b.panes[paneRecent]); got != 1 {
+		t.Errorf("the recent pane has %d rows, want 1", got)
+	}
+	if got := len(b.panes[paneCreated]); got != 1 {
+		t.Fatalf("the written pane has %d rows, want 1", got)
+	}
+	if got := b.panes[paneCreated][0].name; got != "mine.gtab" {
+		t.Errorf("the written pane lists %q", got)
+	}
+}
+
+func TestBrowserPanesKeepTheirOwnSelection(t *testing.T) {
+	dir := t.TempDir()
+	browserTree(t, dir, "a.gp", "b.gp", "c.gp", "x.gtab", "y.gtab")
+	pr := &browserFakePrefs{
+		recents: []string{filepath.Join(dir, "a.gp"), filepath.Join(dir, "b.gp"), filepath.Join(dir, "c.gp")},
+		created: []string{filepath.Join(dir, "x.gtab"), filepath.Join(dir, "y.gtab")},
+	}
+	b := browserFixture(t, pr, &browserFakeOpener{})
+	b.setSel(2)
+	b.stepPane(1)
+	if b.focus != paneCreated {
+		t.Fatalf("focus is pane %d, want the written one", b.focus)
+	}
+	if b.sel != 0 {
+		t.Errorf("the written pane opened on row %d, want 0", b.sel)
+	}
+	b.setSel(1)
+	b.stepPane(-1)
+	if b.focus != paneRecent || b.sel != 2 {
+		t.Errorf("back on pane %d row %d, want the recent pane's row 2", b.focus, b.sel)
+	}
+	b.stepPane(1)
+	if b.sel != 1 {
+		t.Errorf("the written pane came back on row %d, want the 1 it was left on", b.sel)
+	}
+}
+
+func TestBrowserActivateALibraryPieceOpensIt(t *testing.T) {
+	op := &browserFakeOpener{}
+	lib := stubLibrary{pieces: []PieceInfo{{Path: `C:\pieces\a.gtab`, Title: "A", Summary: "4/4"}}}
+	b := browserLibFixtureWith(t, lib, op)
+	waitForLibrary(t, b)
+	b.focusPane(paneLibrary)
+	b.setSel(0)
+	b.activate()
+	if len(op.opened) != 1 || op.opened[0] != `C:\pieces\a.gtab` {
+		t.Errorf("opened %v, want the library piece", op.opened)
+	}
+}
+
+func TestBrowserLibraryPieceThatWillNotParse(t *testing.T) {
+	op := &browserFakeOpener{}
+	lib := stubLibrary{pieces: []PieceInfo{
+		{Path: `C:\pieces\broken.gtab`, Name: "broken", Problem: "line 7:14: bar underfull"},
+	}}
+	b := browserLibFixtureWith(t, lib, op)
+	waitForLibrary(t, b)
+	b.focusPane(paneLibrary)
+	b.setSel(0)
+
+	// Opening it reports the problem rather than handing a broken file to
+	// the importer.
+	b.activate()
+	if len(op.opened) != 0 {
+		t.Errorf("a piece that will not parse was opened: %v", op.opened)
+	}
+	if !strings.Contains(b.errMsg, "bar underfull") {
+		t.Errorf("the status says %q, want the parse problem", b.errMsg)
+	}
+	// But editing it IS offered: the text view is where it gets fixed.
+	var edited []string
+	b.SetEditPiece(func(p string) { edited = append(edited, p) })
+	if _, ok := b.editableSelection(); !ok {
+		t.Fatal("a piece that will not parse cannot be opened in the editor")
+	}
+	b.editSelected()
+	if len(edited) != 1 {
+		t.Errorf("editing the broken piece ran %d times, want 1", len(edited))
+	}
+}
+
+func TestBrowserDeleteIsRefusedOnTheLibrary(t *testing.T) {
+	lib := stubLibrary{pieces: []PieceInfo{{Path: `C:\pieces\a.gtab`, Title: "A"}}}
+	b := browserLibFixture(t, lib)
+	waitForLibrary(t, b)
+	b.focusPane(paneLibrary)
+	b.setSel(0)
+	b.forgetRecent()
+	if len(b.panes[paneLibrary]) != 1 {
+		t.Error("Delete removed a library row")
+	}
+	if !strings.Contains(b.errMsg, "delete the file") {
+		t.Errorf("the status says %q, want an explanation", b.errMsg)
+	}
+}
+
+func TestBrowserWheelScrollsThePaneUnderTheCursor(t *testing.T) {
+	dir := t.TempDir()
+	var recents, created []string
+	for i := 0; i < 40; i++ {
+		name := fmt.Sprintf("r%02d.gp", i)
+		browserTree(t, dir, name)
+		recents = append(recents, filepath.Join(dir, name))
+		name = fmt.Sprintf("c%02d.gtab", i)
+		browserTree(t, dir, name)
+		created = append(created, filepath.Join(dir, name))
+	}
+	b := browserFixture(t, &browserFakePrefs{recents: recents, created: created}, &browserFakeOpener{})
+	l := b.layout()
+	// The cursor over the WRITTEN pane, while the keyboard is on RECENT.
+	over := l.panes[1]
+	for i := 0; i < 4; i++ {
+		b.handleMouse(pointer{x: over.x + 10, y: over.y + brwPaneHeadH + 4, wheel: -1})
+	}
+	if b.focus != paneCreated {
+		t.Fatalf("the wheel left the focus on pane %d, want the one under the cursor", b.focus)
+	}
+	if b.top == 0 {
+		t.Error("the pane under the cursor did not scroll")
+	}
+	if b.saved[paneRecent].top != 0 {
+		t.Errorf("the recent pane scrolled to %d without the cursor being over it", b.saved[paneRecent].top)
+	}
+}
+
+// browserLibFixture builds a browser with a library service and no
+// recents, which is what most library tests want.
+func browserLibFixture(t *testing.T, lib Library) *Browser {
+	t.Helper()
+	return browserLibFixtureWith(t, lib, &browserFakeOpener{})
+}
+
+func browserLibFixtureWith(t *testing.T, lib Library, op Opener) *Browser {
+	t.Helper()
+	sh := NewShell(Services{Opener: op, Prefs: &browserFakePrefs{}, Library: lib}, nil)
+	return NewBrowser(sh)
 }

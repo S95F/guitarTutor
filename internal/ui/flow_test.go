@@ -1,6 +1,6 @@
 package ui
 
-// Cross-screen tests: the first-run checklist, the settings screen's
+// Cross-screen tests: the getting-started strip, the settings screen's
 // mouse, and re-opening a piece in place. These are the paths that used
 // to dead-end — the ones where the only way forward was to quit and
 // retype a command line.
@@ -11,22 +11,20 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
-
-	"github.com/hajimehoshi/ebiten/v2"
 )
 
-// ---- first-run checklist -------------------------------------------------
+// ---- the getting-started strip -------------------------------------------
 
-// TestChecklistReplacesAnEmptyRecentsPane.
-func TestChecklistReplacesAnEmptyRecentsPane(t *testing.T) {
+// TestHintShowsOnAFirstRun.
+func TestHintShowsOnAFirstRun(t *testing.T) {
 	sh := NewShell(Services{Prefs: &settingsFakePrefs{}, Audio: newSettingsAudio()}, nil)
 	b := NewBrowser(sh)
-	if !b.onboarding() {
-		t.Fatal("no recents should mean the checklist is showing")
+	if !b.hintOpen {
+		t.Fatal("no pieces should mean the getting-started strip is showing")
 	}
 	steps := b.stepList()
 	if len(steps) != 3 {
-		t.Fatalf("checklist has %d steps, want 3 (interface, calibration, open a piece)", len(steps))
+		t.Fatalf("the strip has %d steps, want 3 (interface, calibration, open a piece)", len(steps))
 	}
 	for i, s := range steps {
 		if s.title == "" || s.detail == "" {
@@ -89,32 +87,63 @@ func TestChecklistStepsAreActivatable(t *testing.T) {
 	launches := 0
 	b.SetOpenDialog(func(string) { launches++ })
 
-	b.setSel(0)
-	if err := b.handleKey(ebiten.KeyEnter); err != nil {
-		t.Fatalf("Enter on step 1: %v", err)
-	}
+	// The steps are their own controls now — they are clicked, not
+	// selected — so they are activated by index.
+	b.activateStep(0)
 	if opened != 1 {
 		t.Errorf("step 1 opened settings %d times, want 1", opened)
 	}
 
-	b.setSel(len(b.stepList()) - 1)
-	_ = b.handleKey(ebiten.KeyEnter)
+	b.activateStep(len(b.stepList()) - 1)
 	if launches != 1 {
 		t.Errorf(`the "open a piece" step launched the file dialog %d times, want 1`, launches)
 	}
+
+	// An index off either end is a no-op rather than a panic.
+	b.activateStep(-1)
+	b.activateStep(99)
 }
 
-// TestChecklistGivesWayToRecents: once a piece has been opened the pane
-// goes back to being what its title says.
-func TestChecklistGivesWayToRecents(t *testing.T) {
+// TestHintTicksItselfOff: the strip stays, because it can be dismissed
+// on purpose — but its last step reports done once there is a piece to
+// hand, so it stops asking for something that has happened.
+func TestHintTicksItselfOff(t *testing.T) {
 	pr := &browserFakePrefs{recents: []string{filepath.Join(t.TempDir(), "song.gp")}}
 	sh := NewShell(Services{Opener: &browserFakeOpener{}, Prefs: pr}, nil)
 	b := NewBrowser(sh)
-	if b.onboarding() {
-		t.Error("with a recent piece the checklist should be gone")
+	steps := b.stepList()
+	if len(steps) == 0 {
+		t.Fatal("the strip has no steps")
 	}
-	if b.stepList() != nil {
-		t.Error("a screen that is not onboarding should build no steps")
+	if last := steps[len(steps)-1]; !last.done {
+		t.Errorf("with a piece to hand the %q step is still outstanding", last.title)
+	}
+}
+
+// TestHintCanBePutAwayForGood: dismissing it writes to preferences, so a
+// new screen over the same preferences comes up without it. A dismissal
+// that has to be repeated every launch is not a dismissal.
+func TestHintCanBePutAwayForGood(t *testing.T) {
+	pr := &settingsFakePrefs{}
+	sh := NewShell(Services{Prefs: pr, Audio: newSettingsAudio()}, nil)
+	b := NewBrowser(sh)
+	if !b.hintOpen {
+		t.Fatal("the strip should start showing")
+	}
+	b.toggleHint()
+	if b.hintOpen {
+		t.Error("toggling did not hide the strip")
+	}
+	if !pr.hideHint {
+		t.Error("hiding the strip was not persisted")
+	}
+	if got := NewBrowser(sh); got.hintOpen {
+		t.Error("a fresh screen brought the dismissed strip back")
+	}
+	// And it can be brought back.
+	b.toggleHint()
+	if !b.hintOpen || pr.hideHint {
+		t.Error("toggling again did not restore the strip")
 	}
 }
 
@@ -385,35 +414,30 @@ func TestHintLineDropsUnavailableBindings(t *testing.T) {
 	}
 }
 
-// TestChecklistIsClickable (audit A1): hitTest used to bound the left
-// pane by len(recents), which is zero during onboarding by definition —
-// the checklist was mouse-dead for exactly the users it exists for.
-func TestChecklistIsClickable(t *testing.T) {
+// TestHintIsClickable (audit A1's successor): the strip was mouse-dead
+// for exactly the users it exists for once before. Its steps are laid out
+// by the same layout() the mouse reads, so a click on one runs it.
+func TestHintIsClickable(t *testing.T) {
 	sh := NewShell(Services{Prefs: &settingsFakePrefs{}, Audio: newSettingsAudio()}, nil)
 	b := NewBrowser(sh)
-	if !b.onboarding() {
-		t.Fatal("fixture should be onboarding")
-	}
 	opened := 0
 	b.SetSettingsOpener(func() { opened++ })
 
-	// Row 1 of the checklist (the calibration step) sits one row down in
-	// the list.
-	x, y := brwRecentX+10, brwListTop+brwRecentRowH+2
-	i, ok := b.hitTest(x, y)
-	if !ok || i != 1 {
-		t.Fatalf("hitTest over the second checklist step = %d, %v; want row 1", i, ok)
+	l := b.layout()
+	if len(l.steps) < 2 {
+		t.Fatalf("the strip laid out %d steps, want at least 2", len(l.steps))
+	}
+	// The second step is the calibration one, and it opens settings.
+	r := l.steps[1]
+	b.handleMouse(pointer{x: r.x + 4, y: r.y + 4, pressed: true, down: true})
+	if opened != 1 {
+		t.Errorf("clicking the calibration step opened settings %d times, want 1", opened)
 	}
 
-	// The screen-wide click rule: a click on an unselected row selects it,
-	// a click on the selected row activates it.
-	b.click(i)
-	if opened != 0 {
-		t.Fatalf("selecting a step already opened settings %d times", opened)
-	}
-	b.click(i)
-	if opened != 1 {
-		t.Errorf("activating the calibration step opened settings %d times, want 1", opened)
+	// And the hide button is reachable the same way.
+	b.handleMouse(pointer{x: l.hintBtn.x + 4, y: l.hintBtn.y + 4, pressed: true, down: true})
+	if b.hintOpen {
+		t.Error("clicking hide left the strip showing")
 	}
 }
 
@@ -568,31 +592,20 @@ func TestSoundFontBrowseBusyGuard(t *testing.T) {
 
 // ---- UI re-review follow-ups ----------------------------------------------
 
-// TestChecklistBindingsDescribeTheChecklist: on a first run the left pane
-// is the setup checklist, where Delete does nothing and Enter runs a
-// step. A footer teaching "del forget recent" on the only screen a new
-// user has seen is teaching a key that cannot work there.
-func TestChecklistBindingsDescribeTheChecklist(t *testing.T) {
-	sh := NewShell(Services{Prefs: &settingsFakePrefs{}, Audio: newSettingsAudio()}, nil)
+// TestBindingsDescribeTheFocusedPane: Delete forgets a shortcut, and the
+// library has none to forget — it lists what is in a folder. A footer
+// teaching a key that cannot work on the pane the user is looking at is
+// the same fault the first-run checklist had.
+func TestBindingsDescribeTheFocusedPane(t *testing.T) {
+	sh := NewShell(Services{Prefs: &settingsFakePrefs{}, Audio: newSettingsAudio(),
+		Library: stubLibrary{}}, nil)
 	b := NewBrowser(sh)
-	if !b.onboarding() {
-		t.Fatal("fixture should be onboarding")
+	if !strings.Contains(b.hintLine(), "del forget") {
+		t.Errorf("the recent pane's footer omits Delete: %q", b.hintLine())
 	}
-	if strings.Contains(b.hintLine(), "del forget recent") {
-		t.Errorf("the checklist footer advertises Delete: %q", b.hintLine())
-	}
-	for _, r := range b.browserBindings() {
-		if r.Keys == "enter" && strings.Contains(strings.ToLower(r.Desc), "recent") {
-			t.Errorf("on the checklist, enter is described as %q", r.Desc)
-		}
-	}
-
-	// With a piece behind you the pane is recents again, and both rows
-	// go back to meaning what they say.
-	pr := &browserFakePrefs{recents: []string{filepath.Join(t.TempDir(), "song.gp")}}
-	b2 := NewBrowser(NewShell(Services{Opener: &browserFakeOpener{}, Prefs: pr}, nil))
-	if !strings.Contains(b2.hintLine(), "del forget recent") {
-		t.Errorf("the recents footer omits Delete: %q", b2.hintLine())
+	b.focusPane(paneLibrary)
+	if strings.Contains(b.hintLine(), "del forget") {
+		t.Errorf("the library footer advertises Delete: %q", b.hintLine())
 	}
 }
 

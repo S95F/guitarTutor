@@ -16,9 +16,37 @@ package ui
 // the audio. What it adds is motion between publishes — and a refusal to
 // invent motion the engine is not making. A seek, a loop wrap, a pause, a
 // count-in and a wait all pin the drawn position to the engine's exactly.
+//
+// # Where the sound actually is
+//
+// The engine publishes its position as it RENDERS, and rendered audio has
+// not been heard yet: it is sitting in the output device's buffer waiting
+// its turn. So the engine's tick is not where the music is, it is where
+// the music will be a buffer from now, and a playhead drawn straight from
+// it runs AHEAD of what you can hear — by whatever the output path is
+// holding, which on the oto path is up to a tenth of a second. A tenth of
+// a second is a sixteenth note at 150 BPM. It is exactly the error that
+// makes a player think they are dragging when they are not.
+//
+// The fix is to draw the position that is SOUNDING: the rendered position
+// less however much rendered audio has not reached the speakers yet. That
+// figure is measurable rather than guessable — oto reports what it is
+// holding, and the duplex path renders into the device callback, where the
+// lead is one period — so the view asks for it (SetOutputLatency) rather
+// than carrying a constant. What no software can measure is the hardware's
+// own last few milliseconds, which is what the manual trim in settings is
+// for.
+//
+// This is a DISPLAY correction and nothing else. Scoring does not go
+// anywhere near it: expected notes are stamped with the output frame they
+// sound on and matched against detected input through the round-trip
+// offset the calibration wizard measures, which is a different quantity
+// arrived at a different way. Compensating twice would be worse than not
+// compensating at all.
 
 import (
 	"math"
+	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
 
@@ -48,6 +76,20 @@ const (
 	// tied to the monitor). It only sets the size of one interpolation
 	// step, and the reconciliation absorbs the error either way.
 	playheadFallbackTPS = 60
+	// latencySmooth is how fast the output-latency estimate follows the
+	// figure the player reports, per display frame. The reading is exact
+	// but jagged — oto's buffer empties as the device drains it and jumps
+	// back up when the refill loop next runs — and an offset that jittered
+	// with it would shake the notation. A real change in buffering is
+	// followed in about a fifth of a second, which is faster than any
+	// device changes its mind.
+	latencySmooth = 0.08
+	// latencyCap is the most compensation that will ever be applied. Half
+	// a second is far past any sane output path; a figure beyond it means
+	// something is wrong with the measurement, and drawing the notation
+	// half a second behind the engine on the strength of a bad number is
+	// worse than not compensating at all.
+	latencyCap = 0.5
 )
 
 // A playhead carries the drawn playback position between the engine's
@@ -120,11 +162,67 @@ func (p *playhead) snap(s engine.PlayPos) float64 {
 
 // --- what the view reads --------------------------------------------------
 
-// stepPlayhead advances the drawn position one display frame. Update calls
-// it, once, and nothing else may: every other reader goes through posF or
-// posTick, which read the same rules with no time passing.
+// stepPlayhead advances the drawn position one display frame, and follows
+// the output latency the same frame. Update calls it, once, and nothing
+// else may: every other reader goes through posF or posTick, which read
+// the same rules with no time passing.
 func (a *App) stepPlayhead() {
 	a.ph.step(a.eng.Pos(), a.displayStep())
+	a.trackLatency()
+}
+
+// SetOutputLatency installs the hook that reports how much rendered audio
+// has not been heard yet. The view subtracts it so the playhead sits on
+// the note that is sounding rather than on the one being rendered (see the
+// file comment). It is called once per display frame and must be cheap and
+// non-blocking; a nil hook, or one that reports zero, leaves the playhead
+// exactly where the engine says it is.
+//
+// The UI cannot work this out for itself: what the number is depends on
+// which output path the piece was opened on, and both of those live in the
+// application rather than here.
+func (a *App) SetOutputLatency(fn func() time.Duration) { a.outLatency = fn }
+
+// trackLatency follows the reported output latency with a slow filter.
+func (a *App) trackLatency() {
+	if a.outLatency == nil {
+		return
+	}
+	want := a.outLatency().Seconds()
+	if !(want > 0) { // also catches NaN
+		want = 0
+	}
+	if want > latencyCap {
+		want = latencyCap
+	}
+	if !a.latencyArmed {
+		a.latency, a.latencyArmed = want, true
+		return
+	}
+	a.latency += (want - a.latency) * latencySmooth
+}
+
+// soundingTick converts a rendered position into the one that is audible,
+// by winding it back through the output buffer at the rate the position is
+// moving.
+//
+// Only while the position is ADVANCING. A paused or stopped transport is
+// not filling the buffer with anything, so there is nothing in flight to
+// compensate for — and more to the point, the playhead is then a cursor
+// rather than a clock: it is what a click seeks to and what A and B set
+// the loop from, and those have to mean the tick the engine will resume
+// at. The cost is a hop of one buffer when playback stops, which is a
+// tenth of a second of notation and the honest place for the head to
+// land.
+func soundingTick(tick float64, s engine.PlayPos, latencySec float64) float64 {
+	if !s.Advancing || latencySec <= 0 {
+		return tick
+	}
+	tick -= latencySec * s.TicksPerSecond
+	if tick < 0 {
+		tick = 0
+	}
+	return tick
 }
 
 // displayStep is one display frame in seconds. Ebitengine calls Update at a
@@ -143,7 +241,10 @@ func (a *App) displayStep() float64 {
 // view draws, and everything the pointer is measured against, comes from
 // here: what the user clicks has to be measured against the tab they can
 // see, not against a position it is a few milliseconds away from.
-func (a *App) posF() float64 { return a.ph.step(a.eng.Pos(), 0) }
+func (a *App) posF() float64 {
+	s := a.eng.Pos()
+	return soundingTick(a.ph.step(s, 0), s, a.latency)
+}
 
 // posTick is the drawn playback position in whole ticks — posF for the
 // callers that want the engine's own unit (which bar, which verdict).

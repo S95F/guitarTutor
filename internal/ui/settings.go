@@ -51,6 +51,7 @@ const (
 	srCalibrate
 	srSoundFont
 	srCountIn
+	srSyncTrim
 )
 
 // calPhase is the state of the latency calibration run.
@@ -248,6 +249,7 @@ type Settings struct {
 	playChosen bool
 
 	countIn   int
+	syncTrim  int // milliseconds; see appconfig.Config.SyncTrimMS
 	soundFont string
 
 	// Cached stored offset for the selected pair, refreshed on a device
@@ -317,6 +319,9 @@ func NewSettings(sh *Shell) *Settings {
 	if p := s.prefs(); p != nil {
 		s.countIn = clampCountIn(p.CountIn())
 		s.soundFont = p.SoundFont()
+		if tp, ok := p.(settingsSyncTrimmer); ok {
+			s.syncTrim = clampSyncTrim(tp.SyncTrim())
+		}
 		if pp, ok := p.(settingsPather); ok {
 			s.configPath = pp.Path()
 		}
@@ -508,6 +513,9 @@ func (s *Settings) rebuild() {
 		s.rows = append(s.rows, srCapture, srPlayback, srCalibrate)
 	}
 	s.rows = append(s.rows, srSoundFont, srCountIn)
+	if s.hasSyncTrim() {
+		s.rows = append(s.rows, srSyncTrim)
+	}
 	if s.cur >= len(s.rows) {
 		s.cur = len(s.rows) - 1
 	}
@@ -601,7 +609,7 @@ func (s *Settings) lockedDuringRun(r settingsRow) bool {
 		return false
 	}
 	switch r {
-	case srCapture, srPlayback, srCountIn:
+	case srCapture, srPlayback, srCountIn, srSyncTrim:
 		s.notice = calLockedNotice
 		return true
 	}
@@ -635,6 +643,8 @@ func (s *Settings) adjust(d int) {
 		}
 	case srCountIn:
 		s.setCountIn(s.countIn + d)
+	case srSyncTrim:
+		s.setSyncTrim(s.syncTrim + d*syncTrimStepMS)
 	}
 }
 
@@ -743,6 +753,81 @@ func (s *Settings) setCountIn(n int) {
 	if p := s.prefs(); p != nil {
 		p.SetCountIn(n)
 		s.save()
+	}
+}
+
+// syncTrimStepMS is how far one press of Left or Right moves the trim.
+// Five milliseconds is under what anyone can hear as a timing error on its
+// own and coarse enough to cross the useful range in a dozen presses.
+const syncTrimStepMS = 5
+
+// MaxSyncTrimMS bounds the manual audio/visual trim either way. A quarter
+// of a second is already far more than any driver holds; past that the
+// trim stops correcting an error and starts being one.
+//
+// It is stated here rather than taken from internal/appconfig because this
+// package deliberately does not know what the config file looks like — it
+// works against the Prefs facade and nothing else. The storage layer
+// enforces the same bound on the way in and out, and a test in
+// cmd/guitartutor, which is the one place that sees both, asserts the two
+// numbers agree.
+const MaxSyncTrimMS = 250
+
+// clampSyncTrim holds the trim inside the range the config will store.
+func clampSyncTrim(ms int) int {
+	if ms < -MaxSyncTrimMS {
+		return -MaxSyncTrimMS
+	}
+	if ms > MaxSyncTrimMS {
+		return MaxSyncTrimMS
+	}
+	return ms
+}
+
+// A settingsSyncTrimmer is the optional Prefs extension that stores the
+// audio/visual sync trim. Prefs itself has no such pair, so a build whose
+// preferences cannot hold one simply does not show the row — rather than
+// showing a control whose value evaporates when the application closes.
+type settingsSyncTrimmer interface {
+	SyncTrim() int
+	SetSyncTrim(ms int)
+}
+
+// hasSyncTrim reports whether the trim can be stored, and therefore shown.
+func (s *Settings) hasSyncTrim() bool {
+	p := s.prefs()
+	if p == nil {
+		return false
+	}
+	_, ok := p.(settingsSyncTrimmer)
+	return ok
+}
+
+// setSyncTrim moves the playhead against the sound and persists it.
+func (s *Settings) setSyncTrim(ms int) {
+	ms = clampSyncTrim(ms)
+	if ms == s.syncTrim {
+		return
+	}
+	s.syncTrim = ms
+	if tp, ok := s.prefs().(settingsSyncTrimmer); ok {
+		tp.SetSyncTrim(ms)
+		s.save()
+	}
+}
+
+// syncTrimText spells the trim and which way it moves things, because the
+// sign alone tells nobody anything: what the user knows is that the tab is
+// ahead of the sound or behind it, and the row has to be readable in those
+// words.
+func (s *Settings) syncTrimText() string {
+	switch {
+	case s.syncTrim == 0:
+		return "0 ms  (measured buffering only)"
+	case s.syncTrim > 0:
+		return fmt.Sprintf("+%d ms  (tab drawn later)", s.syncTrim)
+	default:
+		return fmt.Sprintf("%d ms  (tab drawn earlier)", s.syncTrim)
 	}
 }
 
@@ -1514,6 +1599,12 @@ func (s *Settings) items() []settingsItem {
 	b.addRow("count-in beats", fmt.Sprintf("%d  (0-%d)", s.countIn, maxCountIn), colHUD,
 		settingsButton{label: "-", act: func(s *Settings) { s.adjustRow(srCountIn, -1) }},
 		settingsButton{label: "+", act: func(s *Settings) { s.adjustRow(srCountIn, +1) }})
+	if s.hasSyncTrim() {
+		b.addRow("audio / visual sync", s.syncTrimText(), colHUD,
+			settingsButton{label: "-", act: func(s *Settings) { s.adjustRow(srSyncTrim, -1) }},
+			settingsButton{label: "+", act: func(s *Settings) { s.adjustRow(srSyncTrim, +1) }})
+		b.reserveNote(1, "the app already subtracts the buffering it can measure; this trims what it cannot", colDim)
+	}
 
 	return b.out
 }

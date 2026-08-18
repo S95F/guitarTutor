@@ -30,6 +30,8 @@ func (settingsStubScreen) Layout(int, int) (int, int) { return screenW, screenH 
 // made to fail them.
 type settingsFakePrefs struct {
 	recents   []string
+	created   []string
+	hideHint  bool
 	soundFont string
 	countIn   int
 	capID     string
@@ -40,6 +42,10 @@ type settingsFakePrefs struct {
 
 func (p *settingsFakePrefs) Recents() []string         { return p.recents }
 func (p *settingsFakePrefs) AddRecent(path string)     { p.recents = append([]string{path}, p.recents...) }
+func (p *settingsFakePrefs) Created() []string         { return p.created }
+func (p *settingsFakePrefs) AddCreated(path string)    { p.created = append([]string{path}, p.created...) }
+func (p *settingsFakePrefs) HintHidden() bool          { return p.hideHint }
+func (p *settingsFakePrefs) SetHintHidden(h bool)      { p.hideHint = h }
 func (p *settingsFakePrefs) SoundFont() string         { return p.soundFont }
 func (p *settingsFakePrefs) SetSoundFont(path string)  { p.soundFont = path }
 func (p *settingsFakePrefs) CountIn() int              { return p.countIn }
@@ -1651,5 +1657,86 @@ func TestSettingsDeviceRowAdmitsNothingIsChosenYet(t *testing.T) {
 	s.activate()
 	if s.capIdx == before {
 		t.Error("enter on an already-chosen picker no longer steps to the next device")
+	}
+}
+
+// --- the audio / visual sync trim ---------------------------------------
+
+// settingsTrimPrefs is a Prefs that can store the sync trim, so the row
+// appears. The plain fake deliberately cannot, which is what the "row is
+// absent" test below relies on.
+type settingsTrimPrefs struct {
+	settingsFakePrefs
+	trim int
+}
+
+func (p *settingsTrimPrefs) SyncTrim() int      { return p.trim }
+func (p *settingsTrimPrefs) SetSyncTrim(ms int) { p.trim = ms }
+
+// settingsWithPrefs builds a Settings over a given Prefs, which is what
+// these tests vary — newSettingsFixture always makes its own.
+func settingsWithPrefs(t *testing.T, p Prefs) *Settings {
+	t.Helper()
+	return NewSettings(NewShell(Services{Prefs: p}, settingsStubScreen{}))
+}
+
+func TestSettingsSyncTrimRowAdjustsAndPersists(t *testing.T) {
+	pr := &settingsTrimPrefs{}
+	s := settingsWithPrefs(t, pr)
+	i := s.rowIndex(srSyncTrim)
+	if i < 0 {
+		t.Fatal("the sync trim row is missing from a Prefs that can store it")
+	}
+	s.cur = i
+	s.adjust(+1)
+	if pr.trim != syncTrimStepMS {
+		t.Errorf("one press right stored %d ms, want %d", pr.trim, syncTrimStepMS)
+	}
+	s.adjust(-1)
+	s.adjust(-1)
+	if pr.trim != -syncTrimStepMS {
+		t.Errorf("two presses left from there stored %d ms, want %d", pr.trim, -syncTrimStepMS)
+	}
+}
+
+func TestSettingsSyncTrimIsBounded(t *testing.T) {
+	pr := &settingsTrimPrefs{}
+	s := settingsWithPrefs(t, pr)
+	s.cur = s.rowIndex(srSyncTrim)
+	for i := 0; i < 200; i++ {
+		s.adjust(+1)
+	}
+	if pr.trim != MaxSyncTrimMS {
+		t.Errorf("the trim ran to %d ms, want the %d cap", pr.trim, MaxSyncTrimMS)
+	}
+	for i := 0; i < 400; i++ {
+		s.adjust(-1)
+	}
+	if pr.trim != -MaxSyncTrimMS {
+		t.Errorf("the trim ran to %d ms, want the %d floor", pr.trim, -MaxSyncTrimMS)
+	}
+}
+
+func TestSettingsSyncTrimSeedsFromPrefs(t *testing.T) {
+	pr := &settingsTrimPrefs{trim: -40}
+	s := settingsWithPrefs(t, pr)
+	if s.syncTrim != -40 {
+		t.Errorf("the row opened at %d ms, want the stored -40", s.syncTrim)
+	}
+	if got := s.syncTrimText(); !strings.Contains(got, "earlier") {
+		t.Errorf("a negative trim reads %q; it should say which way it moves the tab", got)
+	}
+	pr2 := &settingsTrimPrefs{trim: 40}
+	if got := settingsWithPrefs(t, pr2).syncTrimText(); !strings.Contains(got, "later") {
+		t.Errorf("a positive trim reads %q; it should say which way it moves the tab", got)
+	}
+}
+
+// TestSettingsSyncTrimRowAbsentWithoutStorage: a control whose value
+// evaporates on exit is worse than no control.
+func TestSettingsSyncTrimRowAbsentWithoutStorage(t *testing.T) {
+	s := settingsWithPrefs(t, &settingsFakePrefs{})
+	if s.rowIndex(srSyncTrim) >= 0 {
+		t.Error("the sync trim row is offered by a Prefs that cannot store it")
 	}
 }

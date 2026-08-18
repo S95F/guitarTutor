@@ -11,6 +11,7 @@ import (
 
 	"github.com/S95F/guitarTutor/internal/appconfig"
 	"github.com/S95F/guitarTutor/internal/audio"
+	"github.com/S95F/guitarTutor/internal/ui"
 )
 
 // --- test doubles -------------------------------------------------------
@@ -434,5 +435,70 @@ func TestFailedOpenLeavesPreviousSessionPlaying(t *testing.T) {
 	}
 	if _, _, closed := streams[0].counts(); closed != 1 {
 		t.Errorf("the first stream was closed %d times after the recovery open, want exactly 1", closed)
+	}
+}
+
+// TestSyncTrimBoundsAgree pins the one thing the two packages either side
+// of the audio/visual trim cannot check for themselves. internal/ui states
+// the bound the settings row enforces and deliberately knows nothing about
+// the config file; internal/appconfig clamps what it stores and knows
+// nothing about the UI. This file is the only place that imports both, so
+// it is the only place the two numbers can be compared — and if they ever
+// drift, the symptom is a setting the user can reach and the config
+// silently refuses to keep.
+func TestSyncTrimBoundsAgree(t *testing.T) {
+	if ui.MaxSyncTrimMS != appconfig.MaxSyncTrimMS {
+		t.Errorf("the settings row allows +/-%d ms and the config stores +/-%d ms",
+			ui.MaxSyncTrimMS, appconfig.MaxSyncTrimMS)
+	}
+}
+
+// TestShellPrefsSyncTrimRoundTrips checks the optional Prefs extension the
+// settings row probes for: without it the row does not appear at all.
+func TestShellPrefsSyncTrimRoundTrips(t *testing.T) {
+	p := &shellPrefs{}
+	var _ interface {
+		SyncTrim() int
+		SetSyncTrim(int)
+	} = p
+	if got := p.SyncTrim(); got != 0 {
+		t.Errorf("a fresh config reports a %d ms trim, want 0", got)
+	}
+	p.SetSyncTrim(-35)
+	if got := p.SyncTrim(); got != -35 {
+		t.Errorf("got %d ms, want -35", got)
+	}
+}
+
+// TestFramesToDuration checks the conversion the latency hook reports
+// through, at the sample rate the whole pipeline runs at.
+func TestFramesToDuration(t *testing.T) {
+	for _, tt := range []struct {
+		frames int
+		want   time.Duration
+	}{
+		{0, 0},
+		{sampleRate, time.Second},
+		{sampleRate / 100, 10 * time.Millisecond},
+		{480, 10 * time.Millisecond},
+	} {
+		if got := framesToDuration(tt.frames); got != tt.want {
+			t.Errorf("framesToDuration(%d) = %v, want %v", tt.frames, got, tt.want)
+		}
+	}
+}
+
+// TestBytesPerFrameMatchesTheStreamFormat: BufferedSize counts bytes, and
+// the latency hook divides by this to get frames. oto is opened as stereo
+// float32, and the two have to agree or the compensation is out by a
+// factor.
+func TestBytesPerFrameMatchesTheStreamFormat(t *testing.T) {
+	if bytesPerFrame != 8 {
+		t.Errorf("bytesPerFrame is %d; oto is opened as 2 channels of float32, which is 8", bytesPerFrame)
+	}
+	// playerBufferBytes is built from the same unit, so the read-ahead it
+	// asks for has to come back out as the duration it was written as.
+	if got := framesToDuration(playerBufferBytes() / bytesPerFrame); got != playerReadAhead {
+		t.Errorf("the configured read-ahead reads back as %v, want %v", got, playerReadAhead)
 	}
 }

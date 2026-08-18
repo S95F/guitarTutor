@@ -69,8 +69,13 @@ See the full [ROADMAP](ROADMAP.md) for phasing, acceptance criteria, and explici
 flowchart LR
     subgraph Input
         GP[".gp / MIDI / text tab"]
+        Ed["Tab editor<br/>(write it yourself)"]
+        Lib["Your library<br/>(the app's own folder)"]
     end
+    Lib --> Score
     GP --> Score["Score model<br/>(ticks + tempo map)"]
+    Ed --> Score
+    Score -.saves as .gtab.-> Ed
     Score --> Seq["Frame-counted sequencer"]
     Seq --> Synth["Synth<br/>(built-in pluck / SoundFont)"]
     Seq --> Tab["Scrolling tab view"]
@@ -106,7 +111,15 @@ Requires Go 1.26+. Phase 1 is pure Go — no C toolchain, no assets to download.
 go build ./cmd/guitartutor
 ```
 
-Run it with no arguments — or double-click the binary — and it opens the start screen: recent pieces, an Open button that browses with the system's own file dialog (filtered to the formats it imports), drag-and-drop onto the window, and settings (audio devices, latency calibration, SoundFont, count-in) without touching a terminal.
+Run it with no arguments — or double-click the binary — and it opens the start screen, which lands on your pieces in three lists:
+
+- **Recent** — what you have opened lately, from wherever it lives.
+- **Written here** — what you have made in the editor lately.
+- **Your library** — the app's own folder, *described*: every piece in it has been read, so it is listed by its title and what the music is (`4/4 · 92 BPM · 8 bars · drop D`) rather than by file name. Nothing falls off the end of it.
+
+**Tab** and the arrow keys move between the lists; the wheel scrolls whichever one the cursor is over. Under them are the four things the screen does — open a file (the system's own dialog, filtered to the formats it imports), write a new piece, edit the selected one, and settings. Drag-and-drop onto the window still works.
+
+A getting-started strip across the top tracks the two things that have to happen before the app can hear a guitar, and ticks them off against the real configuration rather than just listing them. Press **H** to put it away — for good; everything it points at is a row in settings.
 
 ```bash
 ./guitartutor
@@ -117,6 +130,24 @@ Or go straight to a piece:
 ```bash
 ./guitartutor play testdata/fixture_riff.gtab
 ```
+
+### Writing your own
+
+Not everything you practise exists as a file. The start screen's **Write a new piece** button (or **N**) opens a tablature editor. The rhythm of writing a piece in it is three keys:
+
+- **0–24** types a fret onto the highlighted string (two digits within a moment make one number),
+- **↑ ↓** choose the string, **[** and **]** the note value,
+- **space** moves on to the next beat — and past the last bar, makes another, so writing never stops to ask for room.
+
+The staff is labelled with your tuning down the left, note values are drawn as stems and flags under it, and the header names the pitch the note under the cursor actually *sounds* — which is not the fret number, and is not the same with a capo on. Techniques are the same letters the text format uses (`h p s b v x`), and a tie is the **`** key. **E** on the start screen opens whatever is selected, so an import you want to fix up is two keys away.
+
+Pieces are saved as `.gtab` — the small, git-diffable [text format](docs/TEXTFORMAT.md) — into the app's own pieces folder by default, where they show up in your library. **shift+P** saves and opens the piece for practice; **esc** comes back to the editing, so writing a bar, hearing it, and fixing it is a loop rather than a round trip.
+
+**F2** swaps the notation for the raw `.gtab` text, parsed as you type with the line and column of anything that does not. That is where the parts of the format the grid has no button for live: a capo, a General MIDI program, an unusual tuning, a comment to yourself.
+
+Bars stay exactly full, across every track at once — the editor refuses an edit that would overflow a bar rather than spilling it into the next one, and says what would not fit.
+
+### Playing a piece
 
 Or your own piece: `guitartutor play song.gp` — also `.mid`, `.musicxml`/`.mxl`, and `.gtab`. Useful flags: `-scale 0.7` start slowed down, `-countin 4`, `-met` metronome, `-sf2 your.sf2` SoundFont synthesis instead of the built-in pluck.
 
@@ -137,6 +168,8 @@ MuseScore4.exe song.gp5 -o song.musicxml
 In the practice view: **space** play/pause, **←/→** seek by bar, **↑/↓** tempo ±5%, **shift+B** exact BPM, **A/B** set loop points at the current bar, **L** clear loop, **M** metronome, **R** progressive speed ramp, **C** count-in, **+/−** zoom, **1–9** mute tracks (**shift+1–9** solo), **T** tuner, **W** wait mode (live), **S** settings, **F5** re-open the piece, **esc** back, **Q** quit. Press **?** or **F1** on any screen for the full list.
 
 The mouse works everywhere too: a transport bar and toggles across the top, a timeline under the tab showing where you are in the whole piece — click or drag it to move — and loop ends you can drag on either the tab or the timeline, snapping to the beat unless you hold shift. Click a track chip to mute it, right-click to solo it.
+
+The playhead is drawn where the music is **sounding**, not where it is being rendered. Those are not the same place: rendered audio waits its turn in the output buffer, so a playhead taken straight from the sequencer runs ahead of what you can hear — by a sixteenth note at 150 BPM, which is exactly the error that makes you think you are dragging when you are not. The app subtracts the buffering it can measure; **Settings → audio / visual sync** trims the last few milliseconds inside the driver, which no software can measure.
 
 ### Live mode — the guitar plugs in
 

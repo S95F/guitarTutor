@@ -137,13 +137,19 @@ func TestPluckContinuationKeepsOneVoice(t *testing.T) {
 				t.Errorf("the voice reports key %d, want the destination 57", got)
 			}
 			// The origin key must no longer stop it; the destination must.
+			// The decay is compared against the one the note is actually
+			// holding at rather than against a constant: how fast a string
+			// rings out depends on its pitch and its loop length, and what
+			// this test is about is WHICH key stops it.
+			held := v.voices[0].decay
 			v.NoteOff(52)
-			if v.voices[0].decay != pluckSustain {
+			if v.voices[0].decay != held {
 				t.Error("NoteOff on the origin key released a note that has moved on from it")
 			}
 			v.NoteOff(57)
-			if v.voices[0].decay != pluckRelease {
-				t.Error("NoteOff on the destination key did not release the note")
+			if v.voices[0].decay >= held {
+				t.Errorf("NoteOff on the destination key left the decay at %v, want faster than the held %v",
+					v.voices[0].decay, held)
 			}
 		})
 	}

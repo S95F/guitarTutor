@@ -49,6 +49,11 @@ var (
 	colHint   = color.RGBA{124, 124, 138, 255}
 	colOn     = color.RGBA{46, 96, 66, 255}   // an engaged toggle's fill
 	colOnEdge = color.RGBA{80, 200, 130, 255} // an engaged toggle's border
+	// colOnHover is where an engaged toggle's fill eases to under the
+	// cursor. An engaged chip cannot brighten toward colHover — that is a
+	// grey, and it would drain the green that says the toggle is on — so
+	// it brightens within its own hue instead.
+	colOnHover = color.RGBA{62, 126, 88, 255}
 )
 
 // centreX is the x that centres body text within [x, x+w). The width is
@@ -169,20 +174,32 @@ func chipW(c chipState) float64 {
 }
 
 // drawChip paints one toggle: filled and outlined when engaged, hollow
-// when not, and greyed when the binding is unavailable. hover lifts the
-// fill so the control the next click would reach is obvious. The key
-// hint sits under the label at caption size — two full body lines do not
-// fit a chip, which is the point: the hint is a whisper, not a label.
-func drawChip(dst *ebiten.Image, r rect, c chipState, hover bool) {
+// when not, and greyed when the binding is unavailable. The key hint sits
+// under the label at caption size — two full body lines do not fit a chip,
+// which is the point: the hint is a whisper, not a label.
+//
+// av is the chip's eased state (see anim.go). Hovering lifts the fill and
+// the chip itself; pressing sinks it; a press leaves a fading ring behind.
+// A disabled chip animates nothing at all, which is most of how it reads
+// as disabled.
+func drawChip(dst *ebiten.Image, r rect, c chipState, av animValues) {
 	fill, edge, text := colPanel, colPanelEdge, colHUD
 	switch {
 	case c.disabled:
-		fill, edge, text = colBG, colBarline, colBarline
+		drawPanel(dst, r, colBG, colBarline)
+		drawText(dst, c.label, centreX(c.label, r.x, r.w), r.y+3, colBarline)
+		if c.key != "" {
+			drawTextSmall(dst, c.key, r.x+(r.w-textWSmall(c.key))/2, r.y+20, colBarline)
+		}
+		return
 	case c.on:
 		fill, edge, text = colOn, colOnEdge, colNote
-	case hover:
-		fill, edge = colHover, colDim
+		fill = lerpCol(fill, colOnHover, av.hover)
+	default:
+		fill = lerpCol(fill, colHover, av.hover)
+		edge = lerpCol(edge, colDim, av.hover)
 	}
+	r = av.animate(r)
 	drawPanel(dst, r, fill, edge)
 	drawText(dst, c.label, centreX(c.label, r.x, r.w), r.y+3, text)
 	if c.key != "" {
@@ -191,16 +208,55 @@ func drawChip(dst *ebiten.Image, r rect, c chipState, hover bool) {
 		// colBarline it disappeared into the panel entirely, and into
 		// the fill of an engaged chip completely.
 		kc := colDim
-		switch {
-		case c.disabled:
-			kc = colBarline
-		case hover:
-			kc = colNote
-		case c.on:
+		if c.on {
 			kc = colHUD
 		}
-		drawTextSmall(dst, c.key, r.x+(r.w-textWSmall(c.key))/2, r.y+20, kc)
+		drawTextSmall(dst, c.key, r.x+(r.w-textWSmall(c.key))/2, r.y+20,
+			lerpCol(kc, colNote, av.hover))
 	}
+	drawFlash(dst, r, av)
+}
+
+// A buttonStyle says how prominent a button is. The start screen's
+// primary action is filled; everything beside it is a panel.
+type buttonStyle int
+
+const (
+	btnNormal buttonStyle = iota
+	btnPrimary
+	btnDisabled
+)
+
+// drawButton paints a labelled button with an optional key hint under it,
+// animated exactly as a chip is. It is what the start screen's actions and
+// the editor's prompts are made of — one shape, so a button behaves the
+// same wherever it appears.
+func drawButton(dst *ebiten.Image, r rect, label, key string, style buttonStyle, av animValues) {
+	if style == btnDisabled {
+		drawPanel(dst, r, colBG, colBarline)
+		drawText(dst, truncateW(label, r.w-14), centreX(truncateW(label, r.w-14), r.x, r.w), r.y+7, colBarline)
+		if key != "" {
+			drawTextSmall(dst, key, r.x+(r.w-textWSmall(key))/2, r.y+24, colBarline)
+		}
+		return
+	}
+	fill, edge, text := colPanel, colPanelEdge, colHUD
+	if style == btnPrimary {
+		fill, edge, text = colFocus, colInferred, colNote
+	}
+	fill = lerpCol(fill, lerpCol(fill, colNote, 0.16), av.hover)
+	edge = lerpCol(edge, colNote, av.hover)
+	r = av.animate(r)
+	drawPanel(dst, r, fill, edge)
+
+	label = truncateW(label, r.w-14)
+	if key == "" {
+		drawText(dst, label, centreX(label, r.x, r.w), r.y+(r.h-uiTextH)/2+1, text)
+	} else {
+		drawText(dst, label, centreX(label, r.x, r.w), r.y+6, text)
+		drawTextSmall(dst, key, r.x+(r.w-textWSmall(key))/2, r.y+23, lerpCol(colDim, colNote, av.hover))
+	}
+	drawFlash(dst, r, av)
 }
 
 // iconKind names the transport glyphs. They are drawn as shapes rather
@@ -217,14 +273,14 @@ const (
 )
 
 // drawIconButton paints one transport button: a panel with a glyph in it.
-func drawIconButton(dst *ebiten.Image, r rect, k iconKind, hover bool) {
-	fill, edge := colPanel, colPanelEdge
-	if hover {
-		fill, edge = colHover, colDim
-	}
+func drawIconButton(dst *ebiten.Image, r rect, k iconKind, av animValues) {
+	fill := lerpCol(colPanel, colHover, av.hover)
+	edge := lerpCol(colPanelEdge, colDim, av.hover)
+	r = av.animate(r)
 	drawPanel(dst, r, fill, edge)
 	cx, cy := r.x+r.w/2, r.y+r.h/2
 	drawIcon(dst, k, cx, cy, colNote)
+	drawFlash(dst, r, av)
 }
 
 // drawIcon paints a transport glyph centred on (cx, cy).

@@ -373,3 +373,140 @@ func TestOffsetHelpers(t *testing.T) {
 		t.Errorf("after recalibration ConfidenceFor = %g, want 0.95", conf)
 	}
 }
+
+// --- the written-pieces list and the managed folder ----------------------
+
+func TestAddCreatedMovesToTheFrontAndCaps(t *testing.T) {
+	var c Config
+	for i := 0; i < MaxCreated+5; i++ {
+		c.AddCreated(filepath.Join("dir", fmt.Sprintf("p%02d.gtab", i)))
+	}
+	if len(c.Created) != MaxCreated {
+		t.Fatalf("got %d written pieces, want the %d cap", len(c.Created), MaxCreated)
+	}
+	// Most recent first.
+	if !strings.HasSuffix(c.Created[0], fmt.Sprintf("p%02d.gtab", MaxCreated+4)) {
+		t.Errorf("the front of the list is %q, want the last one written", c.Created[0])
+	}
+	// Re-writing a piece moves it to the front rather than duplicating it.
+	again := c.Created[3]
+	c.AddCreated(again)
+	if c.Created[0] != again {
+		t.Errorf("re-writing a piece left it at %q, want it at the front", c.Created[0])
+	}
+	seen := map[string]bool{}
+	for _, p := range c.Created {
+		if seen[p] {
+			t.Errorf("%q is listed twice", p)
+		}
+		seen[p] = true
+	}
+}
+
+func TestForgetCreated(t *testing.T) {
+	var c Config
+	c.AddCreated("a.gtab")
+	c.AddCreated("b.gtab")
+	c.ForgetCreated("a.gtab")
+	if len(c.Created) != 1 || !strings.HasSuffix(c.Created[0], "b.gtab") {
+		t.Errorf("got %v, want only b.gtab", c.Created)
+	}
+	c.ForgetCreated("b.gtab")
+	if c.Created != nil {
+		t.Errorf("a drained list is %v, want nil so it stays out of the JSON", c.Created)
+	}
+	c.ForgetCreated("never-there.gtab") // must not panic
+}
+
+func TestCreatedSurvivesASaveAndLoad(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(EnvConfigDir, dir)
+	var c Config
+	c.AddCreated(filepath.Join(dir, "mine.gtab"))
+	c.HideStartHint = true
+	if err := c.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got.Created) != 1 {
+		t.Errorf("got %d written pieces back, want 1", len(got.Created))
+	}
+	if !got.HideStartHint {
+		t.Error("the dismissed start hint did not survive the round trip")
+	}
+	if got.Version != CurrentVersion {
+		t.Errorf("loaded version %d, want %d", got.Version, CurrentVersion)
+	}
+}
+
+func TestOlderConfigMigratesForward(t *testing.T) {
+	// A version-2 file — no sync trim, no written pieces — has to load
+	// with those fields at their documented defaults rather than being
+	// refused.
+	dir := t.TempDir()
+	t.Setenv(EnvConfigDir, dir)
+	old := `{"version":2,"recents":["a.gp"],"countInBeats":4}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Version != CurrentVersion {
+		t.Errorf("migrated to version %d, want %d", got.Version, CurrentVersion)
+	}
+	if got.CountInBeats != 4 || len(got.Recents) != 1 {
+		t.Errorf("migration lost stored settings: %+v", got)
+	}
+	if got.SyncTrimMS != 0 || got.Created != nil || got.HideStartHint {
+		t.Errorf("migration invented values for fields the old file had none of: %+v", got)
+	}
+}
+
+func TestPiecesDirIsUnderTheConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(EnvConfigDir, dir)
+	got, err := PiecesDir()
+	if err != nil {
+		t.Fatalf("PiecesDir: %v", err)
+	}
+	if want := filepath.Join(dir, PiecesDirName); got != want {
+		t.Errorf("PiecesDir() = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(got); !os.IsNotExist(err) {
+		t.Error("PiecesDir created the folder; only EnsurePiecesDir should")
+	}
+	made, err := EnsurePiecesDir()
+	if err != nil {
+		t.Fatalf("EnsurePiecesDir: %v", err)
+	}
+	if fi, err := os.Stat(made); err != nil || !fi.IsDir() {
+		t.Errorf("EnsurePiecesDir did not make a directory: %v", err)
+	}
+	// Idempotent: a second call on an existing folder is fine.
+	if _, err := EnsurePiecesDir(); err != nil {
+		t.Errorf("EnsurePiecesDir on an existing folder: %v", err)
+	}
+}
+
+func TestInPiecesDir(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(EnvConfigDir, dir)
+	pieces := filepath.Join(dir, PiecesDirName)
+	if !InPiecesDir(filepath.Join(pieces, "mine.gtab")) {
+		t.Error("a file in the pieces folder is not recognised")
+	}
+	if InPiecesDir(filepath.Join(dir, "elsewhere.gtab")) {
+		t.Error("a file beside the folder is claimed as managed")
+	}
+	if InPiecesDir(filepath.Join(pieces, "sub", "deep.gtab")) {
+		t.Error("a file in a subfolder is claimed as managed")
+	}
+	if InPiecesDir("") {
+		t.Error("the empty path is claimed as managed")
+	}
+}

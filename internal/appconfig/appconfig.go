@@ -45,7 +45,9 @@ const EnvConfigDir = "GUITARTUTOR_CONFIG_DIR"
 //
 //	1 — devices, latency offsets and confidence, SoundFont path.
 //	2 — adds recents, count-in beats, last browse directory, window size.
-const CurrentVersion = 2
+//	3 — adds the audio/visual sync trim.
+//	4 — adds the written-pieces list and the start hint's hidden flag.
+const CurrentVersion = 4
 
 // firstVersion is the oldest schema this build can migrate forward. It is
 // also what a file carrying no version at all is treated as: Save has
@@ -113,7 +115,30 @@ type Config struct {
 	// size, so a config that has never seen a resize imposes nothing.
 	WindowWidth  int `json:"windowWidth,omitempty"`
 	WindowHeight int `json:"windowHeight,omitempty"`
+	// Created lists recently WRITTEN pieces, most recent first, at most
+	// MaxCreated of them — the counterpart to Recents, which lists the
+	// ones that were opened. A piece appears in both when it is written
+	// and then practised, which is correct: it is recent in both senses.
+	// Use AddCreated/ForgetCreated rather than editing the slice.
+	Created []string `json:"created,omitempty"`
+	// HideStartHint suppresses the start screen's getting-started strip.
+	// Everything it points at is reachable from settings, so a user who
+	// has read it once should be able to put it away for good.
+	HideStartHint bool `json:"hideStartHint,omitempty"`
+	// SyncTrimMS nudges the playhead against the sound, in milliseconds.
+	// The application already subtracts the output buffering it can
+	// measure, so this is for what it cannot: the few milliseconds the
+	// hardware and its driver hold onto after the software has handed the
+	// audio over. Positive moves the notation LATER — use it when the
+	// playhead still runs ahead of what you hear. Zero, the default, means
+	// no trim, and the measured compensation stands on its own.
+	SyncTrimMS int `json:"syncTrimMS,omitempty"`
 }
+
+// MaxSyncTrimMS bounds the manual sync trim either way. A quarter of a
+// second is already far more than any driver holds; past that the trim
+// stops correcting an error and starts being one.
+const MaxSyncTrimMS = 250
 
 // Path returns the config file path: $GUITARTUTOR_CONFIG_DIR/config.json
 // when the override is set, else os.UserConfigDir()/guitartutor/config.json.
@@ -172,10 +197,11 @@ func Load() (Config, error) {
 // skipping several releases.
 //
 // The 1 -> 2 step adds recents, count-in, the last browse directory and
-// the window size, every one of which is documented as "zero means the
-// default" — so the migration has no field to rewrite, only the version
-// to advance. The step is spelled out anyway, because the next one will
-// not be so lucky and this is where it goes.
+// the window size, and the 2 -> 3 step adds the sync trim; every one of
+// those is documented as "zero means the default", so neither migration
+// has a field to rewrite, only the version to advance. The steps are
+// spelled out anyway, because one of them will eventually not be so lucky
+// and this is where it goes.
 func (c *Config) migrate() {
 	if c.Version < firstVersion {
 		// No stamp (or a nonsense one): treat it as the original shape.
@@ -184,14 +210,27 @@ func (c *Config) migrate() {
 	if c.Version < 2 {
 		c.Version = 2
 	}
+	if c.Version < 3 {
+		c.Version = 3
+	}
+	if c.Version < 4 {
+		c.Version = 4
+	}
 	// Repair rather than trust: the file may have been hand-edited, or
 	// written by a build with a different cap.
 	c.Recents = sanitizeRecents(c.Recents)
+	c.Created = sanitizeCreated(c.Created)
 	if c.CountInBeats < 0 {
 		c.CountInBeats = 0
 	}
 	if c.WindowWidth < 0 {
 		c.WindowWidth = 0
+	}
+	if c.SyncTrimMS < -MaxSyncTrimMS {
+		c.SyncTrimMS = -MaxSyncTrimMS
+	}
+	if c.SyncTrimMS > MaxSyncTrimMS {
+		c.SyncTrimMS = MaxSyncTrimMS
 	}
 	if c.WindowHeight < 0 {
 		c.WindowHeight = 0

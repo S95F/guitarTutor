@@ -8,7 +8,8 @@
 //
 //	go run ./tools/uishot -screen practice -o practice.png
 //
-// screens: start, settings, practice, practice-live, help, tuner
+// screens: start, start-bare, settings, editor, editor-new, editor-text,
+// editor-help, practice, practice-live, help, tuner
 package main
 
 import (
@@ -17,9 +18,11 @@ import (
 	"image"
 	"image/png"
 	"os"
+	"path/filepath"
 
 	"github.com/hajimehoshi/ebiten/v2"
 
+	"github.com/S95F/guitarTutor/internal/edit"
 	"github.com/S95F/guitarTutor/internal/engine"
 	"github.com/S95F/guitarTutor/internal/pitch"
 	"github.com/S95F/guitarTutor/internal/practice"
@@ -38,7 +41,7 @@ const (
 )
 
 func main() {
-	which := flag.String("screen", "practice", "start, settings, practice, practice-live, help or tuner")
+	which := flag.String("screen", "practice", "start, start-bare, settings, editor, editor-new, editor-text, editor-help, practice, practice-live, help or tuner")
 	out := flag.String("o", "shot.png", "output PNG")
 	piece := flag.String("piece", "testdata/fixture_riff.gtab", "piece for the practice screens")
 	flag.Parse()
@@ -61,16 +64,67 @@ func main() {
 // build makes the screen to render.
 func build(which, piece string) (ui.Screen, error) {
 	switch which {
-	case "start", "settings":
-		sh, browser := ui.NewBrowserShell(ui.Services{Prefs: &memPrefs{}, Audio: fakeAudio{}})
+	case "start", "start-bare", "settings":
+		prefs := &memPrefs{}
+		lib := shotLibrary{}
+		if which == "start" {
+			// Real files in a temp folder, so the shot shows what the
+			// screen looks like in use rather than a column of "missing".
+			dir, err := shotPieceFiles()
+			if err != nil {
+				return nil, err
+			}
+			prefs.recents = []string{
+				filepath.Join(dir, "Black Dog.gp"),
+				filepath.Join(dir, "little-wing.musicxml"),
+				filepath.Join(dir, "Sultans of Swing.mid"),
+			}
+			prefs.created = []string{
+				filepath.Join(dir, "Warmup in A.gtab"),
+				filepath.Join(dir, "Blues turnaround.gtab"),
+			}
+			lib.dir = dir
+			lib.pieces = shotPieces(dir)
+		}
+		sh, browser := ui.NewBrowserShell(ui.Services{Prefs: prefs, Audio: fakeAudio{}, Library: lib})
 		browser.SetSettingsOpener(func() {})
 		browser.SetOpenDialog(func(string) {})
+		browser.SetNewPiece(func() {})
+		browser.SetEditPiece(func(string) {})
 		if which == "settings" {
 			st := ui.NewSettings(sh)
 			st.SetFilePicker(func([]string, func(string)) {})
 			return st, nil
 		}
 		return browser, nil
+
+	case "editor-new":
+		ed := ui.NewEditor(nil)
+		ed.SetSaveDialog(func(string) {})
+		ed.SetPractice(func(string) {})
+		return ed, nil
+
+	case "editor", "editor-text", "editor-help":
+		s, err := textfmt.ParseFile(piece)
+		if err != nil {
+			return nil, err
+		}
+		ed, err := ui.NewEditorFor(nil, s, piece)
+		if err != nil {
+			return nil, err
+		}
+		ed.SetSaveDialog(func(string) {})
+		ed.SetPractice(func(string) {})
+		// A cursor a couple of beats in, so the caret and the lit cell are
+		// somewhere the eye can find them.
+		ed.Doc().GoTo(edit.Cursor{Bar: 0, Beat: 2, Str: 5})
+		switch which {
+		case "editor-text":
+			ed.ShowTextView(true)
+		case "editor-help":
+			ed.SetHelpOpen(true)
+		}
+		return ed, nil
 	}
 
 	s, err := textfmt.ParseFile(piece)
@@ -186,20 +240,30 @@ func save(img *ebiten.Image, path string) error {
 // --- stand-ins for the services a real run would supply ------------------
 
 type memPrefs struct {
-	sf      string
-	countIn int
-	cap     string
-	play    string
+	sf       string
+	countIn  int
+	cap      string
+	play     string
+	trim     int
+	recents  []string
+	created  []string
+	hideHint bool
 }
 
-func (p *memPrefs) Recents() []string         { return nil }
-func (p *memPrefs) AddRecent(string)          {}
+func (p *memPrefs) Recents() []string         { return p.recents }
+func (p *memPrefs) AddRecent(path string)     { p.recents = append([]string{path}, p.recents...) }
+func (p *memPrefs) Created() []string         { return p.created }
+func (p *memPrefs) AddCreated(path string)    { p.created = append([]string{path}, p.created...) }
+func (p *memPrefs) HintHidden() bool          { return p.hideHint }
+func (p *memPrefs) SetHintHidden(h bool)      { p.hideHint = h }
 func (p *memPrefs) SoundFont() string         { return p.sf }
 func (p *memPrefs) SetSoundFont(v string)     { p.sf = v }
 func (p *memPrefs) CountIn() int              { return p.countIn }
 func (p *memPrefs) SetCountIn(v int)          { p.countIn = v }
 func (p *memPrefs) Devices() (string, string) { return p.cap, p.play }
 func (p *memPrefs) SetDevices(c, pl string)   { p.cap, p.play = c, pl }
+func (p *memPrefs) SyncTrim() int             { return p.trim }
+func (p *memPrefs) SetSyncTrim(ms int)        { p.trim = ms }
 func (p *memPrefs) Save() error               { return nil }
 func (p *memPrefs) Path() string              { return `C:\Users\you\AppData\Roaming\guitartutor\config.json` }
 
@@ -219,4 +283,48 @@ func (fakeAudio) Devices() ([]ui.DeviceOption, []ui.DeviceOption, error) {
 func (fakeAudio) CalibratedOffset(string, string) (int, bool) { return 0, false }
 func (fakeAudio) Calibrate(string, string, func(float64)) (int, float64, error) {
 	return 0, 0, fmt.Errorf("not in a screenshot")
+}
+
+// shotLibrary stands in for the pieces folder in a screenshot.
+type shotLibrary struct {
+	dir    string
+	pieces []ui.PieceInfo
+}
+
+func (l shotLibrary) Dir() string                   { return l.dir }
+func (l shotLibrary) Scan() ([]ui.PieceInfo, error) { return l.pieces, nil }
+
+// shotPieceFiles writes the files the start-screen shot lists, so the
+// entries are real rather than flagged missing.
+func shotPieceFiles() (string, error) {
+	dir := filepath.Join(os.TempDir(), "guitartutor-shot", "pieces")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	for _, name := range []string{
+		"Black Dog.gp", "little-wing.musicxml", "Sultans of Swing.mid",
+		"Warmup in A.gtab", "Blues turnaround.gtab",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("placeholder"), 0o644); err != nil {
+			return "", err
+		}
+	}
+	return dir, nil
+}
+
+// shotPieces is a plausible library: a few written pieces, described the
+// way the real scanner describes them, and one that will not parse.
+func shotPieces(dir string) []ui.PieceInfo {
+	return []ui.PieceInfo{
+		{Path: filepath.Join(dir, "warmup.gtab"), Name: "warmup", Title: "Warmup in A",
+			Summary: "4/4 · 92 BPM · 8 bars"},
+		{Path: filepath.Join(dir, "turnaround.gtab"), Name: "turnaround", Title: "Blues turnaround",
+			Summary: "12/8 · 76 BPM · 4 bars · 2 tracks"},
+		{Path: filepath.Join(dir, "dropd.gtab"), Name: "dropd", Title: "Drop D riff",
+			Summary: "4/4 · 148 BPM · 16 bars · altered tuning"},
+		{Path: filepath.Join(dir, "etude.gtab"), Name: "etude", Title: "Etude no. 1",
+			Summary: "3/4 · 60 BPM · 24 bars · capo 2"},
+		{Path: filepath.Join(dir, "broken.gtab"), Name: "broken",
+			Problem: "line 7:14: bar underfull: beats fill 2880 of 3840 ticks"},
+	}
 }

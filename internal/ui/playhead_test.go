@@ -3,6 +3,7 @@ package ui
 import (
 	"math"
 	"testing"
+	"time"
 
 	"github.com/S95F/guitarTutor/internal/engine"
 	"github.com/S95F/guitarTutor/internal/score"
@@ -179,5 +180,136 @@ func TestAppPositionFollowsASeek(t *testing.T) {
 	}
 	if got, want := a.xAtTick(3840), screenW*playheadX; math.Abs(got-want) > 0.5 {
 		t.Errorf("the sought tick draws at x=%.1f, want the playhead's %.1f", got, want)
+	}
+}
+
+// --- drawing where the sound is ------------------------------------------
+
+// TestSoundingTickWindsBackByTheBuffer is the correction itself: the
+// engine's position is where the music is being RENDERED, and the drawn
+// position has to be where it is being heard.
+func TestSoundingTickWindsBackByTheBuffer(t *testing.T) {
+	// 120 BPM at PPQ 960 is 1920 ticks a second, so a tenth of a second of
+	// buffering is 192 ticks — a full sixteenth note.
+	s := engine.PlayPos{Tick: 5000, TicksPerSecond: 1920, Advancing: true}
+	got := soundingTick(5000, s, 0.1)
+	if want := 5000.0 - 192; math.Abs(got-want) > 0.001 {
+		t.Errorf("got %.1f, want %.1f", got, want)
+	}
+}
+
+// TestSoundingTickScalesWithTempo checks that the compensation is a fixed
+// amount of TIME and not a fixed number of ticks: the same buffer is more
+// notation at a faster tempo, which is the whole reason it cannot be a
+// constant.
+func TestSoundingTickScalesWithTempo(t *testing.T) {
+	slow := soundingTick(10000, engine.PlayPos{Tick: 10000, TicksPerSecond: 960, Advancing: true}, 0.1)
+	fast := soundingTick(10000, engine.PlayPos{Tick: 10000, TicksPerSecond: 1920, Advancing: true}, 0.1)
+	if 10000-fast <= 10000-slow {
+		t.Errorf("compensated %.1f ticks at double tempo and %.1f at single; the faster one has to be bigger",
+			10000-fast, 10000-slow)
+	}
+}
+
+// TestSoundingTickLeavesAStoppedTransportAlone: a paused playhead is a
+// cursor, not a clock. It is what a click seeks to and what A and B set
+// the loop from, so it has to mean the tick the engine will resume at.
+func TestSoundingTickLeavesAStoppedTransportAlone(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		pos  engine.PlayPos
+	}{
+		{"paused", engine.PlayPos{Tick: 5000, TicksPerSecond: 1920, Advancing: false}},
+		{"counting in", engine.PlayPos{Tick: 0, TicksPerSecond: 1920, Advancing: false}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := soundingTick(tt.pos.Tick, tt.pos, 0.1); got != tt.pos.Tick {
+				t.Errorf("got %.1f, want the engine's own %.1f", got, tt.pos.Tick)
+			}
+		})
+	}
+}
+
+// TestSoundingTickNeverGoesNegative: the first tenth of a second of a
+// piece is buffer that has not reached the speakers, so the compensated
+// position would be before the start of the score.
+func TestSoundingTickNeverGoesNegative(t *testing.T) {
+	s := engine.PlayPos{Tick: 50, TicksPerSecond: 1920, Advancing: true}
+	if got := soundingTick(50, s, 0.1); got != 0 {
+		t.Errorf("got %.1f, want 0", got)
+	}
+}
+
+// TestSoundingTickIgnoresNothingToCompensate covers the duplex path, where
+// the engine renders into the device callback and there is essentially no
+// lead at all.
+func TestSoundingTickIgnoresNothingToCompensate(t *testing.T) {
+	s := engine.PlayPos{Tick: 5000, TicksPerSecond: 1920, Advancing: true}
+	if got := soundingTick(5000, s, 0); got != 5000 {
+		t.Errorf("got %.1f, want the position unchanged", got)
+	}
+}
+
+// TestTrackLatencyTakesTheFirstReadingWhole: easing in from zero would
+// draw the first second of every piece with a playhead sliding backwards
+// into place.
+func TestTrackLatencyTakesTheFirstReadingWhole(t *testing.T) {
+	a := &App{outLatency: func() time.Duration { return 100 * time.Millisecond }}
+	a.trackLatency()
+	if math.Abs(a.latency-0.1) > 1e-9 {
+		t.Errorf("the first reading settled at %.4f s, want the reported 0.1", a.latency)
+	}
+}
+
+// TestTrackLatencySmoothsAndConverges: the reported figure is exact but
+// jagged, so it is followed rather than taken, and it must actually get
+// there.
+func TestTrackLatencySmoothsAndConverges(t *testing.T) {
+	reported := 100 * time.Millisecond
+	a := &App{outLatency: func() time.Duration { return reported }}
+	a.trackLatency()
+	reported = 50 * time.Millisecond
+	a.trackLatency()
+	if a.latency >= 0.1 || a.latency <= 0.05 {
+		t.Fatalf("after one step the estimate is %.4f s; it should be between the old 0.1 and the new 0.05", a.latency)
+	}
+	// A fifth of a second of display frames is enough to arrive.
+	for i := 0; i < 12; i++ {
+		a.trackLatency()
+	}
+	if math.Abs(a.latency-0.05) > 0.02 {
+		t.Errorf("the estimate settled at %.4f s, want about 0.05", a.latency)
+	}
+}
+
+// TestTrackLatencyRefusesNonsense guards against a reading that would
+// drag the notation somewhere useless. Compensating by an absurd figure is
+// worse than not compensating.
+func TestTrackLatencyRefusesNonsense(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		reported time.Duration
+		want     float64
+	}{
+		{"negative", -50 * time.Millisecond, 0},
+		{"absurd", 5 * time.Second, latencyCap},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			a := &App{outLatency: func() time.Duration { return tt.reported }}
+			a.trackLatency()
+			if math.Abs(a.latency-tt.want) > 1e-9 {
+				t.Errorf("got %.4f s, want %.4f", a.latency, tt.want)
+			}
+		})
+	}
+}
+
+// TestNoLatencyHookLeavesThePlayheadAlone: an integrator that wires
+// nothing gets exactly the behaviour that existed before this was added.
+func TestNoLatencyHookLeavesThePlayheadAlone(t *testing.T) {
+	a := &App{}
+	a.trackLatency()
+	if a.latency != 0 || a.latencyArmed {
+		t.Errorf("latency=%v armed=%v, want an untouched estimate", a.latency, a.latencyArmed)
 	}
 }

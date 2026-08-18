@@ -1,9 +1,28 @@
 package ui
 
 // The start screen: the first thing a user sees when the binary is
-// launched with no arguments. One list — recently opened pieces, or the
-// getting-started checklist until there are any — beside an open card,
-// plus drag-and-drop onto the window.
+// launched with no arguments.
+//
+// It lands on the pieces, in three panes, because there are three honest
+// answers to "what do I want to play":
+//
+//   - RECENT is what was opened lately, from wherever it lives. A path,
+//     and nothing more is known about it until it is opened.
+//   - WRITTEN is what was made here lately — the same kind of shortcut,
+//     for the other kind of piece.
+//   - LIBRARY is the application's own folder, DESCRIBED. Every piece in
+//     it has been read, so it is listed by what the music is (its title,
+//     its meter, its tempo, how many bars) rather than by file name. It
+//     is the one pane that is a place rather than a history: nothing
+//     falls off the end of it, and a piece written six months ago is
+//     still there.
+//
+// What used to stand in this space on a first run — a getting-started
+// checklist occupying the whole left pane until a piece had been opened —
+// is now a strip across the top that can be put away for good (see
+// hint.go). Every step it names is also a row in settings, so a screen
+// that keeps insisting on them is a screen that never stops being a
+// tutorial.
 //
 // Opening a file goes through the OPERATING SYSTEM's file dialog, not an
 // in-app directory listing. The screen used to carry its own folder pane
@@ -20,6 +39,12 @@ package ui
 // state and can be driven directly from a test; Update only translates
 // the keyboard and mouse into those calls, and Draw is a projection of
 // the fields they set.
+//
+// The selection is per pane. sel and top are the FOCUSED pane's, and the
+// others' are parked in saved — rather than an array indexed by pane
+// everywhere — so that every method about moving a selection stays a
+// method about one list, and moving between panes is the only place that
+// has to know there is more than one.
 //
 // Drag-and-drop note. ebiten.DroppedFiles returns an fs.FS whose root
 // lists the dropped items by base name only — the real path is not part
@@ -42,27 +67,53 @@ import (
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
-	"github.com/hajimehoshi/ebiten/v2/vector"
 )
 
-// Layout, in logical pixels (screenW x screenH). The recents list owns
-// the left, the open card the right.
+// Layout, in logical pixels (screenW x screenH). The panes divide the
+// page width evenly; everything vertical is computed in layout(), because
+// the hint strip changes height when it is put away and the panes take
+// the room it gives back.
 const (
-	brwRecentX    = 24
-	brwRecentW    = 600
-	brwCardX      = 672
-	brwCardW      = 584
-	brwListTop    = 156
-	brwRecentRowH = 40
-	brwRecentRows = 10
-	// brwStatusY leaves room for the worst-case status stack — an error
-	// line plus four warnings plus the overflow line — to end above the
-	// footer at uiFooterY (a browser test pins the arithmetic).
-	brwStatusY   = 582
-	brwNameScale = 1.35
-	brwOpenBtnW  = 280.0
-	brwOpenBtnH  = 48.0
+	brwPaneGap   = 20.0
+	brwPaneHeadH = 30.0 // a pane's title band, above its rows
+	brwRowH      = 42.0
+	brwActionH   = 44.0
+	brwNameScale = 1.2
+	// brwStatusLines is the band under the panes that the status stack
+	// gets, and that the panes therefore stop above whether or not there
+	// is anything in it. Reserving room for the worst case — an error plus
+	// every warning an import can produce — would hold a third of the
+	// screen empty for something that appears for a few seconds after an
+	// import; reserving three lines and letting a long stack say how many
+	// more there are keeps both the panes and the messages readable.
+	brwStatusLines = 4
+	// brwStatusWarnings is how many warnings are listed before the rest
+	// are counted. The band has to hold the error line, these, and the
+	// "and N more" line under them — four lines for two warnings, which is
+	// what a browser test checks rather than trusts.
+	brwStatusWarnings = 2
 )
+
+// A browserPane is one of the three lists of pieces.
+type browserPane int
+
+const (
+	paneRecent browserPane = iota
+	paneCreated
+	paneLibrary
+	paneCount
+)
+
+// paneTitles are the headings, and paneEmpty what a pane says instead of
+// rows when it has none. An empty pane that says nothing is a pane the
+// user assumes is broken.
+var paneTitles = [paneCount]string{"RECENT", "WRITTEN HERE", "YOUR LIBRARY"}
+
+var paneEmpty = [paneCount]string{
+	"pieces you open will be listed here",
+	"pieces you write here will be listed here",
+	"nothing in the folder yet — write a piece and it lands here",
+}
 
 // colMissing tints a recent whose file is no longer on disk. Every other
 // colour this screen uses is the shared palette in theme.go.
@@ -102,12 +153,17 @@ func browserSupported(name string) bool {
 	return browserPieceExts[strings.ToLower(filepath.Ext(name))]
 }
 
-// A browserEntry is one selectable row of the recents list.
+// A browserEntry is one selectable row of a pane.
 type browserEntry struct {
-	name    string // base name, shown prominently
-	path    string // full path, what gets opened
-	parent  string // containing directory, shown dimmed
-	missing bool   // a recent whose file is no longer on disk
+	name string // shown prominently: a file name, or a piece's own title
+	path string // full path, what gets opened
+	// sub is the quiet second line: the containing directory for a path,
+	// or the description of the music for a library piece.
+	sub string
+	// missing marks a listed path whose file is no longer on disk, and
+	// problem a library piece the application could not read.
+	missing bool
+	problem bool
 }
 
 // browserRecentRemover is an optional extension of Prefs: an
@@ -129,6 +185,12 @@ type dialogResult struct {
 	gen  int
 }
 
+// A libraryResult is what a background scan posts back.
+type libraryResult struct {
+	pieces []PieceInfo
+	err    string
+}
+
 // A Browser is the start screen. It lists recently opened pieces (or the
 // first-run checklist), launches the OS file dialog to open new ones,
 // opens the selection through the Shell, and reports import errors and
@@ -137,9 +199,19 @@ type dialogResult struct {
 type Browser struct {
 	sh *Shell
 
-	recents []browserEntry
-	sel     int
-	top     int
+	// panes holds each list's rows; the focused one's cursor is sel/top
+	// and the others' are parked in saved (see focusPane).
+	panes [paneCount][]browserEntry
+	focus browserPane
+	sel   int
+	top   int
+	saved [paneCount]struct{ sel, top int }
+
+	// libErr is why the last library scan failed, and libScanning is true
+	// while one is in flight. A scan reads and parses every piece in the
+	// folder, so it runs off the game loop and posts to libMail.
+	libErr      string
+	libScanning bool
 	// forgotten holds recents dismissed with Delete, so they stay gone
 	// for this session even when Prefs cannot remove them permanently.
 	// Opening a piece again clears its entry: a pane that keeps hiding a
@@ -159,7 +231,17 @@ type Browser struct {
 	errMsg string
 	warns  []string
 
+	// hintOpen mirrors the stored "has the getting-started strip been put
+	// away" flag, so the screen can be driven without preferences.
+	hintOpen bool
+
 	settings func()
+	// newPiece opens the editor on a blank piece, and editPiece opens it
+	// on an existing one. The UI package cannot build an editor's file
+	// dialogs, so the application wires both; until it does, the two
+	// buttons are drawn disabled rather than silently doing nothing.
+	newPiece  func()
+	editPiece func(path string)
 	// openDialog launches the OS file dialog rooted at the given
 	// directory. The integrator wires it (SetOpenDialog); it must not
 	// block — it starts a goroutine that eventually posts to
@@ -177,9 +259,11 @@ type Browser struct {
 	helpOpen bool
 
 	// Mouse state, refreshed every frame.
-	ptr      pointer
-	hoverIdx int // recents row under the cursor, -1 for none
-	wheelAcc float64
+	ptr       pointer
+	anim      animator
+	hoverIdx  int         // row under the cursor, -1 for none
+	hoverPane browserPane // the pane it is in; meaningless when hoverIdx is -1
+	wheelAcc  float64
 
 	// mu guards the dialog mailbox, written by the dialog goroutine and
 	// drained by Update on the game loop. dialogGen (also under mu) is
@@ -189,6 +273,7 @@ type Browser struct {
 	// (verification follow-up).
 	mu        sync.Mutex
 	pending   *dialogResult
+	libMail   *libraryResult
 	dialogGen int
 	// launchGen is the generation the outstanding dialog was LAUNCHED
 	// under; its result is stamped with this, not with the generation at
@@ -200,7 +285,12 @@ type Browser struct {
 // from the shell's preferences.
 func NewBrowser(sh *Shell) *Browser {
 	b := &Browser{sh: sh, forgotten: map[string]bool{}, hoverIdx: -1}
+	b.hintOpen = true
+	if pr := b.prefs(); pr != nil {
+		b.hintOpen = !pr.HintHidden()
+	}
 	b.reloadRecents()
+	b.rescanLibrary()
 	return b
 }
 
@@ -235,6 +325,14 @@ func (browserPlaceholder) Draw(dst *ebiten.Image) { dst.Fill(colBG) }
 // application wires it here; until it does, S is inert and the hint for
 // it is not drawn.
 func (b *Browser) SetSettingsOpener(fn func()) { b.settings = fn }
+
+// SetNewPiece installs the action behind the "Write a new piece" button
+// and the N key: opening the tablature editor on a blank piece.
+func (b *Browser) SetNewPiece(fn func()) { b.newPiece = fn }
+
+// SetEditPiece installs the action behind the "Edit selected" button and
+// the E key: opening the editor on a piece already on the recents list.
+func (b *Browser) SetEditPiece(fn func(path string)) { b.editPiece = fn }
 
 // SetOpenDialog installs the OS file dialog launcher behind the open
 // card, the O key, and a dropped folder. fn receives the directory the
@@ -321,11 +419,13 @@ func (b *Browser) prefs() Prefs {
 // folder has since vanished, the OS dialog falls back to its own
 // default, which is the graceful outcome anyway.
 func (b *Browser) startDir() string {
-	for _, e := range b.recents {
-		if e.missing {
-			continue
+	for _, p := range b.paneOrder() {
+		for _, e := range b.panes[p] {
+			if e.missing {
+				continue
+			}
+			return filepath.Dir(e.path)
 		}
-		return filepath.Dir(e.path)
 	}
 	if h, err := os.UserHomeDir(); err == nil && h != "" {
 		return h
@@ -364,40 +464,177 @@ func (b *Browser) statRecent(path string) (fs.FileInfo, error) {
 // The cache is rebuilt from the current list on each pass, so a path
 // that leaves the recents stops being remembered.
 func (b *Browser) reloadRecents() {
-	b.recents = nil
 	known := b.recentStatus
 	status := make(map[string]bool, len(known))
-	if pr := b.prefs(); pr != nil {
-		for _, p := range pr.Recents() {
+	build := func(paths []string) []browserEntry {
+		var out []browserEntry
+		for _, p := range paths {
 			if b.forgotten[p] {
 				continue
 			}
-			missing, seen := known[p]
+			missing, seen := status[p]
 			if !seen {
-				fi, err := b.statRecent(p)
-				missing = err != nil || fi == nil || fi.IsDir()
+				if missing, seen = known[p]; !seen {
+					fi, err := b.statRecent(p)
+					missing = err != nil || fi == nil || fi.IsDir()
+				}
 			}
 			status[p] = missing
-			b.recents = append(b.recents, browserEntry{
+			out = append(out, browserEntry{
 				name:    filepath.Base(p),
 				path:    p,
-				parent:  filepath.Dir(p),
+				sub:     filepath.Dir(p),
 				missing: missing,
 			})
 		}
+		return out
 	}
+	var recents, created []string
+	if pr := b.prefs(); pr != nil {
+		recents, created = pr.Recents(), pr.Created()
+	}
+	b.panes[paneRecent] = build(recents)
+	b.panes[paneCreated] = build(created)
 	b.recentStatus = status
 	b.setSel(b.sel)
 }
 
-// listLen is how many rows the list holds: recents, or the checklist
-// standing in for them on a first run.
-func (b *Browser) listLen() int {
-	if b.onboarding() {
-		return len(b.stepList())
-	}
-	return len(b.recents)
+// --- panes -------------------------------------------------------------
+
+// entries are the focused pane's rows.
+func (b *Browser) entries() []browserEntry { return b.panes[b.focus] }
+
+// hasLibrary reports whether this build manages a library at all, and
+// therefore whether the third pane exists.
+func (b *Browser) hasLibrary() bool {
+	return b.sh != nil && b.sh.Services().Library != nil
 }
+
+// paneOrder is the panes actually on screen, left to right.
+func (b *Browser) paneOrder() []browserPane {
+	if b.hasLibrary() {
+		return []browserPane{paneRecent, paneCreated, paneLibrary}
+	}
+	return []browserPane{paneRecent, paneCreated}
+}
+
+// focusPane moves the keyboard to another pane, parking the cursor of the
+// one being left and restoring the one being entered — so coming back to
+// a list finds it where it was rather than at the top.
+func (b *Browser) focusPane(p browserPane) {
+	if p < 0 || p >= paneCount || p == b.focus {
+		return
+	}
+	if !b.hasLibrary() && p == paneLibrary {
+		return
+	}
+	b.saved[b.focus].sel, b.saved[b.focus].top = b.sel, b.top
+	b.focus = p
+	b.sel, b.top = b.saved[p].sel, b.saved[p].top
+	b.setSel(b.sel)
+}
+
+// stepPane moves the focus one pane along, stopping at the ends rather
+// than wrapping: a list that jumps from the right-hand pane back to the
+// left is a list nobody can walk off the end of on purpose.
+func (b *Browser) stepPane(delta int) {
+	order := b.paneOrder()
+	at := 0
+	for i, p := range order {
+		if p == b.focus {
+			at = i
+		}
+	}
+	at += delta
+	if at < 0 || at >= len(order) {
+		return
+	}
+	b.focusPane(order[at])
+}
+
+// --- the library -------------------------------------------------------
+
+// rescanLibrary reads the managed folder on its own goroutine and posts
+// what it finds. Scanning parses every piece in the folder, which is
+// cheap per file and unbounded in the number of them, so it never runs on
+// the game loop.
+func (b *Browser) rescanLibrary() {
+	if !b.hasLibrary() || b.libScanning {
+		return
+	}
+	lib := b.sh.Services().Library
+	b.libScanning = true
+	go func() {
+		pieces, err := lib.Scan()
+		res := &libraryResult{pieces: pieces}
+		if err != nil {
+			res.err = err.Error()
+		}
+		b.mu.Lock()
+		b.libMail = res
+		b.mu.Unlock()
+	}()
+}
+
+// drainLibrary applies a finished scan on the game loop.
+func (b *Browser) drainLibrary() {
+	b.mu.Lock()
+	res := b.libMail
+	b.libMail = nil
+	b.mu.Unlock()
+	if res == nil {
+		return
+	}
+	b.libScanning = false
+	b.libErr = res.err
+	b.panes[paneLibrary] = libraryEntries(res.pieces)
+	if b.focus == paneLibrary {
+		b.setSel(b.sel)
+	} else {
+		b.saved[paneLibrary].sel, b.saved[paneLibrary].top =
+			browserClamp(b.saved[paneLibrary].sel, len(b.panes[paneLibrary])), 0
+	}
+}
+
+// libraryEntries turns described pieces into rows. The name shown is the
+// piece's own title where it has one — the library is the pane that knows
+// what the music IS, and falling back to the file name there would throw
+// that away.
+func libraryEntries(pieces []PieceInfo) []browserEntry {
+	out := make([]browserEntry, 0, len(pieces))
+	for _, p := range pieces {
+		name := strings.TrimSpace(p.Title)
+		if name == "" {
+			name = p.Name
+		}
+		sub, problem := p.Summary, false
+		if p.Problem != "" {
+			sub, problem = p.Problem, true
+			if name == "" {
+				name = p.Name
+			}
+		}
+		out = append(out, browserEntry{name: name, path: p.Path, sub: sub, problem: problem})
+	}
+	return out
+}
+
+// libraryNote is the line under the library pane: where the folder is, or
+// what went wrong reading it.
+func (b *Browser) libraryNote() (string, bool) {
+	switch {
+	case !b.hasLibrary():
+		return "", false
+	case b.libErr != "":
+		return b.libErr, true
+	case b.libScanning:
+		return "reading the folder…", false
+	}
+	return b.sh.Services().Library.Dir(), false
+}
+
+// listLen is how many rows the focused pane holds.
+func (b *Browser) listLen() int { return len(b.entries()) }
 
 // browserClamp constrains an index to [0, n), returning 0 for an empty
 // list.
@@ -437,7 +674,7 @@ func browserClampTop(sel, top, rows, n int) int {
 // stays visible.
 func (b *Browser) setSel(i int) {
 	b.sel = browserClamp(i, b.listLen())
-	b.top = browserClampTop(b.sel, b.top, brwRecentRows, b.listLen())
+	b.top = browserClampTop(b.sel, b.top, b.rowsPerPane(), b.listLen())
 }
 
 // move steps the selection by delta, clamping at both ends.
@@ -446,7 +683,7 @@ func (b *Browser) move(delta int) { b.setSel(b.sel + delta) }
 // scrollBy scrolls the viewport by delta rows without moving the
 // selection — the mouse wheel's behaviour.
 func (b *Browser) scrollBy(delta int) {
-	max := b.listLen() - brwRecentRows
+	max := b.listLen() - b.rowsPerPane()
 	if max < 0 {
 		max = 0
 	}
@@ -460,23 +697,31 @@ func (b *Browser) scrollBy(delta int) {
 	b.top = top
 }
 
-// activate opens whatever is selected: a recent piece, or a checklist
-// step's action on a first run. A recent that has gone missing says so
-// instead.
+// selected is the entry under the cursor, and whether there is one.
+func (b *Browser) selected() (browserEntry, bool) {
+	es := b.entries()
+	if b.sel < 0 || b.sel >= len(es) {
+		return browserEntry{}, false
+	}
+	return es[b.sel], true
+}
+
+// activate opens whatever is selected. An entry that has gone missing,
+// or one the application could not read, says so instead of failing
+// silently.
 func (b *Browser) activate() {
-	if b.onboarding() {
-		b.activateStep()
+	e, ok := b.selected()
+	if !ok {
 		return
 	}
-	if b.sel >= len(b.recents) {
-		return
-	}
-	e := b.recents[b.sel]
-	if e.missing {
+	switch {
+	case e.missing:
 		b.errMsg = "not found: " + e.path + "  (press Del to forget it)"
-		return
+	case e.problem:
+		b.errMsg = filepath.Base(e.path) + ": " + e.sub + "  (press E to fix it in the editor)"
+	default:
+		b.openPath(e.path)
 	}
-	b.openPath(e.path)
 }
 
 // openPath opens a piece. Any import failure is recorded for inline
@@ -502,6 +747,7 @@ func (b *Browser) openPath(path string) {
 	delete(b.forgotten, path)
 	delete(b.recentStatus, path)
 	b.reloadRecents()
+	b.focusPane(paneRecent)
 	b.setSel(0)
 	// Anything a floating dialog says after this moment answers an
 	// earlier question; see dialogGen.
@@ -510,21 +756,30 @@ func (b *Browser) openPath(path string) {
 	b.mu.Unlock()
 }
 
-// forgetRecent (the Delete key) removes the selected recent. It is
+// forgetRecent (the Delete key) drops the selected shortcut. It is
 // permanent when the preferences implementation supports removal, and
 // otherwise lasts for the session.
+//
+// It applies to the two path lists only. The library is a FOLDER, and
+// forgetting one of its entries would either do nothing visible or delete
+// somebody's work — neither of which is what a Delete key on a list
+// should be allowed to mean.
 func (b *Browser) forgetRecent() {
-	if b.onboarding() || b.sel >= len(b.recents) {
+	if b.focus == paneLibrary {
+		b.errMsg = "the library lists what is in the folder; delete the file to remove it"
 		return
 	}
-	p := b.recents[b.sel].path
+	e, ok := b.selected()
+	if !ok {
+		return
+	}
 	if b.forgotten == nil {
 		b.forgotten = map[string]bool{}
 	}
-	b.forgotten[p] = true
+	b.forgotten[e.path] = true
 	if pr := b.prefs(); pr != nil {
 		if rm, ok := pr.(browserRecentRemover); ok {
-			rm.RemoveRecent(p)
+			rm.RemoveRecent(e.path)
 			// A failed write must not block the UI; settings surfaces it.
 			_ = pr.Save()
 		}
@@ -643,7 +898,9 @@ var browserKeys = []ebiten.Key{
 	ebiten.KeyUp, ebiten.KeyDown, ebiten.KeyPageUp, ebiten.KeyPageDown,
 	ebiten.KeyHome, ebiten.KeyEnd,
 	ebiten.KeyEnter, ebiten.KeyNumpadEnter,
-	ebiten.KeyO, ebiten.KeyDelete, ebiten.KeyS,
+	ebiten.KeyLeft, ebiten.KeyRight, ebiten.KeyTab,
+	ebiten.KeyO, ebiten.KeyDelete, ebiten.KeyS, ebiten.KeyN, ebiten.KeyE,
+	ebiten.KeyH, ebiten.KeyF5,
 	ebiten.KeyF1, ebiten.KeySlash,
 	ebiten.KeyEscape, ebiten.KeyQ,
 }
@@ -654,6 +911,13 @@ var browserKeys = []ebiten.Key{
 var browserRepeatKeys = map[ebiten.Key]bool{
 	ebiten.KeyUp: true, ebiten.KeyDown: true,
 	ebiten.KeyPageUp: true, ebiten.KeyPageDown: true,
+}
+
+// browserShiftHeld reports whether a shift key is down, which is the one
+// piece of live keyboard state handleKey needs and cannot be given as a
+// key of its own (Tab and shift+Tab are one binding read two ways).
+func browserShiftHeld() bool {
+	return ebiten.IsKeyPressed(ebiten.KeyShiftLeft) || ebiten.IsKeyPressed(ebiten.KeyShiftRight)
 }
 
 // browserKeyFires decides whether a key held for d frames acts this
@@ -680,9 +944,24 @@ func (b *Browser) handleKey(k ebiten.Key) error {
 	case ebiten.KeyDown:
 		b.move(1)
 	case ebiten.KeyPageUp:
-		b.move(-brwRecentRows)
+		b.move(-b.rowsPerPane())
 	case ebiten.KeyPageDown:
-		b.move(brwRecentRows)
+		b.move(b.rowsPerPane())
+	case ebiten.KeyLeft:
+		b.stepPane(-1)
+	case ebiten.KeyRight:
+		b.stepPane(1)
+	case ebiten.KeyTab:
+		if browserShiftHeld() {
+			b.stepPane(-1)
+		} else {
+			b.stepPane(1)
+		}
+	case ebiten.KeyH:
+		b.toggleHint()
+	case ebiten.KeyF5:
+		b.reloadRecents()
+		b.rescanLibrary()
 	case ebiten.KeyHome:
 		b.setSel(0)
 	case ebiten.KeyEnd:
@@ -693,6 +972,10 @@ func (b *Browser) handleKey(k ebiten.Key) error {
 		b.launchOpenDialog("")
 	case ebiten.KeyDelete:
 		b.forgetRecent()
+	case ebiten.KeyN:
+		b.startNewPiece()
+	case ebiten.KeyE:
+		b.editSelected()
 	case ebiten.KeyS:
 		if b.settings != nil {
 			b.settings()
@@ -710,23 +993,25 @@ func (b *Browser) browserBindings() []helpBinding {
 	if b.sh != nil && b.sh.Depth() > 1 {
 		leave = helpBinding{Group: "session", Keys: "esc", Hint: "esc back", Desc: "Go back to where you came from"}
 	}
-	// The left pane holds the checklist until a piece has been opened, and
-	// two of these rows mean something different there: Enter runs a
-	// setup step rather than opening a recent, and Delete does nothing at
-	// all. A first-run footer that advertises "del forget recent" is
-	// teaching a key that cannot work on the only screen the user has
-	// seen, so the table answers to the state it is describing.
-	enterDesc := "Open the selected recent piece"
-	if b.onboarding() {
-		enterDesc = "Do the selected setup step"
-	}
+	// Delete means something different in the library, which is a folder
+	// rather than a history: there is no shortcut there to forget. A
+	// footer that advertises it anyway would be teaching a key that
+	// cannot work on the pane the user is looking at.
 	return []helpBinding{
 		{Group: "opening", Keys: "O", Hint: "O open a file", Off: b.openDialog == nil,
 			Desc: "Choose a piece with the system's own file dialog"},
-		{Group: "opening", Keys: "enter", Hint: "enter open", Desc: enterDesc},
+		{Group: "opening", Keys: "enter", Hint: "enter open", Desc: "Open the selected piece"},
 		{Group: "opening", Keys: "drag and drop", Desc: "Drop a piece on the window to open it; drop a folder to browse it in the file dialog"},
-		{Group: "opening", Keys: "del", Hint: "del forget recent", Off: b.onboarding(),
-			Desc: "Forget the selected recent piece"},
+		{Group: "opening", Keys: "del", Hint: "del forget", Off: b.focus == paneLibrary,
+			Desc: "Forget the selected shortcut (the file is left alone)"},
+
+		{Group: "choosing", Keys: "tab / left / right", Hint: "tab list", Desc: "Move between recent, written here, and your library"},
+		{Group: "choosing", Keys: "F5", Desc: "Re-read the library folder"},
+
+		{Group: "writing", Keys: "N", Hint: "N new piece", Off: b.newPiece == nil,
+			Desc: "Write a piece by hand in the tablature editor"},
+		{Group: "writing", Keys: "E", Hint: "E edit", Off: !browserCanEdit(b),
+			Desc: "Edit the selected piece; an imported one has to be saved as .gtab"},
 
 		{Group: "choosing", Keys: "up / down", Hint: "up/dn select", Desc: "Move the selection"},
 		{Group: "choosing", Keys: "page up / down", Desc: "Move the selection a screenful at a time"},
@@ -740,75 +1025,61 @@ func (b *Browser) browserBindings() []helpBinding {
 	}
 }
 
+// browserCanEdit reports whether the E binding does anything right now.
+func browserCanEdit(b *Browser) bool {
+	_, ok := b.editableSelection()
+	return ok
+}
+
 // hintLine is the one-line key summary in the footer, built from the
 // same table as the overlay.
 func (b *Browser) hintLine() string { return hintLineOf(b.browserBindings()) }
 
-// openButtonRect is the open card's button, shared by layout and hit
-// testing so they cannot drift.
-func openButtonRect() rect {
-	return rect{brwCardX + (brwCardW-brwOpenBtnW)/2, brwListTop + 64, brwOpenBtnW, brwOpenBtnH}
-}
+// ShowError posts a message to the start screen's status area. It exists
+// for the actions the integrator performs on the screen's behalf — opening
+// a piece for editing, say — which can fail with something the user needs
+// to read. It deliberately does NOT go through the dialog mailbox: that
+// path also clears the "a file dialog is open" guard, and borrowing it for
+// an unrelated failure would re-arm a dialog that is still on screen.
+func (b *Browser) ShowError(msg string) { b.errMsg, b.warns = msg, nil }
 
-// hitTest maps a cursor position to a recents-list row index.
-func (b *Browser) hitTest(x, y int) (int, bool) {
-	if y < brwListTop || x < brwRecentX || x >= brwRecentX+brwRecentW {
-		return 0, false
-	}
-	row := (y - brwListTop) / brwRecentRowH
-	if row < 0 || row >= brwRecentRows {
-		return 0, false
-	}
-	i := b.top + row
-	if i >= b.listLen() {
-		return 0, false
-	}
-	return i, true
-}
-
-// click applies a left click on a list row: the first click selects, a
-// click on the row that is already selected opens it — which is also
-// what the second click of a double click lands on.
-func (b *Browser) click(i int) {
-	if b.sel == i {
-		b.activate()
+// startNewPiece opens the editor on a blank piece.
+func (b *Browser) startNewPiece() {
+	if b.newPiece == nil {
 		return
 	}
-	b.setSel(i)
+	b.errMsg, b.warns = "", nil
+	b.newPiece()
 }
 
-// handleMouse reads the pointer once per frame: hover highlighting,
-// wheel scrolling, list clicks, and the open button.
-func (b *Browser) handleMouse(pt pointer) {
-	i, ok := b.hitTest(int(pt.x), int(pt.y))
-	b.hoverIdx = -1
-	if ok {
-		b.hoverIdx = i
+// editableSelection is the recent the E key and the Edit button would
+// open, and whether there is one. The onboarding checklist has no pieces
+// on it, and a recent whose file has gone is not editable either.
+func (b *Browser) editableSelection() (string, bool) {
+	if b.editPiece == nil {
+		return "", false
 	}
-
-	if pt.wheel != 0 {
-		b.wheelAcc += pt.wheel
-		var steps int
-		steps, b.wheelAcc = wheelSteps(b.wheelAcc)
-		if steps != 0 {
-			b.scrollBy(-steps * 3)
-		}
+	e, ok := b.selected()
+	if !ok || e.missing {
+		return "", false
 	}
-	if !pt.pressed {
-		return
-	}
-	if pt.over(openButtonRect()) {
-		b.launchOpenDialog("")
-		return
-	}
-	if ok {
-		b.click(i)
-	}
+	// A library piece that would not parse is offered ON PURPOSE: the
+	// editor's text view is where it can be looked at and repaired, and
+	// refusing to open the one file that needs attention would be an odd
+	// place to draw the line.
+	return e.path, true
 }
 
-// queuedEdits reports how many stack edits the shell is holding for the
-// end of this frame. It goes up the moment one of this screen's actions
-// pushes another screen, which is how the input loop below knows to stop.
+// editSelected opens the editor on the selected recent.
+func (b *Browser) editSelected() {
+	path, ok := b.editableSelection()
+	if !ok {
+		return
+	}
+	b.errMsg, b.warns = "", nil
+	b.editPiece(path)
+}
+
 func (b *Browser) queuedEdits() int {
 	if b.sh == nil {
 		return 0
@@ -863,6 +1134,10 @@ func (b *Browser) Update() error {
 	// a practice screen it discarded without releasing its audio.
 	queued := b.queuedEdits()
 	b.drainDialog()
+	// A finished library scan is applied here too. It cannot open
+	// anything, so it needs none of the one-action-per-frame care the
+	// dialog above does — it only ever replaces the contents of a list.
+	b.drainLibrary()
 	if b.queuedEdits() != queued {
 		return nil
 	}
@@ -890,127 +1165,8 @@ func (b *Browser) Update() error {
 	return nil
 }
 
-// Draw paints the start screen. It reads only fields the methods above
-// set, so nothing here decides anything.
-func (b *Browser) Draw(screen *ebiten.Image) {
-	screen.Fill(colBG)
-	drawHeader(screen, "guitarTutor", "a practice companion for guitarists", colDim)
-
-	b.drawRecents(screen)
-	b.drawOpenCard(screen)
-	b.drawStatus(screen)
-	drawFooter(screen, b.hintLine())
-
-	if b.helpOpen {
-		drawHelpOverlay(screen, "START SCREEN KEYS", b.browserBindings(), "")
-	}
-}
-
-// drawPaneFrame paints a pane's background and title.
-func drawPaneFrame(screen *ebiten.Image, x, w float64, rows int, title string) {
-	h := float64(rows * brwRecentRowH)
-	fillRounded(screen, rect{x - 8, brwListTop - 8, w + 16, h + 16}, colPanel)
-	drawText(screen, title, x, 124, colDim)
-	vector.StrokeLine(screen, float32(x), 146, float32(x+w), 146, 1, colPanelEdge, false)
-}
-
-// rowBG returns the background colour for a list row, or false when it
-// needs none.
-func (b *Browser) rowBG(i int) (color.RGBA, bool) {
-	if b.sel == i && b.listLen() > 0 {
-		return colFocus, true
-	}
-	if b.hoverIdx == i {
-		return colHover, true
-	}
-	return color.RGBA{}, false
-}
-
-func (b *Browser) drawRecents(screen *ebiten.Image) {
-	if b.onboarding() {
-		// The same height as the recents pane it stands in for, and as
-		// the open card beside it: a checklist panel sized to its own
-		// three rows left the two columns of a two-column screen up to
-		// 280px apart, which reads as a layout fault rather than a
-		// compact list.
-		drawPaneFrame(screen, brwRecentX, brwRecentW, brwRecentRows, "GETTING STARTED")
-		b.drawSteps(screen)
-		return
-	}
-	drawPaneFrame(screen, brwRecentX, brwRecentW, brwRecentRows, "RECENT PIECES")
-	for row := 0; row < brwRecentRows; row++ {
-		i := b.top + row
-		if i >= len(b.recents) {
-			break
-		}
-		e := b.recents[i]
-		y := float32(brwListTop + row*brwRecentRowH)
-		if bg, ok := b.rowBG(i); ok {
-			fillRounded(screen, rect{brwRecentX - 4, float64(y) - 2, brwRecentW + 8, brwRecentRowH - 2}, bg)
-		}
-		nameCol := colNote
-		sub := e.parent
-		if e.missing {
-			nameCol = colMissing
-			sub = "missing — press Del to forget"
-		}
-		drawTextScaled(screen, truncateWScaled(e.name, brwRecentW-16, brwNameScale), brwRecentX+4, float64(y), brwNameScale, nameCol)
-		drawTextSmall(screen, ellipsizeWSmall(sub, brwRecentW-16), brwRecentX+4, float64(y)+22, colDim)
-	}
-	if len(b.recents) > brwRecentRows {
-		drawTextSmall(screen, fmt.Sprintf("%d–%d of %d", b.top+1,
-			min(b.top+brwRecentRows, len(b.recents)), len(b.recents)),
-			brwRecentX+4, brwListTop+brwRecentRows*brwRecentRowH+12, colHint)
-	}
-}
-
-// drawOpenCard paints the right-hand card: the button that opens the
-// system file dialog, and the drop hint.
-func (b *Browser) drawOpenCard(screen *ebiten.Image) {
-	drawPaneFrame(screen, brwCardX, brwCardW, brwRecentRows, "OPEN")
-
-	btn := openButtonRect()
-	label := "Open a piece…"
-	fill, edge, tcol := colFocus, colInferred, colNote
-	switch {
-	case b.openDialog == nil:
-		fill, edge, tcol = colBG, colBarline, colBarline
-	case b.dialogBusy:
-		label = "waiting for the file dialog…"
-		fill, edge, tcol = colPanel, colPanelEdge, colDim
-	case b.ptr.over(btn):
-		edge = colNote
-	}
-	drawPanel(screen, btn, fill, edge)
-	drawTextScaled(screen, label, centreXScaled(label, btn.x, btn.w, 1.15), btn.y+11, 1.15, tcol)
-	hint := "browses with the system's file dialog  (O)"
-	drawTextSmall(screen, hint, brwCardX+(brwCardW-textWSmall(hint))/2, btn.y+btn.h+14, colDim)
-
-	midY := btn.y + btn.h + 64
-	or := "— or —"
-	drawTextSmall(screen, or, brwCardX+(brwCardW-textWSmall(or))/2, midY, colHint)
-	drop := "drop a file anywhere on this window"
-	drawText(screen, drop, brwCardX+(brwCardW-textW(drop))/2, midY+26, colHUD)
-	formats := "Guitar Pro (.gp) · MusicXML (.musicxml, .mxl) · MIDI (.mid) · text tab (.gtab)"
-	drawTextSmall(screen, formats, brwCardX+(brwCardW-textWSmall(formats))/2, midY+52, colDim)
-}
-
-// drawStatus paints the last open's error and importer warnings under
-// the panes.
-func (b *Browser) drawStatus(screen *ebiten.Image) {
-	const maxWarn = 4
-	const width = screenW - 2*brwRecentX
-	y := float64(brwStatusY)
-	if b.errMsg != "" {
-		drawText(screen, ellipsizeW(b.errMsg, width), brwRecentX, y, colMiss)
-		y += 20
-	}
-	for i, w := range b.warns {
-		if i == maxWarn {
-			drawText(screen, fmt.Sprintf("… and %d more warnings", len(b.warns)-maxWarn), brwRecentX, y, colClose)
-			break
-		}
-		drawText(screen, truncateW("warning: "+w, width), brwRecentX, y, colClose)
-		y += 18
-	}
-}
+// RefreshLibrary re-reads the managed pieces folder. The application
+// calls it after the editor has saved, so a piece written this session
+// appears in the library the moment the user comes back to the start
+// screen rather than at the next launch.
+func (b *Browser) RefreshLibrary() { b.rescanLibrary() }

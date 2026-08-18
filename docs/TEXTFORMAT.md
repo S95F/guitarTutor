@@ -6,6 +6,15 @@ same core idea of `fret.string.duration` beats — but is deliberately its
 own, much smaller grammar (see ROADMAP Phase 0: compatibility with
 alphaTex's full grammar is a non-goal).
 
+It is also what the in-app tablature editor writes. `internal/edit` holds
+a piece in the `internal/score` model and `textfmt.Format` renders it back
+to this text, so everything below round-trips: what the editor saves,
+the parser reads back as the same piece, field for field. Three things the
+model can hold and this format cannot are refused with a message rather
+than approximated — a beat that is not a plain, dotted or triplet note
+value, a tempo change that does not land on a barline, and two notes on
+one string in the same beat.
+
 Files are UTF-8 text, extension `.gtab`. `//` starts a comment that runs
 to end of line.
 
@@ -79,6 +88,15 @@ Bar by bar: eight eighth-note riff notes; three beats with a sticky-ish
 explicit rhythm (quarter, quarter, half); an E5 power chord for a half
 note, a quarter rest, a quarter note; a whole-note low E written as two
 tied halves.
+
+## Editing this by hand vs. in the app
+
+The editor's grid has controls for what a guitarist reaches for most:
+frets, note values, ties, the six technique letters, bars, the meter, the
+tempo, a handful of tunings. The format has more than that — a capo, a
+General MIDI program, an arbitrary tuning, a comment explaining a passage
+to yourself — so **F2** in the editor shows this text instead, parsed as
+you type. Neither view is the real one; both are the same piece.
 
 ## Semantics
 

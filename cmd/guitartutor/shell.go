@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ebitengine/oto/v3"
 
@@ -36,7 +37,7 @@ func runShell() error {
 	opener := &shellOpener{prefs: prefs}
 	defer opener.CloseCurrent()
 
-	svc := ui.Services{Opener: opener, Prefs: prefs}
+	svc := ui.Services{Opener: opener, Prefs: prefs, Library: pieceLibrary{}}
 	// A missing backend is normal (no cgo, or no audio system): the
 	// settings screen explains it rather than showing an empty picker.
 	if b := audio.Available(); b != nil {
@@ -45,6 +46,7 @@ func runShell() error {
 
 	sh, browser := ui.NewBrowserShell(svc)
 	opener.shell = sh
+	opener.browser = browser
 	browser.SetSettingsOpener(func() { opener.showSettings(nil) })
 	// Opening a piece goes through the OS file dialog. It blocks while
 	// the user browses, so it runs on its own goroutine and posts the
@@ -54,7 +56,97 @@ func runShell() error {
 			browser.OfferDialogResult(pickPieceFile(startDir))
 		}()
 	})
+	// Writing a piece by hand. The editor needs no audio of its own — it
+	// hands a saved piece back to the Shell to be practised — so the only
+	// thing the application has to lend it is the save dialog and the
+	// recents list.
+	browser.SetNewPiece(func() { opener.showEditor(nil, "") })
+	browser.SetEditPiece(func(path string) {
+		sc, warns, err := load(path)
+		if err != nil {
+			browser.ShowError(fmt.Sprintf("cannot open %s for editing: %v", filepath.Base(path), err))
+			return
+		}
+		for _, w := range warns {
+			fmt.Fprintln(os.Stderr, "warning:", w)
+		}
+		opener.showEditor(sc, path)
+	})
 	return sh.Run()
+}
+
+// showEditor opens the tablature editor, on a blank piece when sc is nil.
+// path is where the piece came from; the editor keeps it as its save
+// target only if it is a .gtab, since that is the only format the app can
+// write.
+func (o *shellOpener) showEditor(sc *score.Score, path string) {
+	if o.shell == nil {
+		return
+	}
+	var (
+		ed  *ui.Editor
+		err error
+	)
+	if sc == nil {
+		ed = ui.NewEditor(o.shell)
+	} else if ed, err = ui.NewEditorFor(o.shell, sc, path); err != nil {
+		fmt.Fprintln(os.Stderr, "guitartutor: cannot edit that piece:", err)
+		return
+	}
+	// The save dialog blocks while the user browses, so it runs on its own
+	// goroutine and posts to the editor's mailbox — the same pattern the
+	// start screen and the settings screen use. The guard against two
+	// dialogs at once lives on the EDITOR rather than here: unlike the
+	// SoundFont picker, an editor is not rebuilt on every visit, so its
+	// own flag is the one that survives.
+	ed.SetSaveDialog(func(suggest string) {
+		go func() { ed.OfferSavePath(pickSavePath(o.suggestSavePath(suggest))) }()
+	})
+	// A saved piece joins BOTH lists: written here, and — because writing
+	// a piece is how you end up practising it — recent. They answer
+	// different questions and a piece is honestly in both.
+	ed.SetOnSaved(func(p string) {
+		o.prefs.AddCreated(p)
+		o.prefs.AddRecent(p)
+		_ = o.prefs.Save()
+		o.rescanLibrary()
+	})
+	// Practising what has just been written pushes the practice screen ON
+	// TOP of the editor, so Escape comes back to the editing rather than
+	// to the start screen: write, hear it, fix it, hear it again.
+	ed.SetPractice(func(p string) {
+		if _, err := o.shell.OpenPiece(p); err != nil {
+			fmt.Fprintln(os.Stderr, "guitartutor: cannot practise that piece:", err)
+		}
+	})
+	o.shell.Show(ed)
+}
+
+// suggestSavePath puts the editor's suggested file name inside the
+// application's own pieces folder, so a piece written here lands in the
+// library by default and shows up on the start screen without anyone
+// having to know where it went. A name that is already a full path —
+// re-saving a piece opened from somewhere else — is left where it is.
+func (o *shellOpener) suggestSavePath(suggest string) string {
+	if suggest == "" || filepath.IsAbs(suggest) {
+		return suggest
+	}
+	dir, err := appconfig.EnsurePiecesDir()
+	if err != nil {
+		// Without a folder the dialog opens wherever it likes, which is
+		// the same as before the library existed.
+		return suggest
+	}
+	return filepath.Join(dir, suggest)
+}
+
+// rescanLibrary asks the start screen to re-read the pieces folder. The
+// browser owns the scan (it runs off the game loop and posts back), so
+// this only has to find it.
+func (o *shellOpener) rescanLibrary() {
+	if o.browser != nil {
+		o.browser.RefreshLibrary()
+	}
 }
 
 // openTimeSettings is the subset of the configuration that a piece reads
@@ -198,6 +290,36 @@ func (p *shellPrefs) RemoveRecent(path string) {
 	p.cfg.ForgetRecent(path)
 }
 
+// Created and AddCreated are the written-pieces half of the recents
+// facade: what was made here, as opposed to what was opened.
+func (p *shellPrefs) Created() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]string, len(p.cfg.Created))
+	copy(out, p.cfg.Created)
+	return out
+}
+
+func (p *shellPrefs) AddCreated(path string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cfg.AddCreated(path)
+}
+
+// HintHidden and SetHintHidden persist whether the start screen's
+// getting-started strip has been put away.
+func (p *shellPrefs) HintHidden() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cfg.HideStartHint
+}
+
+func (p *shellPrefs) SetHintHidden(hidden bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cfg.HideStartHint = hidden
+}
+
 func (p *shellPrefs) SoundFont() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -220,6 +342,21 @@ func (p *shellPrefs) SetCountIn(beats int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.cfg.CountInBeats = beats
+}
+
+// SyncTrim and SetSyncTrim are the optional Prefs extension the settings
+// screen probes for: the manual audio/visual nudge, applied on top of the
+// output buffering the application measures for itself.
+func (p *shellPrefs) SyncTrim() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cfg.SyncTrimMS
+}
+
+func (p *shellPrefs) SetSyncTrim(ms int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cfg.SyncTrimMS = ms
 }
 
 func (p *shellPrefs) Devices() (string, string) {
@@ -250,6 +387,7 @@ func (p *shellPrefs) snapshot() appconfig.Config {
 	c.LatencyOffsets = maps.Clone(p.cfg.LatencyOffsets)
 	c.LatencyConfidence = maps.Clone(p.cfg.LatencyConfidence)
 	c.Recents = slices.Clone(p.cfg.Recents)
+	c.Created = slices.Clone(p.cfg.Created)
 	return c
 }
 
@@ -382,6 +520,9 @@ func (a *shellAudio) CalibrateContext(ctx context.Context, captureID, playbackID
 type shellOpener struct {
 	prefs *shellPrefs
 	shell *ui.Shell
+	// browser is the start screen, so a piece saved in the editor can ask
+	// it to re-read the library folder it has just landed in.
+	browser *ui.Browser
 
 	// sfDialog is true while a SoundFont dialog is open. It lives on the
 	// opener rather than the settings screen because the screen is
@@ -495,6 +636,7 @@ func (o *shellOpener) Open(path string) (ui.Screen, []string, error) {
 			app.SetLiveWarning("live input unavailable: " + err.Error())
 		} else {
 			o.session = session
+			o.watchOutputLatency(app)
 			o.warnOnSplitDevices(app)
 			o.setTitleFor(path)
 			return app, warns, nil
@@ -508,8 +650,48 @@ func (o *shellOpener) Open(path string) (ui.Screen, []string, error) {
 	o.player = ctx.NewPlayer(eng)
 	o.player.SetBufferSize(playerBufferBytes())
 	o.player.Play()
+	o.watchOutputLatency(app)
 	o.setTitleFor(path)
 	return app, warns, nil
+}
+
+// watchOutputLatency tells the practice view how much rendered audio has
+// not been heard yet, so the playhead can sit on the note that is sounding
+// instead of the one being rendered (see internal/ui/playhead.go).
+//
+// The figure is measured, not assumed. On the oto path the player reports
+// exactly what it is still holding, which is the whole of the lead the
+// engine has over the speaker; on the duplex path the engine renders
+// inside the device callback, so the lead is one period. What neither can
+// see is the last few milliseconds inside the driver and the hardware, and
+// that is what the trim in settings adds on top.
+//
+// The closure reads o.player and o.session on every display frame, and
+// CloseCurrent clears both — so it has to tolerate finding them nil, which
+// is what happens between a piece being closed and its view being popped.
+func (o *shellOpener) watchOutputLatency(app *ui.App) {
+	app.SetOutputLatency(func() time.Duration {
+		trim := time.Duration(o.prefs.SyncTrim()) * time.Millisecond
+		switch {
+		case o.session != nil:
+			if period := o.session.Config().PeriodFrames; period > 0 {
+				return framesToDuration(period) + trim
+			}
+		case o.player != nil:
+			return framesToDuration(o.player.BufferedSize()/bytesPerFrame) + trim
+		}
+		return trim
+	})
+}
+
+// bytesPerFrame is one stereo float32 frame, the format oto is configured
+// for and therefore the unit BufferedSize counts in.
+const bytesPerFrame = 2 * 4
+
+// framesToDuration converts a frame count at the project sample rate into
+// wall-clock time.
+func framesToDuration(frames int) time.Duration {
+	return time.Duration(frames) * time.Second / time.Duration(sampleRate)
 }
 
 // setTitleFor names the window after the piece. It runs only once an open
