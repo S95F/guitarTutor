@@ -642,44 +642,162 @@ func TestEditorEntryKeepsBadInput(t *testing.T) {
 	}
 }
 
-func TestEditorToolbarChipsMatchTheKeys(t *testing.T) {
-	// The chips exist to teach the keyboard, so every one of them has to
-	// do exactly what its key does.
+// editorButtons flattens every toolbar control, so a test can find one
+// by its stable id rather than by where it happens to sit.
+func editorButtons(e *Editor) []edButton {
+	var out []edButton
+	for _, g := range e.toolbarGroups() {
+		out = append(out, g.buttons...)
+	}
+	out = append(out, e.pieceButtons()...)
+	return append(out, e.fileButtons()...)
+}
+
+// editorButton finds one control by id.
+func editorButton(t *testing.T, e *Editor, id string) edButton {
+	t.Helper()
+	for _, b := range editorButtons(e) {
+		if b.id == id {
+			return b
+		}
+	}
+	t.Fatalf("no toolbar control with id %q", id)
+	return edButton{}
+}
+
+func TestEditorToolbarButtonsMatchTheKeys(t *testing.T) {
+	// The toolbar exists to teach the keyboard, so every control has to do
+	// exactly what its key does.
 	e := newTestEditor()
 	press(t, e, ebiten.KeyDigit5)
 
-	find := func(label string) edChip {
-		t.Helper()
-		for _, c := range e.toolbarChips() {
-			if c.state.label == label {
-				return c
-			}
-		}
-		t.Fatalf("no toolbar chip labelled %q", label)
-		return edChip{}
-	}
-	find("h").act()
+	editorButton(t, e, "hammer").act()
 	if n, _ := e.doc.NoteAt(e.doc.Cursor().Str); n.Tech&score.TechHammer == 0 {
-		t.Error("the h chip did not set the hammer-on")
+		t.Error("the hammer-on control did not set the hammer-on")
 	}
-	if !find("h").state.on {
-		t.Error("the h chip does not light up for a note that has a hammer-on")
+	if !editorButton(t, e, "hammer").on {
+		t.Error("the hammer-on control does not light up for a note that has one")
 	}
-	find("+bar").act()
+	editorButton(t, e, "addbar").act()
 	if got := e.doc.BarCount(); got != 5 {
-		t.Errorf("the +bar chip left %d bars, want 5", got)
+		t.Errorf("the add-bar control left %d bars, want 5", got)
 	}
 }
 
-func TestEditorTechniqueChipsAreOffWithoutANote(t *testing.T) {
-	e := newTestEditor() // the cursor starts on a rest
-	for _, c := range e.toolbarChips() {
-		switch c.state.label {
-		case "h", "p", "s", "b", "v", "x", "tie":
-			if !c.state.disabled {
-				t.Errorf("the %q chip is live with no note under the cursor", c.state.label)
+// TestEditorToolbarCarriesNoFormatLetters is the user-facing rule this
+// toolbar was rebuilt for: nothing a guitarist reads on it should be a
+// character out of the file format. The technique letters belong on the
+// KEY of a control, never as the thing the control says it is.
+func TestEditorToolbarCarriesNoFormatLetters(t *testing.T) {
+	e := newTestEditor()
+	press(t, e, ebiten.KeyDigit5)
+	for _, b := range editorButtons(e) {
+		if b.name == "" {
+			t.Errorf("control %q has no name for its tooltip", b.id)
+		}
+		if len([]rune(b.name)) <= 2 {
+			t.Errorf("control %q is named %q, which is a symbol rather than a word", b.id, b.name)
+		}
+		if n := len([]rune(b.label)); n == 1 {
+			t.Errorf("control %q is labelled with the single character %q", b.id, b.label)
+		}
+		if strings.Contains(b.label, "1/") {
+			t.Errorf("control %q still labels a note value as the fraction %q", b.id, b.label)
+		}
+	}
+}
+
+// TestEditorNoteValueIsPickedDirectly: six values, exactly one lit, and
+// pressing one selects it rather than stepping toward it.
+func TestEditorNoteValueIsPickedDirectly(t *testing.T) {
+	e := newTestEditor()
+	values := []struct {
+		id    string
+		ticks int64
+	}{
+		{"value3840", score.Whole}, {"value1920", score.Half}, {"value960", score.Quarter},
+		{"value480", score.Eighth}, {"value240", score.Sixteenth}, {"value120", score.ThirtySec},
+	}
+	for _, v := range values {
+		editorButton(t, e, v.id).act()
+		if got := e.doc.Duration(); got != v.ticks {
+			t.Errorf("%s selected %d ticks, want %d", v.id, got, v.ticks)
+		}
+		lit := 0
+		for _, b := range editorButtons(e) {
+			if strings.HasPrefix(b.id, "value") && b.on {
+				lit++
+				if b.id != v.id {
+					t.Errorf("%s is lit while %s is selected", b.id, v.id)
+				}
 			}
 		}
+		if lit != 1 {
+			t.Errorf("%d note values are lit, want exactly 1", lit)
+		}
+	}
+}
+
+// TestEditorDotAndTripletKeepTheChosenValue: dotting an eighth gives a
+// dotted eighth, not a dotted quarter — the modifiers apply to whatever
+// is selected, and the selection stays put.
+func TestEditorDotAndTripletKeepTheChosenValue(t *testing.T) {
+	e := newTestEditor()
+	editorButton(t, e, "value480").act() // an eighth
+	editorButton(t, e, "dot").act()
+	if got, want := e.doc.Duration(), score.Dotted(score.Eighth); got != want {
+		t.Errorf("got %d ticks, want a dotted eighth (%d)", got, want)
+	}
+	if !editorButton(t, e, "value480").on {
+		t.Error("dotting an eighth stopped the eighth being the selected value")
+	}
+	if !editorButton(t, e, "dot").on {
+		t.Error("the dot control is not lit after dotting")
+	}
+	editorButton(t, e, "triplet").act()
+	if got, want := e.doc.Duration(), score.Triplet(score.Eighth); got != want {
+		t.Errorf("got %d ticks, want an eighth triplet (%d)", got, want)
+	}
+	if editorButton(t, e, "dot").on {
+		t.Error("the dot is still lit after choosing a triplet; they are exclusive")
+	}
+}
+
+func TestEditorNoteControlsAreOffWithoutANote(t *testing.T) {
+	e := newTestEditor() // the cursor starts on a rest
+	for _, id := range []string{"tie", "hammer", "pull", "slide", "bend", "vibrato", "dead"} {
+		if !editorButton(t, e, id).disabled {
+			t.Errorf("the %q control is live with no note under the cursor", id)
+		}
+	}
+	// The note VALUE is not: choosing what to type next is exactly what
+	// you do before there is a note.
+	if editorButton(t, e, "value480").disabled {
+		t.Error("the note-value picker is disabled with no note under the cursor")
+	}
+}
+
+// TestEditorUndoRedoAreOnTheToolbar: they were keyboard-only, which hides
+// them from the person most likely to need them.
+func TestEditorUndoRedoAreOnTheToolbar(t *testing.T) {
+	e := newTestEditor()
+	if !editorButton(t, e, "undo").disabled || !editorButton(t, e, "redo").disabled {
+		t.Error("undo and redo are live on a piece with no history")
+	}
+	press(t, e, ebiten.KeyDigit7)
+	if editorButton(t, e, "undo").disabled {
+		t.Fatal("undo is disabled after an edit")
+	}
+	editorButton(t, e, "undo").act()
+	if _, ok := e.doc.NoteAt(e.doc.Cursor().Str); ok {
+		t.Error("the undo control did not take the note back")
+	}
+	if editorButton(t, e, "redo").disabled {
+		t.Fatal("redo is disabled after an undo")
+	}
+	editorButton(t, e, "redo").act()
+	if _, ok := e.doc.NoteAt(e.doc.Cursor().Str); !ok {
+		t.Error("the redo control did not put the note back")
 	}
 }
 
@@ -746,26 +864,28 @@ func TestEditorNotationChipsAreDeadInTextMode(t *testing.T) {
 	if e.text == nil {
 		t.Fatal("the text view did not open")
 	}
-	for _, c := range e.toolbarChips() {
-		if !c.state.disabled {
-			t.Errorf("the %q toolbar chip is live while the text is showing", c.state.label)
+	for _, g := range e.toolbarGroups() {
+		for _, b := range g.buttons {
+			if !b.disabled {
+				t.Errorf("the %q control is live while the text is showing", b.id)
+			}
 		}
 	}
-	for _, c := range e.trackChips() {
-		if !c.state.disabled {
-			t.Errorf("the %q track chip is live while the text is showing", c.state.label)
+	for _, b := range e.pieceButtons() {
+		if !b.disabled {
+			t.Errorf("the %q piece control is live while the text is showing", b.id)
 		}
 	}
-	// The piece-wide actions stay live: save, back to the grid, practice.
-	for _, c := range e.actionChips() {
-		if c.state.label != "practice" && c.state.disabled {
-			t.Errorf("the %q action chip is greyed while the text is showing", c.state.label)
+	// The file actions stay live: save, back to the notation, practice.
+	for _, b := range e.fileButtons() {
+		if b.id != "practice" && b.disabled {
+			t.Errorf("the %q file control is greyed while the text is showing", b.id)
 		}
 	}
-	// And no hotspot reaches a greyed chip.
+	// And no hotspot reaches a greyed control.
 	for _, h := range e.hotspots() {
 		if h.r.y < edGridTop && h.r.x < screenW/2 {
-			t.Errorf("a left-hand chip at %+v is still clickable in text mode", h.r)
+			t.Errorf("a left-hand control at %+v is still clickable in text mode", h.r)
 		}
 	}
 }
@@ -774,22 +894,46 @@ func TestEditorHelpTableFitsItsCard(t *testing.T) {
 	// The overlay has no scrolling, so a table that outgrows the card runs
 	// its last rows off the bottom of the window — which is where the
 	// "how do I get out of here" line lives.
+	//
+	// Measured through helpLayout, which is what drawHelpOverlay itself
+	// flows from: a test that re-derives the arithmetic passes while the
+	// drawing runs off the bottom, which is exactly what happened here.
 	e := newTestEditor()
 	rows := e.editorBindings()
-	groups := 0
-	last := ""
-	for _, r := range rows {
-		if r.Group != last {
-			groups++
-			last = r.Group
-		}
+	f := helpLayout(rows, editorHelpFootnote)
+	card := helpCard()
+	if bottom := card.y + card.h; f.bottom > bottom-6 {
+		t.Errorf("the editor's %d bindings end at %.0f; the card ends at %.0f",
+			len(rows), f.bottom, bottom)
 	}
-	h := helpTopY + float64(groups)*(helpHeadH+helpGroupH) + float64(len(rows))*helpRowH
-	// Plus the footnote and the dismiss line under it.
-	h += 2 * uiTextH
-	if card := helpCard(); h > card.y+card.h {
-		t.Errorf("the editor's %d bindings in %d groups need %.0f pixels; the card ends at %.0f",
-			len(rows), groups, h, card.y+card.h)
+}
+
+// TestEveryHelpTableFitsItsCard: the editor's is the longest, but the
+// overlay is shared and any of them running off the bottom loses the
+// dismiss line the same way.
+func TestEveryHelpTableFitsItsCard(t *testing.T) {
+	e := newTestEditor()
+	app := newApp(t, 4)
+	brw := NewBrowser(NewShell(Services{Prefs: &settingsFakePrefs{}}, nil))
+	set, _ := newSettingsFixture(t, newSettingsAudio())
+	for _, tc := range []struct {
+		name string
+		rows []helpBinding
+		foot string
+	}{
+		{"editor", e.editorBindings(), editorHelpFootnote},
+		{"practice", app.helpRows(), practiceHelpFootnote},
+		{"start screen", brw.browserBindings(), browserHelpFootnote},
+		{"settings", set.settingsBindings(), ""},
+	} {
+		f := helpLayout(tc.rows, tc.foot)
+		if bottom := helpCard().y + helpCard().h; f.bottom > bottom-6 {
+			t.Errorf("the %s table ends at %.0f; the card ends at %.0f", tc.name, f.bottom, bottom)
+		}
+		if tc.foot != "" && f.footY >= f.dismissY {
+			t.Errorf("the %s footnote is at %.0f, on or under the dismiss line at %.0f",
+				tc.name, f.footY, f.dismissY)
+		}
 	}
 }
 
@@ -847,19 +991,19 @@ func TestEditorCursorPitchReportsWhatSounds(t *testing.T) {
 	// move the string's name.
 	e := newTestEditor()
 	e.doc.GoTo(edit.Cursor{Bar: 0, Beat: 0, Str: 5})
-	if got := e.cursorPitch(); !strings.Contains(got, "str 5 (A)") {
-		t.Errorf("with no note the cursor reads %q", got)
+	if got := e.cursorPitch(); got != "A string" {
+		t.Errorf("with no note the cursor reads %q, want the string named", got)
 	}
 	if err := e.doc.SetFret(0); err != nil {
 		t.Fatal(err)
 	}
-	if got := e.cursorPitch(); !strings.HasSuffix(got, "= A2") {
+	if got := e.cursorPitch(); !strings.HasSuffix(got, "sounding A2") {
 		t.Errorf("open A reads %q, want it to sound A2", got)
 	}
 	if err := e.doc.SetCapo(2); err != nil {
 		t.Fatal(err)
 	}
-	if got := e.cursorPitch(); !strings.HasSuffix(got, "= B2") {
+	if got := e.cursorPitch(); !strings.HasSuffix(got, "sounding B2") {
 		t.Errorf("open A at capo 2 reads %q, want it to sound B2", got)
 	}
 }

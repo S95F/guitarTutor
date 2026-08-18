@@ -19,6 +19,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
 
@@ -37,14 +38,31 @@ const (
 	shotH = 720
 	// warmup frames let the screen settle before the image is taken:
 	// pulses and hover states are driven by a frame counter.
+	// Frames to let the screen settle: pulses and hover states are driven
+	// by a frame counter.
 	warmup = 12
+	// And real time to let the tooltip dwell elapse (see
+	// internal/ui/tooltip.go). The dwell is measured in SECONDS, not in
+	// frames, so a window rendering faster than the display can run out
+	// its warmup frames long before a third of a second has passed.
+	settle = 700 * time.Millisecond
 )
 
 func main() {
-	which := flag.String("screen", "practice", "start, start-bare, settings, editor, editor-new, editor-text, editor-help, practice, practice-live, help or tuner")
+	which := flag.String("screen", "practice", "glyphs, start, start-bare, settings, editor, editor-new, editor-text, editor-help, practice, practice-live, help or tuner")
 	out := flag.String("o", "shot.png", "output PNG")
 	piece := flag.String("piece", "testdata/fixture_riff.gtab", "piece for the practice screens")
+	hover := flag.String("hover", "", "pin the cursor at x,y so hover states and tooltips are drawn")
 	flag.Parse()
+
+	if *hover != "" {
+		var x, y float64
+		if _, err := fmt.Sscanf(*hover, "%f,%f", &x, &y); err != nil {
+			fmt.Fprintln(os.Stderr, "uishot: -hover wants x,y")
+			os.Exit(2)
+		}
+		ui.ForceCursor(x, y, false)
+	}
 
 	sc, err := build(*which, *piece)
 	if err != nil {
@@ -97,6 +115,9 @@ func build(which, piece string) (ui.Screen, error) {
 			return st, nil
 		}
 		return browser, nil
+
+	case "glyphs":
+		return ui.NewGlyphSheet(), nil
 
 	case "editor-new":
 		ed := ui.NewEditor(nil)
@@ -191,6 +212,7 @@ type shot struct {
 	inner ui.Screen
 	buf   *ebiten.Image
 	n     int
+	start time.Time
 	out   string
 	done  bool
 	err   error
@@ -215,7 +237,10 @@ func (s *shot) Draw(screen *ebiten.Image) {
 	}
 	s.inner.Draw(s.buf)
 	screen.DrawImage(s.buf, nil)
-	if s.n++; s.n == warmup {
+	if s.start.IsZero() {
+		s.start = time.Now()
+	}
+	if s.n++; s.n >= warmup && time.Since(s.start) >= settle {
 		s.err = save(s.buf, s.out)
 		s.done = true
 	}

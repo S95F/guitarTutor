@@ -20,6 +20,7 @@ import (
 // A browserAction is one button on the action row.
 type browserAction struct {
 	id      string
+	glyph   glyphID
 	label   string
 	key     string
 	primary bool
@@ -68,6 +69,9 @@ func (b *Browser) layout() browserLayout {
 	x := uiPadX
 	for _, a := range acts {
 		w := textW(a.label) + 34
+		if a.glyph != glyphNone {
+			w += glyphBox + 8
+		}
 		if kw := textWSmall(a.key) + 34; kw > w {
 			w = kw
 		}
@@ -106,13 +110,13 @@ func (b *Browser) rowsPerPane() int { return b.layout().rows }
 func (b *Browser) actionList() []browserAction {
 	_, canEdit := b.editableSelection()
 	return []browserAction{
-		{id: "open", label: "Open a file…", key: "O", primary: true, enabled: b.openDialog != nil,
+		{id: "open", glyph: glyphFolder, label: "Open a file…", key: "O", primary: true, enabled: b.openDialog != nil,
 			act: func(b *Browser) { b.launchOpenDialog("") }},
-		{id: "new", label: "Write a new piece", key: "N", enabled: b.newPiece != nil,
+		{id: "new", glyph: glyphNewPiece, label: "Write a new piece", key: "N", enabled: b.newPiece != nil,
 			act: (*Browser).startNewPiece},
-		{id: "edit", label: "Edit selected", key: "E", enabled: canEdit,
+		{id: "edit", glyph: glyphPencil, label: "Edit selected", key: "E", enabled: canEdit,
 			act: (*Browser).editSelected},
-		{id: "settings", label: "Settings", key: "S", enabled: b.settings != nil,
+		{id: "settings", glyph: glyphSliders, label: "Settings", key: "S", enabled: b.settings != nil,
 			act: func(b *Browser) { b.settings() }},
 	}
 }
@@ -228,8 +232,7 @@ func (b *Browser) Draw(screen *ebiten.Image) {
 	drawFooter(screen, b.hintLine())
 
 	if b.helpOpen {
-		drawHelpOverlay(screen, "START SCREEN KEYS", b.browserBindings(),
-			"tab and the arrow keys move between the three lists; the wheel scrolls whichever one the cursor is over")
+		drawHelpOverlay(screen, "START SCREEN KEYS", b.browserBindings(), browserHelpFootnote)
 	}
 }
 
@@ -261,7 +264,7 @@ func (b *Browser) drawActions(screen *ebiten.Image, l browserLayout) {
 			style = btnPrimary
 		}
 		av := b.anim.step("action:"+a.id, b.ptr.over(r) && a.enabled, b.ptr.down, dt)
-		drawButton(screen, r, a.label, a.key, style, av)
+		drawButton(screen, r, a.glyph, a.label, a.key, style, av)
 	}
 }
 

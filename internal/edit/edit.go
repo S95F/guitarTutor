@@ -25,6 +25,7 @@ package edit
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/S95F/guitarTutor/internal/score"
 	"github.com/S95F/guitarTutor/internal/score/textfmt"
@@ -411,17 +412,30 @@ func refit(bar *score.Bar, keep int) error {
 		filled += bt.Dur
 	}
 	if filled > bar.Len() {
-		return fmt.Errorf("the beats fill %d ticks, and a %d/%d bar holds %d",
-			filled, bar.Num, bar.Den, bar.Len())
+		return fmt.Errorf("the notes add up to %s beats, and a %d/%d bar holds %d",
+			beatsText(filled, bar), bar.Num, bar.Den, bar.Num)
 	}
 	rests, ok := restsFor(bar.Len() - filled)
 	if !ok {
-		return fmt.Errorf("%d ticks are left over, which no combination of note values fills", bar.Len()-filled)
+		return fmt.Errorf("%s of a beat is left over, and no combination of note lengths fills it",
+			beatsText(bar.Len()-filled, bar))
 	}
 	for _, r := range rests {
 		bar.AddBeat(r)
 	}
 	return nil
+}
+
+// beatsText renders a span of ticks as beats of the bar's own meter,
+// which is the unit the person reading the message is counting in. Ticks
+// are the model's unit and have no business in anything a user reads.
+func beatsText(ticks int64, bar *score.Bar) string {
+	beat := 4 * score.PPQ / int64(bar.Den)
+	if beat <= 0 {
+		return "0"
+	}
+	v := float64(ticks) / float64(beat)
+	return strconv.FormatFloat(v, 'g', 3, 64)
 }
 
 // fillBar makes an empty bar a bar of rests.

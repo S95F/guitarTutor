@@ -29,6 +29,7 @@ package ui
 
 import (
 	"image/color"
+	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
 )
@@ -79,6 +80,7 @@ type animator struct {
 // tick starts a frame: it advances the clock and forgets controls that
 // have stopped being drawn. Screens call it once, at the top of Draw.
 func (a *animator) tick() {
+	measureFrame()
 	a.frame++
 	for id, st := range a.states {
 		if a.frame-st.seen > animForgetFrames {
@@ -152,16 +154,46 @@ func boolTo(b bool) float64 {
 	return 0
 }
 
-// uiFrameSeconds is one display frame, for the easing. Ebitengine calls
-// Draw at the display's rate and does not report a delta, so the nominal
-// step is the honest one — and easing is not a clock, so a frame that ran
-// long only makes one control arrive a frame later.
-func uiFrameSeconds() float64 {
-	tps := float64(ebiten.TPS())
-	if tps <= 0 {
-		tps = playheadFallbackTPS
+// The measured display step, and when it was last measured. Both are
+// package-level because there is one display and one cursor however many
+// screens are stacked, and only the top screen draws.
+var (
+	uiFrameDT   = 1.0 / playheadFallbackTPS
+	uiFrameLast time.Time
+)
+
+// uiFrameSeconds is how long the last displayed frame took, in seconds.
+//
+// It is MEASURED rather than derived from ebiten.TPS, because TPS is the
+// update rate and this is used from Draw, which Ebitengine calls once per
+// display refresh. Deriving it made every animation run at
+// refresh-over-sixty speed — two and a half times too fast on a 144 Hz
+// monitor — and shrank the tooltip's dwell with it.
+//
+// It is called several times per frame and must return the same answer
+// each time, so the measurement happens once, in animator.tick.
+func uiFrameSeconds() float64 { return uiFrameDT }
+
+// measureFrame advances the display clock. animator.tick calls it, which
+// every screen does exactly once at the top of Draw.
+func measureFrame() {
+	now := time.Now()
+	if uiFrameLast.IsZero() {
+		uiFrameLast = now
+		return
 	}
-	return 1 / tps
+	dt := now.Sub(uiFrameLast).Seconds()
+	uiFrameLast = now
+	// A window that was minimised, or a first frame after a long load,
+	// hands back a step of seconds. Clamped, an animation resumes from
+	// where it was; unclamped, everything on screen would snap.
+	if dt < 1.0/480 {
+		dt = 1.0 / 480
+	}
+	if dt > 1.0/20 {
+		dt = 1.0 / 20
+	}
+	uiFrameDT = dt
 }
 
 // --- colour ----------------------------------------------------------

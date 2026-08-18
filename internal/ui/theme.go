@@ -54,6 +54,14 @@ var (
 	// grey, and it would drain the green that says the toggle is on — so
 	// it brightens within its own hue instead.
 	colOnHover = color.RGBA{62, 126, 88, 255}
+	// The tooltip panel. It floats over everything, so it is darker and
+	// more sharply edged than the panels it covers — a tooltip that
+	// matched the chrome underneath would read as part of it.
+	colTipBG   = color.RGBA{14, 14, 20, 255}
+	colTipEdge = color.RGBA{78, 78, 96, 255}
+	// colGroupCap labels a cluster of related controls. Quieter than the
+	// controls it names: it is a heading, not a thing to press.
+	colGroupCap = color.RGBA{110, 110, 128, 255}
 )
 
 // centreX is the x that centres body text within [x, x+w). The width is
@@ -217,6 +225,54 @@ func drawChip(dst *ebiten.Image, r rect, c chipState, av animValues) {
 	drawFlash(dst, r, av)
 }
 
+// Icon-button metrics. Square, because a grid of squares reads as a
+// palette and a row of differently-sized rectangles reads as a list of
+// unrelated things.
+const (
+	iconBtnSize = 32.0
+	iconBtnGap  = 4.0  // within a group: tight, so a group looks like one control
+	iconGrpGap  = 22.0 // between groups: wide enough to be a break
+	iconCapH    = 14.0 // the small caption above a group
+)
+
+// drawIconGlyphButton paints a square control carrying a drawn symbol.
+// It is the chip's shape and animation with a glyph where the label would
+// be — what a toolbar is made of once its controls have stopped being
+// words.
+func drawIconGlyphButton(dst *ebiten.Image, r rect, id glyphID, on, disabled bool, av animValues) {
+	fill, edge, ink := colPanel, colPanelEdge, colHUD
+	switch {
+	case disabled:
+		drawPanel(dst, r, colBG, colBarline)
+		drawGlyph(dst, id, glyphInset(r), colBarline, colBG)
+		return
+	case on:
+		fill, edge, ink = colOn, colOnEdge, colNote
+		fill = lerpCol(fill, colOnHover, av.hover)
+	default:
+		fill = lerpCol(fill, colHover, av.hover)
+		edge = lerpCol(edge, colDim, av.hover)
+		ink = lerpCol(ink, colNote, av.hover)
+	}
+	r = av.animate(r)
+	drawPanel(dst, r, fill, edge)
+	drawGlyph(dst, id, glyphInset(r), ink, fill)
+	drawFlash(dst, r, av)
+}
+
+// glyphInset is the square a control's symbol is drawn in: the control
+// less a uniform margin, so every glyph in a row sits on the same grid
+// however wide its control is.
+func glyphInset(r rect) rect {
+	m := (r.h - glyphBox) / 2
+	return rect{r.x + (r.w-glyphBox)/2, r.y + m, glyphBox, glyphBox}
+}
+
+// drawGroupCaption paints the small heading over a cluster of controls.
+func drawGroupCaption(dst *ebiten.Image, text string, x, y float64) {
+	drawTextSmall(dst, text, x, y, colGroupCap)
+}
+
 // A buttonStyle says how prominent a button is. The start screen's
 // primary action is filled; everything beside it is a panel.
 type buttonStyle int
@@ -231,10 +287,33 @@ const (
 // animated exactly as a chip is. It is what the start screen's actions and
 // the editor's prompts are made of — one shape, so a button behaves the
 // same wherever it appears.
-func drawButton(dst *ebiten.Image, r rect, label, key string, style buttonStyle, av animValues) {
+func drawButton(dst *ebiten.Image, r rect, id glyphID, label, key string, style buttonStyle, av animValues) {
+	// The symbol sits left of the text rather than above it: a button
+	// that is a picture over a word is a tile, and these are buttons in a
+	// row of buttons.
+	textX := func(r rect, s string, scale float64) float64 {
+		w := textW(s)
+		if id == glyphNone {
+			return r.x + (r.w-w)/2
+		}
+		return r.x + (r.w-w-glyphBox-8)/2 + glyphBox + 8
+	}
+	// The budget for the label depends on whether a symbol is actually
+	// drawn. Reserving the symbol's width unconditionally cost a
+	// glyph-less button twenty pixels it was using, which was enough to
+	// ellipsize the start screen's "show  (H)" into "show  …".
+	avail := r.w - 22
+	if id != glyphNone {
+		avail -= glyphBox
+	}
 	if style == btnDisabled {
 		drawPanel(dst, r, colBG, colBarline)
-		drawText(dst, truncateW(label, r.w-14), centreX(truncateW(label, r.w-14), r.x, r.w), r.y+7, colBarline)
+		l := truncateW(label, avail)
+		x := textX(r, l, 1)
+		if id != glyphNone {
+			drawGlyph(dst, id, rect{x - glyphBox - 8, r.y + 6, glyphBox, glyphBox}, colBarline, colBG)
+		}
+		drawText(dst, l, x, r.y+7, colBarline)
 		if key != "" {
 			drawTextSmall(dst, key, r.x+(r.w-textWSmall(key))/2, r.y+24, colBarline)
 		}
@@ -249,11 +328,18 @@ func drawButton(dst *ebiten.Image, r rect, label, key string, style buttonStyle,
 	r = av.animate(r)
 	drawPanel(dst, r, fill, edge)
 
-	label = truncateW(label, r.w-14)
+	label = truncateW(label, avail)
+	x := textX(r, label, 1)
 	if key == "" {
-		drawText(dst, label, centreX(label, r.x, r.w), r.y+(r.h-uiTextH)/2+1, text)
+		if id != glyphNone {
+			drawGlyph(dst, id, rect{x - glyphBox - 8, r.y + (r.h-glyphBox)/2, glyphBox, glyphBox}, text, fill)
+		}
+		drawText(dst, label, x, r.y+(r.h-uiTextH)/2+1, text)
 	} else {
-		drawText(dst, label, centreX(label, r.x, r.w), r.y+6, text)
+		if id != glyphNone {
+			drawGlyph(dst, id, rect{x - glyphBox - 8, r.y + 5, glyphBox, glyphBox}, text, fill)
+		}
+		drawText(dst, label, x, r.y+6, text)
 		drawTextSmall(dst, key, r.x+(r.w-textWSmall(key))/2, r.y+23, lerpCol(colDim, colNote, av.hover))
 	}
 	drawFlash(dst, r, av)

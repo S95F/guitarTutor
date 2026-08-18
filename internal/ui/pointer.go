@@ -48,9 +48,30 @@ type pointer struct {
 	wheel float64
 }
 
+// forcedCursor pins the pointer, for the screenshot tool.
+//
+// Hover states, the animation and the tooltips are the parts of this
+// interface that only exist while a cursor is over something, which makes
+// them the parts that cannot be reviewed from a screenshot — and they are
+// exactly the parts most likely to be drawn in the wrong place, since
+// nothing else in a frame depends on where the mouse is. Eight lines to
+// make them photographable is a better trade than shipping a tooltip
+// nobody has ever seen.
+var forcedCursor *pointer
+
+// ForceCursor pins the pointer at a position for every following frame,
+// as though the mouse were resting there. It exists for tools/uishot and
+// has no effect on a real run, which never calls it.
+func ForceCursor(x, y float64, down bool) {
+	forcedCursor = &pointer{x: x, y: y, down: down}
+}
+
 // readPointer samples Ebitengine's mouse for this frame. It is the only
 // function here that touches the game loop, and it makes no decisions.
 func readPointer() pointer {
+	if forcedCursor != nil {
+		return *forcedCursor
+	}
 	x, y := ebiten.CursorPosition()
 	_, wy := ebiten.Wheel()
 	return pointer{

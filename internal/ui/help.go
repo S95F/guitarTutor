@@ -108,12 +108,58 @@ const (
 	helpTopY   = 72.0
 	helpRowH   = 17.0
 	helpHeadH  = 16.0 // a group heading's own line
-	helpGroupH = 9.0  // extra air between groups
+	helpGroupH = 7.0  // extra air between groups
+	// helpFootGap is the air above the footnote. Both this and helpGroupH
+	// are as small as they are because the editor's table is the longest
+	// one and it has to leave the dismiss line inside the card.
+	helpFootGap = 4.0
 )
 
 // helpCard is the panel the table sits on, centred in the window.
 func helpCard() rect {
 	return rect{160, 12, screenW - 320, screenH - 24}
+}
+
+// The line under each screen's table, for anything the rows themselves
+// cannot say. They are named rather than written at the call site so the
+// test that checks the overlay fits its card can measure the real one.
+const (
+	editorHelpFootnote   = "rest the cursor on any toolbar symbol and it names itself, and gives its key"
+	browserHelpFootnote  = "tab and the arrow keys move between the three lists; the wheel scrolls whichever one the cursor is over"
+	practiceHelpFootnote = "track chips:  click to mute    right-click to solo    the blue edge marks the track the tab is showing"
+)
+
+// helpFlow is where the overlay's parts land vertically. The table has no
+// scrolling, so the two lines UNDER it are the ones that can be pushed off
+// the bottom of the card — and the dismiss line running off is the worst
+// case there is, because it is the one that says how to get out.
+type helpFlow struct {
+	footY    float64 // the footnote's line; negative when there is none
+	dismissY float64 // the "how do I get out of here" line
+	bottom   float64 // the bottom edge of the lowest line drawn
+}
+
+// helpLayout resolves the flow for one table. drawHelpOverlay draws from
+// it, so a test that measures it is measuring the real thing rather than a
+// copy of the arithmetic that can drift away from it.
+func helpLayout(rows []helpBinding, footnote string) helpFlow {
+	y := helpTopY
+	for _, g := range helpSections(rows) {
+		y += helpHeadH + float64(len(g.Rows))*helpRowH + helpGroupH
+	}
+	f := helpFlow{footY: -1}
+	if footnote != "" {
+		f.footY = y + helpFootGap
+		y += helpFootGap + uiTextH
+	}
+	// The dismiss line sits at the foot of the window, but never on top of
+	// a table that ran long: it flows instead once the content reaches it.
+	f.dismissY = screenH - 40
+	if y+8 > f.dismissY {
+		f.dismissY = y + 8
+	}
+	f.bottom = f.dismissY + uiTextH
+	return f
 }
 
 // drawHelpOverlay paints a resolved table over everything else. footnote
@@ -145,16 +191,9 @@ func drawHelpOverlay(dst *ebiten.Image, title string, rows []helpBinding, footno
 		}
 		y += helpGroupH
 	}
+	f := helpLayout(rows, footnote)
 	if footnote != "" {
-		drawText(dst, footnote, helpX, y+6, colHUD)
-		y += 6 + uiTextH
+		drawText(dst, footnote, helpX, f.footY, colHUD)
 	}
-	// The dismiss line sits at the foot of the window, but never on top
-	// of a table that ran long: it flows instead once the content
-	// reaches it.
-	dismissY := screenH - 40.0
-	if y+8 > dismissY {
-		dismissY = y + 8
-	}
-	drawText(dst, "esc, F1, ? or a click closes this", helpX, dismissY, colHUD)
+	drawText(dst, "esc, F1, ? or a click closes this", helpX, f.dismissY, colHUD)
 }

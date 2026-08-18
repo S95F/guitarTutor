@@ -17,6 +17,7 @@ package main
 // than reading it again.
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -150,9 +151,9 @@ func tuningName(tr *score.Track) string {
 // row: the parser reports "path:line:col: message", and the path is
 // already the row above.
 func shortParseError(err error, path string) string {
-	msg := err.Error()
-	if trimmed, ok := strings.CutPrefix(msg, path+":"); ok {
-		return "line " + trimmed
+	var pe *textfmt.ParseError
+	if errors.As(err, &pe) {
+		return fmt.Sprintf("line %d, column %d — %s", pe.Line, pe.Col, pe.Msg)
 	}
-	return msg
+	return err.Error()
 }

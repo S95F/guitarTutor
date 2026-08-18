@@ -135,14 +135,14 @@ func (b *Browser) drawHint(screen *ebiten.Image, l browserLayout) {
 	if !b.hintOpen {
 		drawTextSmall(screen, "getting started", l.hint.x, l.hint.y+4, colHint)
 		av := b.anim.step("hint:toggle", b.ptr.over(l.hintBtn), b.ptr.down, dt)
-		drawButton(screen, l.hintBtn, "show  (H)", "", btnNormal, av)
+		drawButton(screen, l.hintBtn, glyphNone, "show  (H)", "", btnNormal, av)
 		return
 	}
 
 	drawPanel(screen, l.hint, colPanel, colPanelEdge)
 	drawText(screen, "GETTING STARTED", l.hint.x+12, l.hint.y+7, colInferred)
 	av := b.anim.step("hint:toggle", b.ptr.over(l.hintBtn), b.ptr.down, dt)
-	drawButton(screen, l.hintBtn, "hide  (H)", "", btnNormal, av)
+	drawButton(screen, l.hintBtn, glyphNone, "hide  (H)", "", btnNormal, av)
 
 	steps := b.stepList()
 	for i, st := range steps {

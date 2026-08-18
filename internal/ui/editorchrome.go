@@ -1,12 +1,10 @@
 package ui
 
-// The editor's chrome: the toolbar, the track strip, and the one-line
-// entry prompt.
+// The editor's one-line entry prompt: the tempo, the meter and the title,
+// each typed into a small panel over the notation.
 //
-// Every chip carries the key that does the same thing. The editor has more
-// bindings than any other screen here, and a toolbar that replaced the
-// keyboard rather than teaching it would leave a user clicking forever at
-// something they will do a thousand times an evening.
+// The toolbar that used to live here is in editortoolbar.go, where it is
+// symbols rather than the text chips this file was written for.
 
 import (
 	"fmt"
@@ -20,206 +18,12 @@ import (
 	"github.com/S95F/guitarTutor/internal/score"
 )
 
-// An edChip is one toolbar control: how it looks, and what it does.
-type edChip struct {
-	state chipState
-	act   func()
-}
-
-// toolbarChips is the first row: the note value being written, and the
-// techniques and beat operations that apply to what is under the cursor.
-func (e *Editor) toolbarChips() []edChip {
-	_, dot, trip := baseOf(e.doc.Duration())
-	tech := e.cursorTech()
-	note, hasNote := e.doc.NoteAt(e.doc.Cursor().Str)
-
-	chips := []edChip{
-		{chipState{label: "−", key: "["}, func() { e.stepDuration(-1) }},
-		{chipState{label: durationName(e.doc.Duration()), key: "value"}, nil},
-		{chipState{label: "+", key: "]"}, func() { e.stepDuration(1) }},
-		{chipState{label: "dot", key: ".", on: dot}, func() { e.modifyDuration(dotted) }},
-		{chipState{label: "trip", key: "T", on: trip}, func() { e.modifyDuration(triplet) }},
-	}
-	for _, t := range []struct {
-		label string
-		key   string
-		bit   score.Technique
-	}{
-		{"tie", "`", 0}, // 0 marks the tie, which is not a technique bit
-		{"h", "h", score.TechHammer},
-		{"p", "p", score.TechPull},
-		{"s", "s", score.TechSlide},
-		{"b", "b", score.TechBend},
-		{"v", "v", score.TechVibrato},
-		{"x", "x", score.TechDead},
-	} {
-		on := t.bit != 0 && tech&t.bit != 0
-		if t.bit == 0 {
-			on = hasNote && note.Tied
-		}
-		bit := t.bit
-		act := func() { e.report(e.doc.ToggleTech(bit)) }
-		if bit == 0 {
-			act = func() { e.report(e.doc.ToggleTie()) }
-		}
-		chips = append(chips, edChip{chipState{label: t.label, key: t.key, on: on, disabled: !hasNote}, act})
-	}
-	chips = append(chips,
-		edChip{chipState{label: "rest", key: "R"}, func() { e.report(e.doc.ClearBeat()) }},
-		edChip{chipState{label: "+beat", key: "enter"}, func() { e.report(e.doc.InsertBeat()) }},
-		edChip{chipState{label: "+bar", key: "N"}, e.addBarAfterCursor},
-	)
-	return greyIfText(e, chips)
-}
-
-// greyIfText disables the controls that edit the NOTATION while the raw
-// text is showing. They would still work — they act on the document behind
-// the text — but the text is applied over that document when the view
-// closes, so the edit would be silently discarded a moment later. A
-// control that quietly does nothing is worse than one that is visibly
-// unavailable.
-func greyIfText(e *Editor, chips []edChip) []edChip {
-	if e.text == nil {
-		return chips
-	}
-	for i := range chips {
-		chips[i].state.disabled = true
-	}
-	return chips
-}
-
 // cursorTech is the technique bitmask on the note under the cursor.
 func (e *Editor) cursorTech() score.Technique {
 	if n, ok := e.doc.NoteAt(e.doc.Cursor().Str); ok {
 		return n.Tech
 	}
 	return 0
-}
-
-// trackChips is the second row: the tracks, and the piece-wide actions.
-func (e *Editor) trackChips() []edChip {
-	var chips []edChip
-	for i, tr := range e.doc.Score().Tracks {
-		name := tr.Name
-		if name == "" {
-			name = fmt.Sprintf("track %d", i+1)
-		}
-		if tr.Role == score.RoleBacking {
-			name += " (backing)"
-		}
-		idx := i
-		chips = append(chips, edChip{
-			chipState{label: truncateW(name, 160), key: "tab", on: i == e.doc.TrackIndex()},
-			func() { e.doc.SelectTrack(idx) },
-		})
-	}
-	chips = append(chips,
-		edChip{chipState{label: "+ track", key: ""}, func() {
-			e.report(e.doc.AddTrack(fmt.Sprintf("Track %d", len(e.doc.Score().Tracks)+1)))
-		}},
-		edChip{chipState{label: e.tuningName(), key: "shift+U"}, e.cycleTuning},
-		edChip{chipState{label: fmt.Sprintf("%d/%d", e.doc.Bar().Num, e.doc.Bar().Den), key: "shift+M"},
-			func() { e.openEntry(edEntryMeter) }},
-		edChip{chipState{label: fmt.Sprintf("%.0f BPM", e.doc.TempoAtCursor()), key: "shift+B"},
-			func() { e.openEntry(edEntryTempo) }},
-	)
-	return greyIfText(e, chips)
-}
-
-// actionChips is the right-hand group of the second row: what to do with
-// the piece as a whole. They are laid out from the right edge so that
-// adding a track never pushes SAVE off the screen.
-func (e *Editor) actionChips() []edChip {
-	label := "text"
-	if e.text != nil {
-		label = "grid"
-	}
-	return []edChip{
-		{chipState{label: "save", key: "ctrl+S", on: e.doc.Dirty()}, func() { e.save() }},
-		{chipState{label: label, key: "F2", on: e.text != nil}, e.toggleText},
-		{chipState{label: "practice", key: "shift+P", disabled: e.practice == nil}, e.saveAndPractice},
-		{chipState{label: "?", key: "F1"}, func() { e.helpOpen = true }},
-	}
-}
-
-// layoutChips places a row of chips left to right from x, and returns the
-// rect of each.
-func layoutChips(chips []edChip, x, y float64) []rect {
-	out := make([]rect, len(chips))
-	for i, c := range chips {
-		w := chipW(c.state)
-		out[i] = rect{x, y, w, chipH}
-		x += w + chipGap
-	}
-	return out
-}
-
-// layoutChipsRight places a row of chips ending at the right margin.
-func layoutChipsRight(chips []edChip, y float64) []rect {
-	total := 0.0
-	for _, c := range chips {
-		total += chipW(c.state) + chipGap
-	}
-	return layoutChips(chips, screenW-uiPadX-total+chipGap, y)
-}
-
-func (e *Editor) drawToolbar(screen *ebiten.Image) {
-	chips := e.toolbarChips()
-	dt := uiFrameSeconds()
-	for i, r := range layoutChips(chips, uiPadX, edToolbarY) {
-		av := e.anim.step("tool:"+chips[i].state.label, e.ptr.over(r), e.ptr.down, dt)
-		drawChip(screen, r, chips[i].state, av)
-	}
-}
-
-func (e *Editor) drawTrackStrip(screen *ebiten.Image) {
-	actions := e.actionChips()
-	actionRects := layoutChipsRight(actions, edTrackY)
-	limit := screenW - uiPadX
-	if len(actionRects) > 0 {
-		limit = actionRects[0].x - chipGap
-	}
-	tracks := e.trackChips()
-	dt := uiFrameSeconds()
-	for i, r := range layoutChips(tracks, uiPadX, edTrackY) {
-		if r.x+r.w > limit {
-			break // no room; the keyboard still reaches them
-		}
-		av := e.anim.step("track:"+tracks[i].state.label, e.ptr.over(r), e.ptr.down, dt)
-		drawChip(screen, r, tracks[i].state, av)
-	}
-	for i, r := range actionRects {
-		av := e.anim.step("act:"+actions[i].state.label, e.ptr.over(r), e.ptr.down, dt)
-		drawChip(screen, r, actions[i].state, av)
-	}
-}
-
-// hotspots are every clickable control on the editor's chrome, in the
-// order the drawing puts them.
-func (e *Editor) hotspots() []hotspot {
-	var out []hotspot
-	add := func(chips []edChip, rects []rect, limit float64) {
-		for i, r := range rects {
-			if r.x+r.w > limit || chips[i].act == nil || chips[i].state.disabled {
-				continue
-			}
-			act := chips[i].act
-			out = append(out, hotspot{r: r, on: act})
-		}
-	}
-	tool := e.toolbarChips()
-	add(tool, layoutChips(tool, uiPadX, edToolbarY), screenW)
-
-	actions := e.actionChips()
-	actionRects := layoutChipsRight(actions, edTrackY)
-	limit := screenW - uiPadX
-	if len(actionRects) > 0 {
-		limit = actionRects[0].x - chipGap
-	}
-	tracks := e.trackChips()
-	add(tracks, layoutChips(tracks, uiPadX, edTrackY), limit)
-	add(actions, actionRects, screenW)
-	return out
 }
 
 // --- the one-line entry ----------------------------------------------

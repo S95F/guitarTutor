@@ -74,7 +74,7 @@ func (d *Doc) ClearBeat() error {
 // with what would not fit, rather than pushing a note into the next bar.
 func (d *Doc) SetDuration(ticks int64) error {
 	if _, ok := writableDuration(ticks); !ok {
-		return fmt.Errorf("%d ticks is not a note value this format can write", ticks)
+		return fmt.Errorf("that length cannot be written down: note lengths are whole, half, quarter, eighth, sixteenth and thirty-second, plain, dotted or as triplets")
 	}
 	err := d.mutate(func() error {
 		d.Beat().Dur = ticks
@@ -96,7 +96,7 @@ func (d *Doc) SetDuration(ticks int64) error {
 // would be the wrong half of the gesture.
 func (d *Doc) SetNewBeatDuration(ticks int64) error {
 	if _, ok := writableDuration(ticks); !ok {
-		return fmt.Errorf("%d ticks is not a note value this format can write", ticks)
+		return fmt.Errorf("that length cannot be written down: note lengths are whole, half, quarter, eighth, sixteenth and thirty-second, plain, dotted or as triplets")
 	}
 	d.dur = ticks
 	return nil
@@ -153,7 +153,7 @@ func (d *Doc) ToggleTie() error {
 				return nil
 			}
 		}
-		return fmt.Errorf("there is no note on string %d to tie", str)
+		return fmt.Errorf("put a fret number on string %d first, then tie it", str)
 	})
 }
 
@@ -168,7 +168,7 @@ func (d *Doc) ToggleTech(t score.Technique) error {
 				return nil
 			}
 		}
-		return fmt.Errorf("there is no note on string %d to mark", str)
+		return fmt.Errorf("put a fret number on string %d first, then mark it", str)
 	})
 }
 
@@ -210,18 +210,26 @@ func writableDuration(ticks int64) (string, bool) {
 	return "", false
 }
 
-// durationLabel names a length the way a musician would, for messages:
-// "1/8 note", "dotted 1/4 note", "1/16 triplet".
+// durationWords is how each written note length is said out loud. The
+// spellings on the left are the FILE's; every message a user reads uses
+// the one on the right.
+var durationWords = map[string]string{
+	"1": "whole note", "2": "half note", "4": "quarter note",
+	"8": "eighth note", "16": "sixteenth note", "32": "thirty-second note",
+}
+
+// durationLabel names a length the way a musician would: "eighth note",
+// "dotted quarter note", "sixteenth triplet".
 func durationLabel(ticks int64) string {
 	name, ok := writableDuration(ticks)
 	if !ok {
-		return fmt.Sprintf("%d-tick beat", ticks)
+		return "note of that length"
 	}
 	switch {
 	case len(name) > 1 && name[len(name)-1] == '.':
-		return "dotted 1/" + name[:len(name)-1] + " note"
+		return "dotted " + durationWords[name[:len(name)-1]]
 	case len(name) > 1 && name[len(name)-1] == 't':
-		return "1/" + name[:len(name)-1] + " triplet"
+		return durationWords[name[:len(name)-1]] + " triplet"
 	}
-	return "1/" + name + " note"
+	return durationWords[name]
 }

@@ -91,12 +91,19 @@ tied halves.
 
 ## Editing this by hand vs. in the app
 
-The editor's grid has controls for what a guitarist reaches for most:
-frets, note values, ties, the six technique letters, bars, the meter, the
-tempo, a handful of tunings. The format has more than that — a capo, a
-General MIDI program, an arbitrary tuning, a comment explaining a passage
-to yourself — so **F2** in the editor shows this text instead, parsed as
-you type. Neither view is the real one; both are the same piece.
+The editor's toolbar has controls for what a guitarist reaches for most:
+frets, note lengths, ties, the six techniques, bars, the meter, the tempo,
+a handful of tunings. It shows them as NOTATION rather than as this
+format's characters — a filled notehead with a flag rather than `8`, an
+arc rather than `~`, a cross rather than `x` — because the letters below
+are the right way to write a file down and the wrong way to label a
+button.
+
+The format has more than the toolbar does: a capo, a General MIDI
+program, an arbitrary tuning, a comment explaining a passage to yourself.
+**F2** in the editor shows this text instead, parsed as you type, with a
+legend beside it covering everything on this page in one column. Neither
+view is the real one; both are the same piece.
 
 ## Semantics
 

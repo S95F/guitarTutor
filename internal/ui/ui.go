@@ -1101,8 +1101,7 @@ func (a *App) drawBPMEntry(screen *ebiten.Image) {
 // drawHelp paints the full key-binding list over everything else, from
 // the same table the footer hint uses.
 func (a *App) drawHelp(screen *ebiten.Image) {
-	drawHelpOverlay(screen, "PRACTICE KEYS", a.helpRows(),
-		"track chips:  click to mute    right-click to solo    the blue edge marks the track the tab is showing")
+	drawHelpOverlay(screen, "PRACTICE KEYS", a.helpRows(), practiceHelpFootnote)
 }
 
 // Layout implements ebiten.Game with a fixed logical size.

@@ -17,6 +17,8 @@ package ui
 // hatch.
 
 import (
+	"errors"
+	"fmt"
 	"image/color"
 	"strings"
 
@@ -93,7 +95,7 @@ func (p *gtabPane) text() string {
 func (p *gtabPane) reparse() {
 	sc, err := textfmt.Parse([]byte(p.text()), "piece")
 	if err != nil {
-		p.ok, p.status, p.bars, p.notes = false, err.Error(), 0, 0
+		p.ok, p.status, p.bars, p.notes = false, gtabProblem(err), 0, 0
 		return
 	}
 	p.ok, p.status = true, ""
@@ -108,6 +110,23 @@ func (p *gtabPane) reparse() {
 			}
 		}
 	}
+}
+
+// gtabProblem turns a parse failure into a line somebody can act on.
+//
+// The parser reports "piece:4:12: bar underfull: ...", which is the right
+// shape for a compiler and the wrong one for a pane: "piece" is a
+// filename that does not exist, and the colons read as punctuation in the
+// message rather than as a position. The position is the useful half, so
+// it is said in words and the rest is left alone — the parser's own
+// wording is already plain, and rewriting it here would put the
+// explanation of the format two files away from the format.
+func gtabProblem(err error) string {
+	var pe *textfmt.ParseError
+	if !errors.As(err, &pe) {
+		return err.Error()
+	}
+	return fmt.Sprintf("line %d, column %d — %s", pe.Line, pe.Col, pe.Msg)
 }
 
 // toggleText swaps the grid for the text and back. Going out of the text
@@ -140,7 +159,7 @@ func (e *Editor) applyText() bool {
 	}
 	sc, perr := textfmt.Parse([]byte(e.text.text()), "piece")
 	if perr != nil {
-		e.report(perr)
+		e.report(fmt.Errorf("%s", gtabProblem(perr)))
 		return false
 	}
 	doc, derr := edit.Open(sc)
@@ -155,7 +174,6 @@ func (e *Editor) applyText() bool {
 	e.doc = doc
 	e.doc.MarkSaved()
 	e.markDirtyFromText()
-	e.say("applied the text")
 	return true
 }
 
@@ -403,14 +421,96 @@ func (p *gtabPane) clickAt(px, py float64) {
 	p.clampCaret()
 }
 
+// gtLegendW is the column beside the text that explains the format.
+//
+// It is the whole reason this view is usable by anybody who has not read
+// docs/TEXTFORMAT.md. The pane shows a file written in a small language,
+// the language is five rules long, and printing those five rules next to
+// it is the difference between an escape hatch and a wall. The pane gives
+// up the width without complaint: .gtab lines are short, and the longest
+// one in a real piece is a bar of sixteenths at about sixty characters.
+const gtLegendW = 340.0
+
 func gtabPaneRect() rect {
-	return rect{uiPadX, edGridTop, screenW - 2*uiPadX, gridBottom() - edGridTop - 22}
+	return rect{uiPadX, edGridTop, screenW - 2*uiPadX - gtLegendW - 16, gridBottom() - edGridTop - 22}
+}
+
+// gtLegendRect is the explanation column, to the right of the text.
+func gtLegendRect() rect {
+	p := gtabPaneRect()
+	return rect{p.x + p.w + 16, p.y, gtLegendW, p.h}
+}
+
+// gtLegend is what the column says: every piece of the format, with what
+// it means in a guitarist's words. An empty example starts a section.
+//
+// One line per entry, with the example in a fixed column, because the
+// whole list has to fit beside the text without scrolling — a legend you
+// have to scroll is a legend you go and read somewhere else, which is the
+// documentation this column exists to save you from opening.
+var gtLegend = []struct{ example, means string }{
+	{"", "NOTES"},
+	{"0.6", "fret 0, string 6 (1 is the thinnest)"},
+	{"3.5.8", "fret 3, string 5, an eighth"},
+	{"5.4", "length sticks until you change it"},
+	{"(0.6 2.5)", "struck together: a chord"},
+	{"r", "a rest"},
+	{"~0.6", "tied: hold, do not strike again"},
+	{"|", "ends a bar"},
+
+	{"", "LENGTHS"},
+	{"8", "an eighth (1 2 4 8 16 32)"},
+	{"4.", "dotted: half as long again"},
+	{"8t", "one of an eighth triplet"},
+
+	{"", "MARKS ON A NOTE"},
+	{"5.3h", "hammer-on (p s b v too)"},
+	{"7.3x", "dead note, muted"},
+
+	{"", "THE PIECE"},
+	{"\\title", "what it is called"},
+	{"\\tempo 120", "beats per minute"},
+	{"\\time 3/4", "time signature"},
+	{"\\tuning", "open strings, low to high"},
+	{"\\capo 2", "capo fret"},
+	{"\\track", "starts another part"},
+	{"//", "a note to yourself"},
+}
+
+// gtLegendCol is where the meanings start, so every one of them lines up
+// however wide its example is.
+const gtLegendCol = 84.0
+
+// drawGtabLegend paints the explanation column.
+func (e *Editor) drawGtabLegend(screen *ebiten.Image) {
+	r := gtLegendRect()
+	drawPanel(screen, r, colPanel, colPanelEdge)
+	drawText(screen, "WHAT THE TEXT MEANS", r.x+12, r.y+8, colInferred)
+
+	y := r.y + 34
+	for _, row := range gtLegend {
+		if y > r.y+r.h-14 {
+			break
+		}
+		if row.example == "" {
+			y += 4
+			drawTextSmall(screen, row.means, r.x+12, y, colGroupCap)
+			y += 16
+			continue
+		}
+		drawTextSmall(screen, row.example, r.x+12, y, colSounding)
+		drawTextSmall(screen, truncateW(row.means, r.w-gtLegendCol-22), r.x+gtLegendCol, y, colDim)
+		y += 17
+	}
+	drawTextSmall(screen, "the notation view has controls for the common ones",
+		r.x+12, r.y+r.h-18, colHint)
 }
 
 func (e *Editor) drawTextPane(screen *ebiten.Image) {
 	p := e.text
 	r := gtabPaneRect()
 	drawPanel(screen, r, colPanel, colPanelEdge)
+	e.drawGtabLegend(screen)
 
 	vis := p.visibleLines()
 	adv := textWMono(" ")
@@ -437,7 +537,7 @@ func (e *Editor) drawTextPane(screen *ebiten.Image) {
 	// "did I break it" is always on screen.
 	y := r.y + r.h + 4
 	if p.ok {
-		drawText(screen, itoa(p.bars)+" bars, "+itoa(p.notes)+" notes — this parses", uiPadX, y, colGtOK)
+		drawText(screen, "looks good — "+itoa(p.bars)+" bars, "+itoa(p.notes)+" notes", uiPadX, y, colGtOK)
 		return
 	}
 	drawText(screen, truncateW(p.status, screenW-2*uiPadX), uiPadX, y, colMiss)
@@ -478,7 +578,7 @@ func (e *Editor) textBindings() []helpBinding {
 		{Group: "editing", Keys: "arrows / home / end", Desc: "Move the caret"},
 		{Group: "editing", Keys: "enter / backspace / del", Desc: "Split a line, and delete either way"},
 		{Group: "editing", Keys: "click", Desc: "Put the caret where you click"},
-		{Group: "session", Keys: "F2 or esc", Hint: "F2 back to the grid", Desc: "Parse the text and go back to the notation"},
+		{Group: "session", Keys: "F2 or esc", Hint: "F2 back to the notation", Desc: "Read the text back and return to the staff"},
 		{Group: "session", Keys: "ctrl+S", Hint: "ctrl+S save", Desc: "Parse the text and save the piece"},
 		{Group: "session", Keys: "? or F1", Hint: "? help", Desc: "This key-binding list"},
 	}

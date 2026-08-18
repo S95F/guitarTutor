@@ -139,11 +139,13 @@ Not everything you practise exists as a file. The start screen's **Write a new p
 - **↑ ↓** choose the string, **[** and **]** the note value,
 - **space** moves on to the next beat — and past the last bar, makes another, so writing never stops to ask for room.
 
-The staff is labelled with your tuning down the left, note values are drawn as stems and flags under it, and the header names the pitch the note under the cursor actually *sounds* — which is not the fret number, and is not the same with a capo on. Techniques are the same letters the text format uses (`h p s b v x`), and a tie is the **`** key. **E** on the start screen opens whatever is selected, so an import you want to fix up is two keys away.
+The toolbar is **notation, not syntax**. Note lengths are noteheads with stems and flags — pick one, don't step through a fraction. A tie is an arc between two heads, a slide is a line between them, a bend is an arrow curving up, a dead note is a cross. They are grouped under captions that say what each group acts on — *note length*, *on this note*, *this bar*, *history* — and resting on any of them names it and gives its key. Nothing on it is labelled with a character out of the file format.
+
+The staff is labelled with your tuning down the left, note lengths are drawn as stems and flags underneath, rests are rests, ties are arcs, and the header names the pitch the note under the cursor actually *sounds* — which is not the fret number, and is not the same with a capo on. **E** on the start screen opens whatever is selected, so an import you want to fix up is two keys away.
 
 Pieces are saved as `.gtab` — the small, git-diffable [text format](docs/TEXTFORMAT.md) — into the app's own pieces folder by default, where they show up in your library. **shift+P** saves and opens the piece for practice; **esc** comes back to the editing, so writing a bar, hearing it, and fixing it is a loop rather than a round trip.
 
-**F2** swaps the notation for the raw `.gtab` text, parsed as you type with the line and column of anything that does not. That is where the parts of the format the grid has no button for live: a capo, a General MIDI program, an unusual tuning, a comment to yourself.
+**F2** swaps the notation for the raw `.gtab` text, parsed as you type, with a legend beside it explaining every piece of the format — so the escape hatch does not require having read the format documentation first. That is where the parts of the format the toolbar has no button for live: a capo, a General MIDI program, an unusual tuning, a comment to yourself.
 
 Bars stay exactly full, across every track at once — the editor refuses an edit that would overflow a bar rather than spilling it into the next one, and says what would not fit.
 

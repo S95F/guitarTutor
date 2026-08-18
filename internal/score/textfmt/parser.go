@@ -177,8 +177,8 @@ func (p *parser) closeBar(at pos) error {
 		return p.errAt(at, "empty bar")
 	}
 	if p.filled != p.bar.Len() {
-		return p.errAt(at, "bar underfull: beats fill %d of %d ticks (meter %d/%d)",
-			p.filled, p.bar.Len(), p.bar.Num, p.bar.Den)
+		return p.errAt(at, "bar underfull: the notes add up to %s of the %d beats a %d/%d bar holds",
+			beatsIn(p.filled, p.bar.Den), p.bar.Num, p.bar.Num, p.bar.Den)
 	}
 	p.bar = nil
 	return nil
@@ -192,13 +192,25 @@ func (p *parser) addBeat(at pos, dur int64, notes ...score.Note) error {
 		p.beginBar()
 	}
 	if p.filled+dur > p.bar.Len() {
-		return p.errAt(at, "bar overfull: beats fill %d ticks, meter %d/%d allows %d",
-			p.filled+dur, p.bar.Num, p.bar.Den, p.bar.Len())
+		return p.errAt(at, "bar overfull: the notes add up to %s beats, and a %d/%d bar holds %d",
+			beatsIn(p.filled+dur, p.bar.Den), p.bar.Num, p.bar.Den, p.bar.Num)
 	}
 	p.bar.AddBeat(dur, notes...)
 	p.filled += dur
 	p.sticky = dur
 	return nil
+}
+
+// beatsIn renders a span of ticks as beats of a meter, for the messages a
+// person reads. Ticks are the model's unit — PPQ 960, defined nowhere a
+// user can see — and a bar being short by 960 of them means nothing to
+// somebody counting in beats.
+func beatsIn(ticks int64, den int) string {
+	beat := 4 * score.PPQ / int64(den)
+	if beat <= 0 {
+		return "0"
+	}
+	return strconv.FormatFloat(float64(ticks)/float64(beat), 'g', 3, 64)
 }
 
 // beatWord parses one non-chord beat token: a note "fret.string" with

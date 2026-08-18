@@ -24,6 +24,7 @@ package ui
 
 import (
 	"fmt"
+	"image"
 	"image/color"
 	"path/filepath"
 	"strconv"
@@ -41,9 +42,14 @@ import (
 
 // Layout, in logical pixels.
 const (
-	edToolbarY = uiBodyTop + 4
-	edTrackY   = edToolbarY + chipH + 8
-	edGridTop  = edTrackY + chipH + 16
+	// The caption over each toolbar group, then the icon row, then the
+	// piece row. The captions are what say whether a control acts on the
+	// note under the cursor, on the bar, or on the whole piece — the
+	// question a flat row of chips never answered.
+	edCaptionY = uiBodyTop
+	edToolbarY = edCaptionY + iconCapH + 2
+	edTrackY   = edToolbarY + iconBtnSize + 12
+	edGridTop  = edTrackY + iconBtnSize + 18
 	// edLabelW is the margin at the left of every system that carries the
 	// string names. A guitarist reads a staff by which STRING a line is,
 	// and six anonymous lines make you count from the bottom every time.
@@ -76,6 +82,10 @@ const (
 	// before it is taken as final. Two-digit frets have to be typeable, and
 	// a fret is entered by typing it, so "1" then "2" within this window is
 	// fret 12 and after it is fret 1 then fret 2.
+	// edMaxStrings bounds the per-string scratch the staff drawing keeps.
+	// No instrument this application draws has more, and the array is on
+	// the stack rather than allocated per bar per frame.
+	edMaxStrings     = 16
 	edFretHoldFrames = 40
 	// edMsgFrames is how long the status line holds a message.
 	edMsgFrames = 300
@@ -85,6 +95,9 @@ var (
 	colEdCursor = color.RGBA{60, 110, 170, 255} // the cell the next edit lands in
 	colEdCaret  = color.RGBA{120, 190, 255, 255}
 	colEdRest   = color.RGBA{110, 110, 126, 255}
+	// colTieArc is the slur that holds a note over. Brighter than the
+	// staff lines it crosses, quieter than the fret numbers it joins.
+	colTieArc = color.RGBA{150, 170, 200, 255}
 )
 
 // An Editor is one piece being written. Create it with NewEditor (a blank
@@ -99,6 +112,7 @@ type Editor struct {
 
 	ptr      pointer
 	anim     animator
+	tip      tips
 	frame    int64
 	scroll   float64
 	helpOpen bool
@@ -264,8 +278,7 @@ func (e *Editor) Draw(screen *ebiten.Image) {
 	screen.Fill(colBG)
 	e.anim.tick()
 	drawHeader(screen, e.headerTitle(), e.statusLine(), colHUD)
-	e.drawToolbar(screen)
-	e.drawTrackStrip(screen)
+	e.drawChrome(screen, e.layoutToolbar())
 	if e.text != nil {
 		e.drawTextPane(screen)
 	} else {
@@ -280,6 +293,14 @@ func (e *Editor) Draw(screen *ebiten.Image) {
 		drawText(screen, truncateW(msg, screenW-2*uiPadX), uiPadX, uiFooterY-20, col)
 	}
 	drawFooter(screen, e.hintLine())
+	// The tooltip goes over the content and under the modals: while a
+	// prompt is up the toolbar cannot be pressed, so a name floating over
+	// the dimmed screen would be pointing at nothing.
+	if e.modalUp() {
+		e.tip.hide()
+	} else {
+		e.tip.draw(screen)
+	}
 	if e.entry != nil {
 		e.drawEntry(screen)
 	}
@@ -287,8 +308,7 @@ func (e *Editor) Draw(screen *ebiten.Image) {
 		e.drawLeavePrompt(screen)
 	}
 	if e.helpOpen {
-		drawHelpOverlay(screen, "EDITOR KEYS", e.editorBindings(),
-			"the toolbar does the same things with the mouse; every chip carries its key")
+		drawHelpOverlay(screen, "EDITOR KEYS", e.editorBindings(), editorHelpFootnote)
 	}
 }
 
@@ -301,7 +321,13 @@ func (e *Editor) headerTitle() string {
 	if e.doc.Dirty() {
 		name += " •"
 	}
-	return truncateWScaled(name, screenW/2, uiTitleScl)
+	// The budget is what the header actually has left: the width less both
+	// margins, the status line sharing the row, and a gap. A fixed half
+	// the window let a long title run into a long status — the same fault
+	// the practice view's own title had (audit A-series).
+	const gap = 32.0
+	budget := screenW - 2*uiPadX - textW(e.statusLine()) - gap
+	return truncateWScaled(name, budget, uiTitleScl)
 }
 
 // statusLine is the right-hand header text: where the cursor is and what
@@ -312,7 +338,7 @@ func (e *Editor) statusLine() string {
 	where := fmt.Sprintf("bar %d/%d   %s", c.Bar+1, e.doc.BarCount(), e.cursorPitch())
 	// The note value is labelled: next to a time signature, a bare "1/4"
 	// reads as a second one.
-	what := fmt.Sprintf("%d/%d   %.0f BPM   note %s", bar.Num, bar.Den, e.doc.TempoAtCursor(), durationName(e.doc.Duration()))
+	what := fmt.Sprintf("%d/%d   %.0f BPM   note: %s", bar.Num, bar.Den, e.doc.TempoAtCursor(), durationName(e.doc.Duration()))
 	file := "unsaved"
 	if e.path != "" {
 		file = filepath.Base(e.path)
@@ -328,12 +354,12 @@ func (e *Editor) statusLine() string {
 func (e *Editor) cursorPitch() string {
 	tr := e.doc.Track()
 	str := e.doc.Cursor().Str
-	label := fmt.Sprintf("str %d (%s)", str, edStringName(tr, str))
+	label := fmt.Sprintf("%s string", edStringName(tr, str))
 	n, ok := e.doc.NoteAt(str)
 	if !ok {
 		return label
 	}
-	return label + " = " + edPitchName(tr.Pitch(n))
+	return label + " · sounding " + edPitchName(tr.Pitch(n))
 }
 
 // edStringName is a string's open note, without an octave: what is
@@ -370,6 +396,11 @@ func edPitchName(key int) string {
 	}
 	return edPitchClasses[key%12] + strconv.Itoa(key/12-1)
 }
+
+// modalUp reports whether something is covering the editor: a one-line
+// prompt, the unsaved-changes question, or the key list. While one is,
+// the chrome underneath is inert.
+func (e *Editor) modalUp() bool { return e.entry != nil || e.leaving || e.helpOpen }
 
 // --- the grid ---------------------------------------------------------
 
@@ -496,7 +527,14 @@ func (e *Editor) clampScroll(systems []edSystem) {
 	}
 }
 
-func (e *Editor) drawGrid(screen *ebiten.Image) {
+func (e *Editor) drawGrid(dst *ebiten.Image) {
+	// Everything below is drawn into the notation band only. Scrolling a
+	// long piece puts a system partly above the top of the band, and the
+	// per-system skip below only drops the ones that are ENTIRELY outside
+	// — so without this the staff lines and fret numbers of a partly
+	// visible system were painted straight over the toolbar.
+	screen := dst.SubImage(image.Rect(0, int(edGridTop)-2, screenW, int(gridBottom()))).(*ebiten.Image)
+
 	systems := e.layoutSystems()
 	e.clampScroll(systems)
 	tr := e.doc.Track()
@@ -538,6 +576,19 @@ func (e *Editor) drawGrid(screen *ebiten.Image) {
 
 func (e *Editor) drawBar(screen *ebiten.Image, tr *score.Track, box edBarBox, strTop float64, nStr int, cur edit.Cursor) {
 	bar := tr.Bars[box.index]
+	// Where each string's last note was drawn and which beat it was in, so
+	// a tie can be an ARC back to it. A tie holds the note in the PREVIOUS
+	// beat (see score.Note.Tied), so a note two beats back is not what it
+	// is tied to — arcing to that one draws a sustain across a rest that
+	// playback does not produce. A string with nothing immediately before
+	// it reads as -1 and gets the short leading arc a tie over a barline
+	// is engraved with.
+	var lastX [edMaxStrings]float64
+	var lastBeat [edMaxStrings]int
+	for i := range lastX {
+		lastX[i] = -1
+		lastBeat[i] = -2
+	}
 	x := float32(edGridX + box.x)
 	vector.StrokeLine(screen, x, float32(strTop-6), x, float32(strTop+float64(nStr-1)*edStringGap+6), 1, colBarline, false)
 	drawTextSmall(screen, strconv.Itoa(box.index+1), float64(x)+4, strTop-26, colHint)
@@ -545,9 +596,32 @@ func (e *Editor) drawBar(screen *ebiten.Image, tr *score.Track, box edBarBox, st
 	// A bar that starts a new meter or tempo says so above the staff, the
 	// way notation does — and the way the file will, since both are only
 	// writable at a barline.
-	if mark := e.barMarking(box.index, bar); mark != "" {
-		drawTextSmall(screen, mark, float64(x)+4, strTop-13, colInferred)
+	// The markings a bar can carry, in the order a score writes them: the
+	// meter first, then the tempo with the note it counts in front of its
+	// number. They are drawn as two pieces rather than one string because
+	// the note glyph belongs to the TEMPO — put in front of the whole
+	// marking it reads as counting the time signature.
+	meter, tempo := e.barMarking(box.index, bar)
+	mx := float64(x) + 4
+	if meter != "" {
+		drawTextSmall(screen, meter, mx, strTop-13, colInferred)
+		mx += textWSmall(meter) + 10
 	}
+	if tempo != "" {
+		drawGlyph(screen, glyphNoteQuarter, rect{mx, strTop - 15, 12, 13}, colInferred, colBG)
+		drawTextSmall(screen, tempo, mx+13, strTop-13, colInferred)
+	}
+
+	// The technique letters sit to the RIGHT of a fret number, in the space
+	// the next beat's own background is about to be painted over. Drawing
+	// them in a second pass, after every beat has laid its background
+	// down, is what stops "12h" losing its h whenever the beats are close
+	// together.
+	type pendingMark struct {
+		s    string
+		x, y float64
+	}
+	var marks []pendingMark
 
 	for bi, bt := range bar.Beats {
 		bx := edGridX + edBeatX(box, bar, bt)
@@ -557,8 +631,7 @@ func (e *Editor) drawBar(screen *ebiten.Image, tr *score.Track, box edBarBox, st
 			// string the next fret typed will land on.
 			vector.StrokeLine(screen, float32(bx-4), float32(strTop-8),
 				float32(bx-4), float32(strTop+float64(nStr-1)*edStringGap+8), 1, colEdCaret, false)
-			cy := strTop + float64(cur.Str-1)*edStringGap
-			vector.DrawFilledRect(screen, float32(bx-5), float32(cy-10), 28, 20, colEdCursor, false)
+			drawCursorCell(screen, bx, strTop, cur.Str)
 		}
 		// A note draws its own background so the string line does not run
 		// through the digits — and on the cursor's own cell that background
@@ -573,12 +646,27 @@ func (e *Editor) drawBar(screen *ebiten.Image, tr *score.Track, box edBarBox, st
 
 		if len(bt.Notes) == 0 {
 			// A rest is drawn on the middle string, where it does not read
-			// as belonging to any one of them.
+			// as belonging to any one of them — as the rest SYMBOL, not as
+			// the letter r, which is what the file writes and what nobody
+			// reading a stave has ever seen.
+			//
+			// The backdrop that breaks the staff lines behind it is drawn
+			// in the CURSOR's colour when this is the cursor's beat: it
+			// overlaps the lit cell, and painting the page colour there
+			// punched a hole through the one mark that says where the next
+			// note will land.
 			ry := strTop + float64(nStr-1)/2*edStringGap
-			label := "r"
-			w := float32(textWMono(label))
-			vector.DrawFilledRect(screen, float32(bx-2), float32(ry-9), w+4, 18, colBG, false)
-			drawTextMono(screen, label, bx, ry-9, colEdRest)
+			vector.DrawFilledRect(screen, float32(bx-3), float32(ry-10), 18, 20, colBG, false)
+			drawGlyph(screen, edRestGlyph(bt.Dur), rect{bx - 2, ry - 9, 16, 18}, colEdRest, colBG)
+			// The backdrop that breaks the staff lines behind the rest can
+			// cross the lit cursor cell, which sits on whichever string the
+			// cursor is on. Painting the page colour there punched a hole in
+			// it — and painting the CURSOR colour instead drew a second lit
+			// block, which reads as two cursors. The cell is simply laid
+			// down again: there is no note under it to cover.
+			if onCursor {
+				drawCursorCell(screen, bx, strTop, cur.Str)
+			}
 			continue
 		}
 		for _, n := range bt.Notes {
@@ -587,8 +675,16 @@ func (e *Editor) drawBar(screen *ebiten.Image, tr *score.Track, box edBarBox, st
 			if n.Tech&score.TechDead != 0 {
 				label = "x"
 			}
-			if n.Tied {
-				label = "~" + label
+			// A tie is an arc back to the note it holds, which is how it is
+			// engraved. It used to be a tilde in front of the fret number —
+			// the file format's character, and one that already means
+			// vibrato to a guitarist.
+			if n.Tied && n.String < edMaxStrings {
+				from := -1.0
+				if lastBeat[n.String] == bi-1 {
+					from = lastX[n.String]
+				}
+				edDrawTie(screen, from, bx, ny)
 			}
 			col := colNote
 			if n.Inferred {
@@ -598,9 +694,15 @@ func (e *Editor) drawBar(screen *ebiten.Image, tr *score.Track, box edBarBox, st
 			vector.DrawFilledRect(screen, float32(bx-2), float32(ny-9), w+4, 18, bg(n.String), false)
 			drawTextMono(screen, label, bx, ny-9, col)
 			if s := techSuffix(n.Tech); s != "" {
-				drawTextSmall(screen, s, bx+float64(w)+3, ny-9, colSounding)
+				marks = append(marks, pendingMark{s, bx + float64(w) + 3, ny - 9})
+			}
+			if n.String < edMaxStrings {
+				lastX[n.String], lastBeat[n.String] = bx, bi
 			}
 		}
+	}
+	for _, m := range marks {
+		drawTextSmall(screen, m.s, m.x, m.y, colSounding)
 	}
 }
 
@@ -694,8 +796,17 @@ func (e *Editor) drawFirstSteps(screen *ebiten.Image) {
 	if !e.isEmpty() {
 		return
 	}
-	nStr := len(e.doc.Track().Tuning)
-	y := edGridTop + edSysPadTop + float64(nStr-1)*edStringGap + edSysPadBottom + 24
+	// Under the last system that is on screen, not under the first: an
+	// empty piece can be long enough to fill two systems, and a fixed
+	// offset painted the guidance straight through the second staff.
+	systems := e.layoutSystems()
+	y := edGridTop + float64(len(systems))*e.systemHeight() - e.scroll + 14
+	if min := edGridTop + e.systemHeight(); y < min {
+		y = min
+	}
+	if y+120 > gridBottom() {
+		return // no room for it without running into the status line
+	}
 	lines := []struct{ key, what string }{
 		{"0-24", "type a fret number onto the highlighted string"},
 		{"↑ ↓", "choose the string; [ and ] choose the note value"},
@@ -711,23 +822,63 @@ func (e *Editor) drawFirstSteps(screen *ebiten.Image) {
 	drawTextSmall(screen, tail, edGridX, y+26+float64(len(lines))*22+8, colHint)
 }
 
-// barMarking is the text above a bar that begins a new meter or tempo.
-func (e *Editor) barMarking(index int, bar *score.Bar) string {
+// barMarking is what is written above a bar that begins a new meter or a
+// new tempo: the time signature, and the tempo without its note, which
+// the caller draws.
+func (e *Editor) barMarking(index int, bar *score.Bar) (meter, tempo string) {
 	sc := e.doc.Score()
-	var parts []string
 	if index == 0 {
-		parts = append(parts, fmt.Sprintf("%d/%d", bar.Num, bar.Den))
+		meter = fmt.Sprintf("%d/%d", bar.Num, bar.Den)
 	} else if prev := e.doc.Track().Bars[index-1]; prev.Num != bar.Num || prev.Den != bar.Den {
-		parts = append(parts, fmt.Sprintf("%d/%d", bar.Num, bar.Den))
+		meter = fmt.Sprintf("%d/%d", bar.Num, bar.Den)
 	}
 	for _, t := range sc.Tempos {
 		if t.Tick == bar.Start && (index > 0 || len(sc.Tempos) > 0) {
 			if index == 0 || t.Tick != 0 {
-				parts = append(parts, fmt.Sprintf("%.0f", 60e6/float64(t.USPerQuarter)))
+				tempo = fmt.Sprintf("= %.0f", 60e6/float64(t.USPerQuarter))
 			}
 		}
 	}
-	return strings.Join(parts, "  ")
+	return meter, tempo
+}
+
+// drawCursorCell lights the cell the next fret typed will land in: the
+// beat at bx, on the cursor's string.
+func drawCursorCell(dst *ebiten.Image, bx, strTop float64, str int) {
+	cy := strTop + float64(str-1)*edStringGap
+	vector.DrawFilledRect(dst, float32(bx-5), float32(cy-10), 28, 20, colEdCursor, false)
+}
+
+// edRestGlyph is the rest that stands for a length. A whole and a half
+// rest are their own shapes and are what a bar of silence is written
+// with; everything shorter shares the quarter rest's outline, since the
+// rhythm marks under the staff already say which it is and a flagged rest
+// at sixteen pixels is a smudge.
+func edRestGlyph(dur int64) glyphID {
+	switch base, _, _ := baseOf(dur); base {
+	case score.Whole:
+		return glyphRestWhole
+	case score.Half:
+		return glyphRestHalf
+	}
+	return glyphRest
+}
+
+// edDrawTie draws the arc that holds a note over from the previous one.
+// from is where that note was drawn, or negative when it was in an
+// earlier bar — in which case the arc comes in from the left, the way a
+// tie across a barline is engraved.
+func edDrawTie(dst *ebiten.Image, from, to, y float64) {
+	start := from + 8
+	if from < 0 || start > to-10 {
+		start = to - 16
+	}
+	var p vector.Path
+	p.MoveTo(float32(start), float32(y-11))
+	p.QuadTo(float32((start+to)/2), float32(y-20), float32(to+3), float32(y-11))
+	op := &vector.DrawPathOptions{AntiAlias: true}
+	op.ColorScale.ScaleWithColor(colTieArc)
+	vector.StrokePath(dst, &p, &vector.StrokeOptions{Width: 1.4, LineCap: vector.LineCapRound}, op)
 }
 
 // techSuffix spells a note's techniques the way the file does, minus the
@@ -819,7 +970,7 @@ var editorKeys = []ebiten.Key{
 	ebiten.KeyNumpad5, ebiten.KeyNumpad6, ebiten.KeyNumpad7, ebiten.KeyNumpad8, ebiten.KeyNumpad9,
 	ebiten.KeyDelete, ebiten.KeyBackspace, ebiten.KeyEnter, ebiten.KeyNumpadEnter,
 	ebiten.KeySpace,
-	ebiten.KeyR, ebiten.KeyN, ebiten.KeyH, ebiten.KeyP, ebiten.KeyS, ebiten.KeyB,
+	ebiten.KeyR, ebiten.KeyN, ebiten.KeyH, ebiten.KeyP, ebiten.KeyS, ebiten.KeyB, ebiten.KeyA,
 	ebiten.KeyV, ebiten.KeyX, ebiten.KeyT, ebiten.KeyU, ebiten.KeyM, ebiten.KeyZ, ebiten.KeyY,
 	ebiten.KeyBracketLeft, ebiten.KeyBracketRight, ebiten.KeyPeriod, ebiten.KeyBackquote,
 	ebiten.KeyTab, ebiten.KeyF1, ebiten.KeyF2, ebiten.KeySlash, ebiten.KeyEscape,
@@ -994,6 +1145,12 @@ func (e *Editor) handleKey(k ebiten.Key, m mods) error {
 		if m.shift {
 			e.cycleTuning()
 		}
+	case ebiten.KeyA:
+		if m.shift {
+			// Adding a track had no key at all, and its control is the one
+			// the piece row runs out of room for first.
+			e.report(e.doc.AddTrack(fmt.Sprintf("Track %d", len(e.doc.Score().Tracks)+1)))
+		}
 	case ebiten.KeyTab:
 		e.stepTrack(m.shift)
 	case ebiten.KeyF2:
@@ -1158,16 +1315,18 @@ func (e *Editor) setDuration(ticks int64) {
 	}
 }
 
-// durationName spells a length for the header and the toolbar.
+// durationName spells a length the way a musician says it out loud. The
+// fraction is what the FILE calls it; "quarter" is what a guitarist calls
+// it, and the status line is read by the second of those.
 func durationName(ticks int64) string {
 	base, dot, trip := baseOf(ticks)
 	name := map[int64]string{
-		score.Whole: "1", score.Half: "1/2", score.Quarter: "1/4",
-		score.Eighth: "1/8", score.Sixteenth: "1/16", score.ThirtySec: "1/32",
+		score.Whole: "whole", score.Half: "half", score.Quarter: "quarter",
+		score.Eighth: "eighth", score.Sixteenth: "sixteenth", score.ThirtySec: "thirty-second",
 	}[base]
 	switch {
 	case dot:
-		return name + " dotted"
+		return "dotted " + name
 	case trip:
 		return name + " triplet"
 	}
@@ -1321,7 +1480,9 @@ func (e *Editor) suggestedName() string {
 // flag, so nothing can claim a piece is saved without a file behind it.
 func (e *Editor) writeTo(path string) bool {
 	if err := textfmt.WriteFile(path, e.doc.Score()); err != nil {
-		e.report(err)
+		// The writer prefixes its errors with the package name, which is
+		// for a log and not for somebody who has just pressed Save.
+		e.report(fmt.Errorf("%s", strings.TrimPrefix(err.Error(), "gtab: ")))
 		return false
 	}
 	e.path = path
@@ -1503,15 +1664,15 @@ func (e *Editor) drawLeavePrompt(screen *ebiten.Image) {
 func (e *Editor) editorBindings() []helpBinding {
 	return []helpBinding{
 		{Group: "notes", Keys: "0-30", Hint: "0-9 fret", Desc: "Type a fret onto the cursor's string; two digits within a moment make one number"},
-		{Group: "notes", Keys: "del / backspace", Desc: "Clear the note on the cursor's string"},
-		{Group: "notes", Keys: "R", Hint: "R rest", Desc: "Make the beat a rest"},
-		{Group: "notes", Keys: "`", Hint: "` tie", Desc: "Tie the note to the same string's note in the beat before"},
-		{Group: "notes", Keys: "h p s b v x", Hint: "hpsbvx technique", Desc: "Hammer-on, pull-off, slide, bend, vibrato, dead note"},
+		{Group: "notes", Keys: "del / R", Hint: "R rest", Desc: "Clear the note on this string, or make the whole beat a rest"},
+		{Group: "notes", Keys: "`", Hint: "` tie", Desc: "Tie the note: hold it, do not strike it again"},
+		{Group: "notes", Keys: "h / p / s", Hint: "h hammer-on", Desc: "Hammer-on, pull-off, slide"},
+		{Group: "notes", Keys: "b / v / x", Desc: "Bend, vibrato, dead note (muted, no pitch)"},
 
-		{Group: "rhythm", Keys: "[ / ]", Hint: "[ ] duration", Desc: "Shorter / longer note value for the beat and for the ones you type next"},
+		{Group: "rhythm", Keys: "[ / ]", Hint: "[ ] note length", Desc: "Longer / shorter note, for this beat and the ones you type next — or click one in the toolbar"},
 		{Group: "rhythm", Keys: ". / T", Desc: "Dot the note value, or make it a triplet"},
 		{Group: "rhythm", Keys: "space", Hint: "space next", Desc: "Move on to the next beat, adding a bar at the end of the piece — the rhythm for writing one"},
-		{Group: "rhythm", Keys: "enter", Hint: "enter add beat", Desc: "Put another beat in after this one"},
+		{Group: "rhythm", Keys: "enter", Hint: "enter insert beat", Desc: "Put another beat in after this one"},
 		{Group: "rhythm", Keys: "shift+del", Desc: "Remove the beat"},
 
 		{Group: "bars", Keys: "N", Hint: "N add bar", Desc: "Add a bar after this one (at the end of the piece, that is a new last bar)"},
@@ -1519,14 +1680,14 @@ func (e *Editor) editorBindings() []helpBinding {
 		{Group: "bars", Keys: "shift+M / shift+B", Desc: "Set the time signature or the tempo from this bar on"},
 
 		{Group: "moving", Keys: "arrows", Hint: "arrows move", Desc: "Left and right by beat, up and down by string"},
-		{Group: "moving", Keys: "page up / down", Desc: "Move a bar at a time"},
-		{Group: "moving", Keys: "home / end", Desc: "First and last beat of the piece"},
+		{Group: "moving", Keys: "page up/down · home/end", Desc: "A bar at a time, and the two ends of the piece"},
 		{Group: "moving", Keys: "click / wheel", Desc: "Put the cursor on a beat and a string; the wheel scrolls the notation"},
 
 		{Group: "piece", Keys: "shift+T", Desc: "Name the piece"},
 		{Group: "piece", Keys: "shift+U", Desc: "Cycle the tuning: standard, drop D, half and full step down, DADGAD, open G"},
 		{Group: "piece", Keys: "tab", Hint: "tab track", Desc: "Move to the next track (shift+tab for the previous one)"},
-		{Group: "piece", Keys: "F2", Hint: "F2 text", Desc: "Edit the raw .gtab text instead — the whole format, not just what has controls"},
+		{Group: "piece", Keys: "shift+A", Desc: "Add another track"},
+		{Group: "piece", Keys: "F2", Hint: "F2 file text", Desc: "Show the piece as the text file it saves to — where a capo, an unusual tuning or a comment can be set"},
 
 		{Group: "session", Keys: "ctrl+Z / ctrl+Y", Hint: "ctrl+Z undo", Desc: "Undo and redo"},
 		{Group: "session", Keys: "ctrl+S", Hint: "ctrl+S save", Desc: "Save (ctrl+shift+S saves under a new name)"},
