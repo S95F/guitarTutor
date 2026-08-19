@@ -458,7 +458,7 @@ func drawValueButton(dst *ebiten.Image, r rect, b edButton, av animValues) {
 	drawPanel(dst, r, fill, edge)
 	x := r.x + 9
 	if b.glyph != glyphNone {
-		drawGlyph(dst, b.glyph, rect{x, r.y + (r.h-glyphBox)/2, glyphBox, glyphBox}, ink, fill)
+		drawGlyph(dst, b.glyph, rect{x, r.y + (r.h-glyphBox)/2, glyphBox, glyphBox}, ink)
 		x += glyphBox + 4
 	}
 	drawText(dst, b.label, x, r.y+(r.h-uiTextH)/2+1, ink)

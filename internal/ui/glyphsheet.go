@@ -65,9 +65,13 @@ var glyphSpecimens = []struct {
 	{glyphGridView, "notation view"},
 	{glyphHelp, "help"},
 
+	{glyphRecord, "record"},
+	{glyphTuner, "tuner"},
+
 	{glyphTrack, "track"},
 	{glyphAddTrack, "add track"},
 	{glyphTuning, "tuning"},
+	{glyphCapo, "capo"},
 	{glyphTempo, "tempo"},
 	{glyphTitle, "title"},
 
@@ -95,12 +99,12 @@ func (s *GlyphSheet) Draw(dst *ebiten.Image) {
 
 		// The three sizes: a toolbar control, a compact row, and the
 		// smallest anything is ever drawn at.
-		drawGlyph(dst, sp.id, rect{x + 10, y + 10, 28, 28}, colNote, colPanel)
-		drawGlyph(dst, sp.id, rect{x + 46, y + 14, 20, 20}, colNote, colPanel)
-		drawGlyph(dst, sp.id, rect{x + 72, y + 17, 14, 14}, colDim, colPanel)
+		drawGlyph(dst, sp.id, rect{x + 10, y + 10, 28, 28}, colNote)
+		drawGlyph(dst, sp.id, rect{x + 46, y + 14, 20, 20}, colNote)
+		drawGlyph(dst, sp.id, rect{x + 72, y + 17, 14, 14}, colDisabled)
 		// And once engaged, which is the colour a lit toggle draws in.
 		drawPanel(dst, rect{x + 94, y + 8, 32, 32}, colOn, colOnEdge)
-		drawGlyph(dst, sp.id, rect{x + 100, y + 14, 20, 20}, colNote, colOn)
+		drawGlyph(dst, sp.id, rect{x + 100, y + 14, 20, 20}, colNote)
 
 		drawTextSmall(dst, truncateW(sp.name, cellW-24), x+10, y+52, colHUD)
 	}

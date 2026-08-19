@@ -608,7 +608,7 @@ func (e *Editor) drawBar(screen *ebiten.Image, tr *score.Track, box edBarBox, st
 		mx += textWSmall(meter) + 10
 	}
 	if tempo != "" {
-		drawGlyph(screen, glyphNoteQuarter, rect{mx, strTop - 15, 12, 13}, colInferred, colBG)
+		drawGlyph(screen, glyphNoteQuarter, rect{mx, strTop - 15, 12, 13}, colInferred)
 		drawTextSmall(screen, tempo, mx+13, strTop-13, colInferred)
 	}
 
@@ -657,7 +657,7 @@ func (e *Editor) drawBar(screen *ebiten.Image, tr *score.Track, box edBarBox, st
 			// note will land.
 			ry := strTop + float64(nStr-1)/2*edStringGap
 			vector.DrawFilledRect(screen, float32(bx-3), float32(ry-10), 18, 20, colBG, false)
-			drawGlyph(screen, edRestGlyph(bt.Dur), rect{bx - 2, ry - 9, 16, 18}, colEdRest, colBG)
+			drawGlyph(screen, edRestGlyph(bt.Dur), rect{bx - 2, ry - 9, 16, 18}, colEdRest)
 			// The backdrop that breaks the staff lines behind the rest can
 			// cross the lit cursor cell, which sits on whichever string the
 			// cursor is on. Painting the page colour there punched a hole in

@@ -62,6 +62,14 @@ var (
 	// colGroupCap labels a cluster of related controls. Quieter than the
 	// controls it names: it is a heading, not a thing to press.
 	colGroupCap = color.RGBA{110, 110, 128, 255}
+	// colDisabled is the ink of a control that cannot be pressed. It used
+	// to be colBarline, which the comment above says outright is a rule
+	// colour measuring 1.72:1 — and on a brand-new piece EVERY symbol in
+	// the editor's ON THIS NOTE group is in that state, so the moment a
+	// beginner studies the toolbar hardest was the moment it was least
+	// visible. This measures 3.1:1 on colBG: plainly subordinate to live
+	// ink, plainly still a picture.
+	colDisabled = color.RGBA{98, 98, 112, 255}
 )
 
 // centreX is the x that centres body text within [x, x+w). The width is
@@ -244,7 +252,7 @@ func drawIconGlyphButton(dst *ebiten.Image, r rect, id glyphID, on, disabled boo
 	switch {
 	case disabled:
 		drawPanel(dst, r, colBG, colBarline)
-		drawGlyph(dst, id, glyphInset(r), colBarline, colBG)
+		drawGlyph(dst, id, glyphInset(r), colDisabled)
 		return
 	case on:
 		fill, edge, ink = colOn, colOnEdge, colNote
@@ -256,7 +264,7 @@ func drawIconGlyphButton(dst *ebiten.Image, r rect, id glyphID, on, disabled boo
 	}
 	r = av.animate(r)
 	drawPanel(dst, r, fill, edge)
-	drawGlyph(dst, id, glyphInset(r), ink, fill)
+	drawGlyph(dst, id, glyphInset(r), ink)
 	drawFlash(dst, r, av)
 }
 
@@ -311,7 +319,7 @@ func drawButton(dst *ebiten.Image, r rect, id glyphID, label, key string, style 
 		l := truncateW(label, avail)
 		x := textX(r, l, 1)
 		if id != glyphNone {
-			drawGlyph(dst, id, rect{x - glyphBox - 8, r.y + 6, glyphBox, glyphBox}, colBarline, colBG)
+			drawGlyph(dst, id, rect{x - glyphBox - 8, r.y + 6, glyphBox, glyphBox}, colDisabled)
 		}
 		drawText(dst, l, x, r.y+7, colBarline)
 		if key != "" {
@@ -332,12 +340,12 @@ func drawButton(dst *ebiten.Image, r rect, id glyphID, label, key string, style 
 	x := textX(r, label, 1)
 	if key == "" {
 		if id != glyphNone {
-			drawGlyph(dst, id, rect{x - glyphBox - 8, r.y + (r.h-glyphBox)/2, glyphBox, glyphBox}, text, fill)
+			drawGlyph(dst, id, rect{x - glyphBox - 8, r.y + (r.h-glyphBox)/2, glyphBox, glyphBox}, text)
 		}
 		drawText(dst, label, x, r.y+(r.h-uiTextH)/2+1, text)
 	} else {
 		if id != glyphNone {
-			drawGlyph(dst, id, rect{x - glyphBox - 8, r.y + 5, glyphBox, glyphBox}, text, fill)
+			drawGlyph(dst, id, rect{x - glyphBox - 8, r.y + 5, glyphBox, glyphBox}, text)
 		}
 		drawText(dst, label, x, r.y+6, text)
 		drawTextSmall(dst, key, r.x+(r.w-textWSmall(key))/2, r.y+23, lerpCol(colDim, colNote, av.hover))
