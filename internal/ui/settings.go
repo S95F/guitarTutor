@@ -903,6 +903,22 @@ func (s *Settings) startCalibration() bool {
 		s.notice = calBusyNotice
 		return false
 	}
+	// On first run the pickers show the system defaults with nothing in
+	// Prefs, and the one prominent button on the screen is "calibrate
+	// now". Measuring that pair without committing it stored the offset
+	// under concrete device IDs while the saved pair stayed empty — and
+	// the application only opens the live capture path when the STORED
+	// capture ID is non-empty, so a mouse user who clicked the obvious
+	// button and watched it succeed got playback-only practice with no
+	// scoring and nothing to explain why. Calibrating a pair is the
+	// strongest possible way of choosing it, so choose it. A fallback for
+	// a saved device that is merely unplugged is deliberately NOT
+	// committed: that saved ID must survive until its interface returns,
+	// so a fallback pair keeps the old store-offset-only behaviour.
+	capSt, playSt := s.deviceStateOf(srCapture), s.deviceStateOf(srPlayback)
+	if (capSt == devUnchosen || playSt == devUnchosen) && capSt != devFallback && playSt != devFallback {
+		s.commitDevices()
+	}
 	// The device pair is read here, on the game loop, so the goroutine
 	// never touches the selection state — and the result stays bound to
 	// the pair it was measured for.
@@ -1179,14 +1195,17 @@ func (s *Settings) splitDeviceWarning() (string, bool) {
 
 // ---- text projections ----------------------------------------------------
 
-// framesText renders an offset in frames and the milliseconds it works
-// out to at the current sample rate.
+// framesText renders an offset in milliseconds first and the frames it
+// was measured in after. Milliseconds lead because they are the unit a
+// musician can sanity-check — everyone who has stood away from their amp
+// has a feel for what 130 ms of delay is, while a frame count means
+// nothing without doing the sample-rate arithmetic in your head.
 func (s *Settings) framesText(frames int) string {
 	rate := s.rate
 	if rate <= 0 {
 		rate = settingsDefaultRate
 	}
-	return fmt.Sprintf("%d frames (%.1f ms)", frames, float64(frames)*1000/float64(rate))
+	return fmt.Sprintf("%.1f ms (%d frames)", float64(frames)*1000/float64(rate), frames)
 }
 
 // deviceText renders one picker's value: position in the list, name, and
@@ -1268,14 +1287,48 @@ func (s *Settings) soundFontText() string {
 	return s.soundFont
 }
 
+// settingsWeakConfidence is the confidence below which a stored
+// calibration is flagged as worth redoing. The measurement itself accepts
+// anything over its own floor of 0.5, so a run that barely scraped past —
+// clicks heard faintly, or at inconsistent delays — is stored and then
+// forever reads exactly like a clean loopback measurement. 0.7 sits far
+// enough above the floor to catch those without nagging about the
+// ordinary spread of honest mic-in-front-of-speaker runs.
+const settingsWeakConfidence = 0.7
+
+// settingsConfidencer is the optional interface an AudioServices
+// implementation may satisfy to report the confidence stored alongside a
+// pair's calibration offset. Without it the screen simply cannot tell a
+// shaky measurement from a solid one, and says nothing.
+type settingsConfidencer interface {
+	StoredConfidence(captureID, playbackID string) (float64, bool)
+}
+
+// storedConfidence asks the backend for the selected pair's stored
+// confidence, when the backend can answer at all.
+func (s *Settings) storedConfidence() (float64, bool) {
+	c, ok := s.audio().(settingsConfidencer)
+	if !ok {
+		return 0, false
+	}
+	capID, playID := s.selectedIDs()
+	return c.StoredConfidence(capID, playID)
+}
+
 // storedCalibrationText renders what is known about the selected pair
 // without any live run: the offset the backend has on file, or an admission
-// that there is none.
+// that there is none. An offset whose stored confidence is weak says so —
+// the number is on file and practice works, but the user who measured it
+// through a barely-audible loopback deserves to know it is suspect.
 func (s *Settings) storedCalibrationText() (string, color.RGBA) {
-	if s.offOK {
-		return "stored " + s.framesText(s.offFrames), colHUD
+	if !s.offOK {
+		return "not measured for this pair", colClose
 	}
-	return "not measured for this pair", colClose
+	txt := "stored " + s.framesText(s.offFrames)
+	if conf, ok := s.storedConfidence(); ok && conf < settingsWeakConfidence {
+		return txt + ", weak measurement: worth re-measuring", colClose
+	}
+	return txt, colHUD
 }
 
 // calibrationText renders the calibration row's value and the color to
@@ -1297,9 +1350,26 @@ func (s *Settings) calibrationText(sn calSnap) (string, color.RGBA) {
 	case calDone:
 		return fmt.Sprintf("measured %s, confidence %.0f%%", s.framesText(sn.Frames), sn.Confidence*100), colHit
 	case calFailed:
-		return "failed: " + sn.Err.Error(), colMiss
+		// The error itself carries the advice — what to connect, what to
+		// check — and runs to roughly twice the row's width, so rendering
+		// it here truncated exactly the part that says what to do. The
+		// row states the outcome; the full advice is wrapped into the
+		// notice band directly below (see items).
+		return "measurement failed", colMiss
 	}
 	return s.storedCalibrationText()
+}
+
+// calFailureAdvice is the measurement error as the notice band shows it.
+// The message is written by the latency package for exactly this moment —
+// it names the missing loopback, the input level, the click spacing — but
+// its "latency: " package prefix is developer vocabulary and is trimmed
+// at this boundary.
+func calFailureAdvice(err error) string {
+	if err == nil {
+		return ""
+	}
+	return strings.TrimPrefix(err.Error(), "latency: ")
 }
 
 // saveErrLine renders the footer's save failure, and whether there is one.
@@ -1368,10 +1438,30 @@ const (
 	// settingsNoticeLines and settingsSfNoteLines are the heights, in body
 	// lines, of the two FIXED bands below the calibration and SoundFont
 	// rows. See reserveNote: what those bands say changes with what the
-	// user just did, and none of it may move a row.
-	settingsNoticeLines = 2
+	// user just did, and none of it may move a row. Three lines because
+	// the notice band also carries a failed measurement's advice, and the
+	// longest of those — the click-spacing aliasing explanation — needs
+	// them all.
+	settingsNoticeLines = 3
 	settingsSfNoteLines = 1
+	// settingsCalHintLines is the height, in body lines, of the FIXED
+	// band under the calibration row. The setup hint needs two lines to
+	// head off the doomed guitar-into-the-input setup, and the running
+	// progress bar pads itself to the same height, because pressing
+	// "calibrate now" must not move the rows below it (see reserveNote).
+	settingsCalHintLines = 2
 )
+
+// calSetupHint is what sits under the calibration row when nothing is
+// running. Its job is to prevent the natural setup — guitar into the
+// input, monitors on the output, press the button — which fails after
+// several opaque seconds, because the click train comes out of the
+// speakers and a pickup only hears strings. Saying what must physically
+// happen, in a guitarist's words, is cheaper than explaining the failure
+// afterwards.
+const calSetupHint = "plays a few seconds of clicks that must travel out and back in:" +
+	" point a mic at your speakers, or cable an output back into an input;" +
+	" the guitar's own pickup won't hear them"
 
 type settingsItemKind int
 
@@ -1545,8 +1635,8 @@ func (s *Settings) items() []settingsItem {
 	}
 
 	b.section("LATENCY CALIBRATION")
+	sn := s.calSnapshot()
 	if s.hasDevices() {
-		sn := s.calSnapshot()
 		txt, col := s.calibrationText(sn)
 		running := sn.Phase == calRunning && s.snapIsCurrent(sn)
 		label := "calibrate now"
@@ -1560,8 +1650,11 @@ func (s *Settings) items() []settingsItem {
 			}})
 		if running {
 			b.progress(sn.Progress)
+			// Pad the bar out to the hint band's height, so swapping one
+			// for the other moves nothing below them.
+			b.y += float64(settingsCalHintLines-1) * settingsLineH
 		} else {
-			b.note("takes a few seconds: make the output audible to the input first", colBarline)
+			b.reserveNote(settingsCalHintLines, calSetupHint, colBarline)
 		}
 	} else {
 		b.note("unavailable without a capture and playback device", colBarline)
@@ -1570,8 +1663,15 @@ func (s *Settings) items() []settingsItem {
 	// An input a running measurement is holding off was ignored on
 	// purpose; say so where the user is looking rather than swallowing
 	// the key. The band is there whether or not there is a notice, so
-	// saying it cannot move what the user is about to click.
-	b.reserveNote(settingsNoticeLines, s.notice, colClose)
+	// saying it cannot move what the user is about to click. With nothing
+	// refused to explain, the band carries a failed measurement's advice
+	// instead: the row above only states the outcome, and this is the
+	// room the advice wraps into.
+	noticeTxt, noticeCol := s.notice, colClose
+	if noticeTxt == "" && sn.Phase == calFailed && s.snapIsCurrent(sn) {
+		noticeTxt, noticeCol = calFailureAdvice(sn.Err), colMiss
+	}
+	b.reserveNote(settingsNoticeLines, noticeTxt, noticeCol)
 
 	b.section("INSTRUMENT")
 	sfButtons := []settingsButton{{label: "clear", act: func(s *Settings) {

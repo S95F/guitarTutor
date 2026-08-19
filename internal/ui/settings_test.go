@@ -699,8 +699,11 @@ func TestSettingsCalibrationFailure(t *testing.T) {
 		t.Fatalf("failed snapshot = %+v, want an error and no frames", sn)
 	}
 	txt, col := s.calibrationText(sn)
-	if !strings.Contains(txt, "no click detected") {
-		t.Errorf("failure text = %q, want the backend's message", txt)
+	if !strings.Contains(txt, "measurement failed") {
+		t.Errorf("failure text = %q, want it to state the outcome", txt)
+	}
+	if strings.Contains(txt, "no click detected") {
+		t.Errorf("failure text = %q: the advice belongs in the notice band, where it can wrap", txt)
 	}
 	if col != colMiss {
 		t.Errorf("failure color = %v, want colMiss", col)
@@ -708,6 +711,11 @@ func TestSettingsCalibrationFailure(t *testing.T) {
 	s.syncSettings()
 	if s.offOK {
 		t.Error("offset published after a failed calibration")
+	}
+	// Once the loop syncs — clearing the refused-second-run notice — the
+	// band under the section carries the backend's advice.
+	if !settingsSays(s, "no click detected") {
+		t.Errorf("the backend's advice never reached the screen: %q", settingsNoteLines(s))
 	}
 	audio.reached, audio.release, audio.calErr = nil, nil, nil
 	if !s.startCalibration() {
@@ -936,11 +944,14 @@ func TestSettingsRefusedCalibrationSaysSo(t *testing.T) {
 	}
 	sn := settingsWaitPhase(t, s2, calFailed)
 	txt, col := s2.calibrationText(sn)
-	if !strings.Contains(txt, busy.Error()) {
-		t.Errorf("refusal text = %q, want the device owner's message", txt)
+	if !strings.Contains(txt, "measurement failed") {
+		t.Errorf("refusal text = %q, want the row to state the outcome", txt)
 	}
 	if col != colMiss {
 		t.Errorf("refusal color = %v, want colMiss", col)
+	}
+	if !settingsSays(s2, busy.Error()) {
+		t.Errorf("the device owner's message never reached the screen: %q", settingsNoteLines(s2))
 	}
 
 	s2.Close()
@@ -1005,6 +1016,238 @@ func TestSettingsInputLockedWhileCalibrating(t *testing.T) {
 	}
 	if p.saves == savesBefore {
 		t.Error("the change accepted after the run was not saved")
+	}
+}
+
+// TestSettingsCalibrateNowCommitsAnUnchosenPair: on first run the pickers
+// show the system defaults with nothing stored, and the one prominent
+// button on the screen is "calibrate now". It used to measure that pair
+// and store the offset under the concrete device IDs while Prefs stayed
+// empty — and the application only opens the live capture path when the
+// STORED capture ID is non-empty, so the mouse user who clicked the
+// obvious button and watched it go green got playback-only practice with
+// no scoring and nothing to explain why. Calibrating a pair is choosing
+// it.
+func TestSettingsCalibrateNowCommitsAnUnchosenPair(t *testing.T) {
+	audio := newSettingsAudio()
+	audio.frames, audio.conf = 6240, 0.95
+	s, p := newSettingsFixture(t, audio)
+	if capID, _ := p.Devices(); capID != "" {
+		t.Fatalf("the fixture already holds a capture device (%q)", capID)
+	}
+
+	if !s.startCalibration() {
+		t.Fatal("startCalibration refused")
+	}
+	// The pair is committed on the way in, not when the run finishes: a
+	// failed measurement still leaves the user's choice on file.
+	if p.capID != "cap-realtek" || p.playID != "play-realtek" {
+		t.Errorf("prefs pair = (%q, %q), want the shown defaults committed", p.capID, p.playID)
+	}
+	if p.saves != 1 {
+		t.Errorf("saves = %d, want the committed choice written once", p.saves)
+	}
+	if st := s.deviceStateOf(srCapture); st != devChosen {
+		t.Errorf("capture state after calibrate = %v, want devChosen", st)
+	}
+
+	settingsWaitPhase(t, s, calDone)
+	s.syncSettings()
+	if !s.offOK || s.offFrames != 6240 {
+		t.Errorf("stored offset = %d ok=%v, want the measured 6240", s.offFrames, s.offOK)
+	}
+	if audio.lastCap != "cap-realtek" || audio.lastPlay != "play-realtek" {
+		t.Errorf("measured pair = (%q, %q), want the committed one", audio.lastCap, audio.lastPlay)
+	}
+}
+
+// TestSettingsCalibrateNowKeepsAnUnpluggedSavedDevice: the fallback shown
+// for a saved-but-unplugged device is NOT committed by calibrating. The
+// saved ID must survive until its interface is plugged back in, so a
+// fallback pair keeps the old store-offset-only behaviour.
+func TestSettingsCalibrateNowKeepsAnUnpluggedSavedDevice(t *testing.T) {
+	for _, c := range []struct {
+		name          string
+		capID, playID string
+	}{
+		{"saved capture unplugged", "cap-gone", "play-realtek"},
+		{"nothing chosen but saved playback unplugged", "", "play-gone"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			audio := newSettingsAudio()
+			p := &settingsFakePrefs{capID: c.capID, playID: c.playID}
+			sh := NewShell(Services{Prefs: p, Audio: audio}, settingsStubScreen{})
+			s := NewSettings(sh)
+
+			if !s.startCalibration() {
+				t.Fatal("startCalibration refused")
+			}
+			if p.capID != c.capID || p.playID != c.playID {
+				t.Errorf("prefs pair = (%q, %q), want the saved (%q, %q) left for the device's return",
+					p.capID, p.playID, c.capID, c.playID)
+			}
+			if p.saves != 0 {
+				t.Errorf("saves = %d, want no write for a fallback pair", p.saves)
+			}
+			settingsWaitPhase(t, s, calDone)
+		})
+	}
+}
+
+// TestSettingsCalibrationFailureAdviceIsWrappedIntoTheNoticeBand: the
+// advice in a measurement failure — what to connect, what to check — runs
+// to roughly twice the row's width, so rendering it as the row value cut
+// off exactly the part that says what to do. It goes to the fixed notice
+// band under the section instead, with the latency package's own prefix
+// trimmed, and showing it must not move a single control.
+func TestSettingsCalibrationFailureAdviceIsWrappedIntoTheNoticeBand(t *testing.T) {
+	const advice = "no click arrivals found in the captured signal: check that the loopback" +
+		" (cable, or speaker to mic) is connected, that the right capture device is selected," +
+		" and that the input isn't muted"
+	audio := newSettingsAudio()
+	audio.calErr = errors.New("latency: " + advice)
+	s, _ := newSettingsFixture(t, audio)
+	tops := settingsRowTops(s)
+
+	if !s.startCalibration() {
+		t.Fatal("startCalibration refused")
+	}
+	settingsWaitPhase(t, s, calFailed)
+
+	if !settingsSays(s, advice) {
+		t.Errorf("the notice band does not carry the whole advice: %q", settingsNoteLines(s))
+	}
+	if settingsSays(s, "latency:") {
+		t.Errorf("the package prefix leaked to the screen: %q", settingsNoteLines(s))
+	}
+	if got := settingsRowTops(s); got != tops {
+		t.Errorf("showing the advice moved the rows:\n got %s\nwant %s", got, tops)
+	}
+	for _, l := range settingsNoteLines(s) {
+		if textW(l) > settingsWrap {
+			t.Errorf("note line measures %.0fpx, past the %.0fpx band width: %q", textW(l), settingsWrap, l)
+		}
+	}
+	// The longest advice the latency package writes needs every line of
+	// the band; anything the band cannot hold is cut mid-sentence.
+	longest := "the round-trip delay looks like it meets or exceeds the click spacing (24000 frames, 500 ms):" +
+		" every click after the first arrived at a consistent delay but the first never did, so each match" +
+		" is probably the previous click aliased one spacing late — increase the click spacing beyond the" +
+		" largest plausible delay, then run calibration again"
+	if got := len(wrapTextW(longest, settingsWrap)); got > settingsNoticeLines {
+		t.Errorf("the longest advice wraps to %d lines; the band holds %d", got, settingsNoticeLines)
+	}
+}
+
+// TestSettingsCalibrationHintSpeaksToAGuitarist: the old hint ("make the
+// output audible to the input") was engineer phrasing that let the
+// natural setup — guitar plugged in, monitors on — run and fail, because
+// a pickup cannot hear the click train. The hint now says what must
+// physically happen, in a guitarist's words, and fits the fixed band it
+// lives in.
+func TestSettingsCalibrationHintSpeaksToAGuitarist(t *testing.T) {
+	s, _ := newSettingsFixture(t, newSettingsAudio())
+	for _, want := range []string{"point a mic at your speakers", "cable an output back into an input", "pickup"} {
+		if !settingsSays(s, want) {
+			t.Errorf("the calibration hint never mentions %q: %q", want, settingsNoteLines(s))
+		}
+	}
+	if settingsSays(s, "make the output audible") {
+		t.Error("the engineer phrasing is back")
+	}
+	if lines := wrapTextW(calSetupHint, settingsWrap); len(lines) > settingsCalHintLines {
+		t.Errorf("the hint wraps to %d lines; its band holds %d", len(lines), settingsCalHintLines)
+	}
+}
+
+// TestSettingsFramesTextLeadsWithMilliseconds: the offset leads with the
+// unit a musician can sanity-check — everyone knows what 130 ms of delay
+// feels like — and the frame count follows for anyone comparing against
+// the config file.
+func TestSettingsFramesTextLeadsWithMilliseconds(t *testing.T) {
+	s, _ := newSettingsFixture(t, newSettingsAudio())
+	if got, want := s.framesText(6240), "130.0 ms (6240 frames)"; got != want {
+		t.Errorf("framesText = %q, want %q", got, want)
+	}
+}
+
+// settingsConfidentAudio adds the optional StoredConfidence method: a
+// backend that can say how trustworthy a stored offset is.
+type settingsConfidentAudio struct {
+	*settingsFakeAudio
+	conf     float64
+	confOK   bool
+	confCap  string
+	confPlay string
+}
+
+func (a *settingsConfidentAudio) StoredConfidence(captureID, playbackID string) (float64, bool) {
+	a.confCap, a.confPlay = captureID, playbackID
+	return a.conf, a.confOK
+}
+
+// TestSettingsWeakStoredCalibrationIsFlagged: the config stores the
+// calibration confidence precisely so the UI can suggest recalibration,
+// but a run that scraped past the measurement floor forever read as a
+// clean "stored ...", indistinguishable from a solid loopback
+// measurement. Below the threshold the row now says the measurement is
+// weak and worth redoing.
+func TestSettingsWeakStoredCalibrationIsFlagged(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		conf   float64
+		confOK bool
+		weak   bool
+	}{
+		{"scraped past the floor", 0.55, true, true},
+		{"solid loopback", 0.95, true, false},
+		{"exactly at the threshold", settingsWeakConfidence, true, false},
+		{"no confidence on file", 0, false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			inner := newSettingsAudio()
+			inner.offsets = map[string]settingsOffset{"cap-realtek|play-realtek": {frames: 6240, ok: true}}
+			audio := &settingsConfidentAudio{settingsFakeAudio: inner, conf: c.conf, confOK: c.confOK}
+			s, _ := newSettingsFixture(t, audio)
+
+			txt, col := s.calibrationText(s.calSnapshot())
+			if !strings.Contains(txt, "stored 130.0 ms (6240 frames)") {
+				t.Fatalf("stored text = %q, want the offset on file", txt)
+			}
+			if c.weak {
+				if !strings.Contains(txt, "weak measurement: worth re-measuring") {
+					t.Errorf("stored text = %q, want the weak-measurement flag", txt)
+				}
+				if col != colClose {
+					t.Errorf("weak stored color = %v, want colClose", col)
+				}
+			} else {
+				if strings.Contains(txt, "weak") {
+					t.Errorf("stored text = %q, want no flag at confidence %.2f", txt, c.conf)
+				}
+				if col != colHUD {
+					t.Errorf("stored color = %v, want colHUD", col)
+				}
+			}
+			if c.confOK && (audio.confCap != "cap-realtek" || audio.confPlay != "play-realtek") {
+				t.Errorf("confidence asked for (%q, %q), want the selected pair", audio.confCap, audio.confPlay)
+			}
+		})
+	}
+}
+
+// TestSettingsBackendWithoutConfidenceNeverFlags: the interface is
+// optional, and a backend that cannot answer must read exactly as before.
+func TestSettingsBackendWithoutConfidenceNeverFlags(t *testing.T) {
+	audio := newSettingsAudio()
+	audio.offsets = map[string]settingsOffset{"cap-realtek|play-realtek": {frames: 6240, ok: true}}
+	s, _ := newSettingsFixture(t, audio)
+	txt, col := s.calibrationText(s.calSnapshot())
+	if strings.Contains(txt, "weak") {
+		t.Errorf("a backend with no confidence to report was flagged: %q", txt)
+	}
+	if col != colHUD {
+		t.Errorf("stored color = %v, want colHUD", col)
 	}
 }
 
@@ -1326,26 +1569,21 @@ func settingsPressAt(r rect) pointer {
 }
 
 // TestSettingsRowValueIsBoundedByItsButtons: a row's value used to be
-// drawn unbounded from the value column, so a calibration failure carrying
-// a path and an OS message (~1150px) painted straight under the row's own
-// opaque buttons and off the right edge of the page.
+// drawn unbounded from the value column, so a value wider than the page —
+// here a device whose driver reports a marketing novel of a name — painted
+// straight under the row's own opaque buttons and off the right edge.
 func TestSettingsRowValueIsBoundedByItsButtons(t *testing.T) {
 	audio := newSettingsAudio()
-	audio.calErr = errors.New(`measured 4096 frames but could not save it: appconfig: writing ` +
-		`C:\Users\p\AppData\Roaming\guitarTutor\config.json.tmp: There is not enough space on the disk.`)
+	audio.capture[1].Name = "Microphone (Aggressively Professional Reference Studio Audio Interface" +
+		" With The Preposterously Long Marketing Name, 24-bit 192 kHz Edition)"
 	s, _ := newSettingsFixture(t, audio)
-	if !s.startCalibration() {
-		t.Fatal("startCalibration refused")
-	}
-	settingsWaitPhase(t, s, calFailed)
-	defer s.Close()
 
-	it := settingsRowItem(t, s, srCalibrate)
+	it := settingsRowItem(t, s, srCapture)
 	if len(it.buttons) == 0 {
-		t.Fatal("the calibration row has no buttons to be bounded by")
+		t.Fatal("the capture row has no buttons to be bounded by")
 	}
 	if raw := textW(it.text); raw <= it.valueW {
-		t.Fatalf("the fixture failure measures %.0fpx and already fits %.0fpx: it cannot show the overflow", raw, it.valueW)
+		t.Fatalf("the fixture name measures %.0fpx and already fits %.0fpx: it cannot show the overflow", raw, it.valueW)
 	}
 	if got := textW(it.valueText()); got > it.valueW {
 		t.Errorf("the row paints %.0fpx of value into %.0fpx of room", got, it.valueW)
