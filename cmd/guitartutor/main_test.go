@@ -1,13 +1,17 @@
 package main
 
 import (
+	"flag"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/S95F/guitarTutor/internal/engine"
 	"github.com/S95F/guitarTutor/internal/score"
 	"github.com/S95F/guitarTutor/internal/synth"
+	"github.com/S95F/guitarTutor/internal/ui"
 )
 
 // oneBarScore builds a validated one-bar 4/4 piece at 120 BPM: exactly two
@@ -152,6 +156,117 @@ func TestRenderAllCountInAndTempoChange(t *testing.T) {
 	}
 	if len(left) >= wantPlay+wantTail+chunk {
 		t.Fatalf("rendered %d frames, want under %d (runaway)", len(left), wantPlay+wantTail+chunk)
+	}
+}
+
+// TestFlagFirstDiagnostic: a flag in command position ("guitartutor
+// -listen song.gtab") used to print only the generic usage text, leaving
+// the actual mistake — flags follow a subcommand — for the user to
+// deduce. The diagnostic must name the argument and show the invocation
+// that would have worked.
+func TestFlagFirstDiagnostic(t *testing.T) {
+	got := flagFirstDiagnostic("-listen")
+	for _, want := range []string{`"-listen"`, "guitartutor play -listen <file>"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("diagnostic %q does not contain %q", got, want)
+		}
+	}
+}
+
+// TestCheckPieceArgument covers the bare-argument dispatch: a mistyped
+// subcommand used to reach the importer and die as `unsupported file
+// type ""` — a message that named neither the typo nor the fix. The two
+// failure shapes are told apart by a stat, and anything with a piece
+// extension passes through to the shell (even when it does not exist:
+// the start screen is where that error belongs).
+func TestCheckPieceArgument(t *testing.T) {
+	existing := filepath.Join(t.TempDir(), "notes.txt")
+	if err := os.WriteFile(existing, []byte("not a piece"), 0o644); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
+	cases := []struct {
+		name      string
+		arg       string
+		wantParts []string // nil means the argument must be accepted
+	}{
+		{name: "mistyped subcommand", arg: "devcies",
+			wantParts: []string{`"devcies" is not a command or a piece file`, "guitartutor help", ".gtab"}},
+		{name: "nonexistent non-piece path", arg: filepath.Join(t.TempDir(), "song.pdf"),
+			wantParts: []string{"is not a command or a piece file"}},
+		{name: "existing file in a format nothing imports", arg: existing,
+			wantParts: []string{existing, "unsupported file type"}},
+		{name: "missing piece still goes to the shell", arg: "missing.gtab"},
+		{name: "case-insensitive extension", arg: "SONG.GP"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := checkPieceArgument(c.arg)
+			if c.wantParts == nil {
+				if err != nil {
+					t.Fatalf("checkPieceArgument(%q) = %v, want it accepted", c.arg, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("checkPieceArgument(%q) = nil, want a diagnostic", c.arg)
+			}
+			for _, want := range c.wantParts {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("diagnostic %q does not contain %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// TestLoadAgreesWithPieceExtensions pins the two extension lists to each
+// other: checkPieceArgument admits what ui.PieceExtensions lists, and
+// load must then import every one of them — an extension admitted by one
+// and rejected by the other would open a window just to say
+// "unsupported".
+func TestLoadAgreesWithPieceExtensions(t *testing.T) {
+	dir := t.TempDir()
+	for _, ext := range ui.PieceExtensions() {
+		_, _, err := load(filepath.Join(dir, "missing"+ext))
+		if err == nil {
+			t.Fatalf("load of a missing %s file returned nil error", ext)
+		}
+		if strings.Contains(err.Error(), "unsupported file type") {
+			t.Errorf("load rejects %s as unsupported, but the dispatch and the file dialog both offer it", ext)
+		}
+	}
+}
+
+// TestSetUsageNamesThePositionalArgument: Go's default -h dump lists the
+// flags and nothing else, so 'guitartutor play -h' never said a <file>
+// was required or what kind of file it takes. The replacement must lead
+// with the synopsis, carry the extra lines, and still include the flags.
+func TestSetUsageNamesThePositionalArgument(t *testing.T) {
+	fs := flag.NewFlagSet("play", flag.ContinueOnError)
+	fs.String("sf2", "", "SoundFont file")
+	var buf strings.Builder
+	fs.SetOutput(&buf)
+	setUsage(fs, "guitartutor play [flags] <file>", piecesLine)
+	fs.Usage()
+	out := buf.String()
+	for _, want := range []string{"usage: guitartutor play [flags] <file>", "pieces: .gtab", "-sf2"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("usage output %q does not contain %q", out, want)
+		}
+	}
+	if !strings.HasPrefix(out, "usage:") {
+		t.Errorf("usage output starts %q, want the synopsis first", out[:min(len(out), 40)])
+	}
+}
+
+// TestDeviceFlagHelpNamesTheDevicesCommand: "name fragment" alone left
+// the user to guess which names the fragment was a fragment of. Every
+// device flag's help must say where the names are listed.
+func TestDeviceFlagHelpNamesTheDevicesCommand(t *testing.T) {
+	for _, help := range []string{inFlagHelp, outFlagHelp} {
+		if !strings.Contains(help, "guitartutor devices") {
+			t.Errorf("flag help %q does not say to run 'guitartutor devices'", help)
+		}
 	}
 }
 

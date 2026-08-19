@@ -38,8 +38,6 @@ const (
 	shotH = 720
 	// warmup frames let the screen settle before the image is taken:
 	// pulses and hover states are driven by a frame counter.
-	// Frames to let the screen settle: pulses and hover states are driven
-	// by a frame counter.
 	warmup = 12
 	// And real time to let the tooltip dwell elapse (see
 	// internal/ui/tooltip.go). The dwell is measured in SECONDS, not in
@@ -338,7 +336,11 @@ func shotPieceFiles() (string, error) {
 }
 
 // shotPieces is a plausible library: a few written pieces, described the
-// way the real scanner describes them, and one that will not parse.
+// way the real scanner describes them, and one that will not parse. The
+// subtitles are what cmd/guitartutor's describePiece would say and the
+// problem line is what its shortParseError would render for the parser's
+// own message — a screenshot of words the app never produces is a
+// screenshot of a different app.
 func shotPieces(dir string) []ui.PieceInfo {
 	return []ui.PieceInfo{
 		{Path: filepath.Join(dir, "warmup.gtab"), Name: "warmup", Title: "Warmup in A",
@@ -350,6 +352,6 @@ func shotPieces(dir string) []ui.PieceInfo {
 		{Path: filepath.Join(dir, "etude.gtab"), Name: "etude", Title: "Etude no. 1",
 			Summary: "3/4 · 60 BPM · 24 bars · capo 2"},
 		{Path: filepath.Join(dir, "broken.gtab"), Name: "broken",
-			Problem: "line 7:14: bar underfull: beats fill 2880 of 3840 ticks"},
+			Problem: "line 7, column 14 — bar underfull: the notes add up to 3 of the 4 beats a 4/4 bar holds"},
 	}
 }

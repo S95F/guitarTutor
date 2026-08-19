@@ -23,10 +23,14 @@ import (
 	"github.com/S95F/guitarTutor/internal/ui"
 )
 
-// runShell opens the windowed application with no piece loaded: the start
-// screen lists recent pieces and browses for new ones, and settings are
-// reachable without quitting. This is what a double-clicked binary does.
-func runShell() error {
+// runShell opens the windowed application: the start screen lists recent
+// pieces and browses for new ones, and settings are reachable without
+// quitting. This is what a double-clicked binary does — and initialPath,
+// when non-empty, is the piece a double-clicked FILE arrives as: it is
+// opened once the window is up, through the same mailbox the OS file
+// dialog answers into, so a file that will not load is an error shown on
+// the start screen rather than one line on a stderr nobody can see.
+func runShell(initialPath string) error {
 	cfg, err := appconfig.Load()
 	if err != nil {
 		// A corrupt config must not stop the app from starting; the
@@ -72,6 +76,15 @@ func runShell() error {
 		}
 		opener.showEditor(sc, path)
 	})
+	// The command-line piece goes through the dialog mailbox rather than a
+	// path of its own: the browser already drains it on the game loop,
+	// already shows a failed load inline, and already records a successful
+	// open as recent. Posting before Run is safe — the mailbox holds one
+	// result until the first Update — and the generation stamp matches
+	// because nothing else can have opened a piece yet.
+	if initialPath != "" {
+		browser.OfferDialogResult(initialPath, "")
+	}
 	return sh.Run()
 }
 
@@ -400,6 +413,14 @@ func (p *shellPrefs) offsetFor(captureID, playbackID string) (int, bool) {
 	return calibratedOffset(p.cfg, captureID, playbackID)
 }
 
+// confidenceFor reads a stored calibration's confidence under the lock,
+// for the same reason offsetFor takes it: the Config's maps are shared.
+func (p *shellPrefs) confidenceFor(captureID, playbackID string) (float64, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cfg.ConfidenceFor(captureID, playbackID)
+}
+
 // StoreOffset records a calibration result and persists it, all under the
 // same lock discipline as everything else here. It exists so the
 // calibration goroutine never reaches into p.cfg directly: that reach was
@@ -429,15 +450,18 @@ func (p *shellPrefs) Path() string {
 // visit, so a per-screen flag guards nothing across visits.
 var errCalibrationBusy = errors.New("a calibration is already running on this device; wait for it to finish")
 
-// The settings screen discovers cancellation by type-asserting for this
-// method set, so dropping it would not break the build — it would silently
-// leave a calibration holding the audio device for its full timeout after
-// the user has left the screen. That is the exact class of silent
-// degradation this project keeps finding in review, so assert the shape at
-// compile time instead of trusting a runtime probe.
+// The settings screen discovers cancellation — and the stored-confidence
+// lookup its recalibration hint reads — by type-asserting for these
+// method sets, so dropping either would not break the build: it would
+// silently leave a calibration holding the audio device for its full
+// timeout after the user has left the screen, or silently stop rating
+// weak measurements. That is the exact class of silent degradation this
+// project keeps finding in review, so assert the shapes at compile time
+// instead of trusting a runtime probe.
 var _ interface {
 	ui.AudioServices
 	CalibrateContext(ctx context.Context, captureID, playbackID string, progress func(float64)) (int, float64, error)
+	StoredConfidence(captureID, playbackID string) (float64, bool)
 } = (*shellAudio)(nil)
 
 // shellAudio adapts the duplex backend to the UI's AudioServices. One
@@ -477,6 +501,14 @@ func toOptions(devs []audio.DeviceInfo) []ui.DeviceOption {
 
 func (a *shellAudio) CalibratedOffset(captureID, playbackID string) (int, bool) {
 	return a.prefs.offsetFor(captureID, playbackID)
+}
+
+// StoredConfidence is the optional extension the settings screen probes
+// for to rate a stored measurement: latency.Estimate reports how sure it
+// was, the config keeps that next to the offset, and a weak figure is
+// what lets the screen suggest recalibrating instead of trusting it.
+func (a *shellAudio) StoredConfidence(captureID, playbackID string) (float64, bool) {
+	return a.prefs.confidenceFor(captureID, playbackID)
 }
 
 // Calibrate satisfies ui.AudioServices. It runs uncancellable — callers
@@ -628,17 +660,39 @@ func (o *shellOpener) Open(path string) (ui.Screen, []string, error) {
 	// open failed after the teardown.
 	o.CloseCurrent()
 
+	// Everything this open wants the user to see collects here and is
+	// raised as ONE banner at the end. App.SetLiveWarning holds a single
+	// message, last writer wins — reported a call apiece, the device
+	// fallback vanished under the split-device warning and the missing
+	// calibration never reached the screen at all. The order is the order
+	// a person should read them in: which devices actually opened, what
+	// that means for the timing verdicts, and only then the notes about
+	// the import itself.
+	var conds []string
+
 	if captureID != "" {
-		session, err := setupListen(eng, app, "", "", o.prefs.snapshot())
+		session, cond, err := setupListen(eng, app, "", "", o.prefs.snapshot())
 		if err != nil {
 			// Losing live input must not stop practice: fall back to
 			// playback and tell the user in the view.
-			app.SetLiveWarning("live input unavailable: " + err.Error())
+			conds = append(conds, "live input unavailable: "+err.Error())
 		} else {
 			o.session = session
+			conds = append(conds, cond.notes...)
+			if cond.uncalibrated {
+				conds = append(conds, uncalibratedShellWarning)
+			}
+			if w := o.splitDeviceWarning(); w != "" {
+				conds = append(conds, w)
+			}
+			if s := importSummary(warns); s != "" {
+				conds = append(conds, s)
+			}
 			o.watchOutputLatency(app)
-			o.warnOnSplitDevices(app)
 			o.setTitleFor(path)
+			if msg := composeBanner(conds); msg != "" {
+				app.SetLiveWarning(msg)
+			}
 			return app, warns, nil
 		}
 	}
@@ -652,7 +706,43 @@ func (o *shellOpener) Open(path string) (ui.Screen, []string, error) {
 	o.player.Play()
 	o.watchOutputLatency(app)
 	o.setTitleFor(path)
+	if s := importSummary(warns); s != "" {
+		conds = append(conds, s)
+	}
+	if msg := composeBanner(conds); msg != "" {
+		app.SetLiveWarning(msg)
+	}
 	return app, warns, nil
+}
+
+// uncalibratedShellWarning is the practice view's wording for a live
+// session whose round trip has never been measured. The stderr line
+// setupListen prints says to run 'guitartutor calibrate' — true in a
+// terminal, useless in a window Explorer opened — so the shell's banner
+// names the remedy that exists right here instead.
+const uncalibratedShellWarning = "timing is not calibrated for these devices — press S for settings, then calibrate now"
+
+// composeBanner folds every condition an open raises into the one
+// message the warning banner holds, most important first: the banner is
+// a fixed rectangle that ellipsizes what does not fit, so the tail is
+// what a crowded open loses.
+func composeBanner(conds []string) string {
+	return strings.Join(conds, "; ")
+}
+
+// importSummary coalesces importer warnings into a banner-sized line:
+// the first warning spelled out, and a count for the rest. The full list
+// stays on the Open return value (and on stderr) — this is the headline,
+// raised where the user actually lands, because the browser's inline
+// list is behind them the moment the practice screen opens.
+func importSummary(warns []string) string {
+	switch len(warns) {
+	case 0:
+		return ""
+	case 1:
+		return "imported with 1 warning: " + warns[0]
+	}
+	return fmt.Sprintf("imported with %d warnings: %s (and %d more)", len(warns), warns[0], len(warns)-1)
 }
 
 // watchOutputLatency tells the practice view how much rendered audio has
@@ -703,34 +793,37 @@ func (o *shellOpener) setTitleFor(path string) {
 	}
 }
 
-// warnOnSplitDevices surfaces the clock-drift risk in the UI rather than
+// splitDeviceWarning surfaces the clock-drift risk in the UI rather than
 // only in the docs (ROADMAP Phase 2 deferred item): capture and playback
 // on different physical interfaces run on independent sample clocks that
-// drift apart over a session, which a static calibration cannot fix.
+// drift apart over a session, which a static calibration cannot fix. It
+// returns the warning text — "" when the pair shares an interface or
+// cannot be judged — rather than setting the banner itself, so the open
+// can compose it with the other conditions instead of overwriting them.
 //
 // The judgement is ui.SameAudioInterface — the same heuristic the
 // settings screen uses. This file used to carry its own first-word
 // comparison, and the two disagreed on ordinary Windows names: settings
 // warned about a pair that the practice view, the screen where scoring
 // actually happens, stayed silent about (audit C2).
-func (o *shellOpener) warnOnSplitDevices(app *ui.App) {
+func (o *shellOpener) splitDeviceWarning() string {
 	b, err := liveBackend()
 	if err != nil {
-		return
+		return ""
 	}
 	capture, playback, err := b.Devices()
 	if err != nil {
-		return
+		return ""
 	}
 	capID, playID := o.prefs.Devices()
 	capName := resolvedDeviceName(capture, capID)
 	playName := resolvedDeviceName(playback, playID)
 	if ui.SameAudioInterface(capName, playName) {
-		return
+		return ""
 	}
-	app.SetLiveWarning(fmt.Sprintf(
-		"capture and playback are different devices (%s / %s): their clocks drift apart over a session and timing scores wander",
-		capName, playName))
+	return fmt.Sprintf(
+		"capture and playback are different devices (%s / %s): their clocks drift apart over a session and timing scores wander — pick the same interface for capture and playback in settings (S)",
+		capName, playName)
 }
 
 // resolvedDeviceName names the device an ID will actually resolve to at

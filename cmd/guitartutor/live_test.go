@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -398,6 +399,126 @@ func TestOnNotesWaitWiring(t *testing.T) {
 	}
 }
 
+// TestSetupListenReportsConditions pins setupListen's other return: the
+// conditions a session opened under used to be stderr lines only, which a
+// double-clicked windowed binary has nowhere to show. They now come back
+// to the caller, so each caller can put them on the practice view's
+// banner with its own remedy wording.
+func TestSetupListenReportsConditions(t *testing.T) {
+	t.Setenv(appconfig.EnvConfigDir, t.TempDir())
+	backend := &stubBackend{capture: testCapture, playback: testPlayback}
+	useStubBackend(t, backend)
+
+	sc := oneBarScore(t)
+	open := func(t *testing.T, cfg appconfig.Config) liveConditions {
+		t.Helper()
+		eng := newEngine(sc, engine.Options{})
+		app := ui.New(eng, sc, 0)
+		session, cond, err := setupListen(eng, app, "", "", cfg)
+		if err != nil {
+			t.Fatalf("setupListen: %v", err)
+		}
+		session.Stop()
+		return cond
+	}
+
+	t.Run("no calibration stored", func(t *testing.T) {
+		cond := open(t, appconfig.Config{})
+		if !cond.uncalibrated {
+			t.Error("an empty config reported the session as calibrated")
+		}
+		if len(cond.notes) != 0 {
+			t.Errorf("notes = %v, want none when every device resolves", cond.notes)
+		}
+	})
+
+	t.Run("calibration stored for the resolved pair", func(t *testing.T) {
+		var cfg appconfig.Config
+		cfg.SetOffset("cap-mic", "pb-spk", 500, 0.9) // the concrete defaults
+		cond := open(t, cfg)
+		if cond.uncalibrated {
+			t.Error("a stored offset for the resolved pair reported as uncalibrated")
+		}
+	})
+
+	t.Run("stale remembered device comes back as a note", func(t *testing.T) {
+		cfg := appconfig.Config{CaptureDeviceID: "cap-unplugged", PlaybackDeviceID: "pb-usb"}
+		cond := open(t, cfg)
+		if len(cond.notes) != 1 || !strings.Contains(cond.notes[0], "capture device is not connected") {
+			t.Errorf("notes = %v, want exactly one explaining the capture fallback", cond.notes)
+		}
+	})
+}
+
+// silentStream drives the calibration handler from its own goroutine with
+// silence on the input: the pass completes its capture, and the estimate
+// then fails — which is exactly the path the pass-through test needs.
+type silentStream struct {
+	handler audio.DuplexHandler
+	stop    chan struct{}
+	once    sync.Once
+	wg      sync.WaitGroup
+}
+
+func (s *silentStream) Start() error {
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		in := make([]float32, 4800)
+		outL := make([]float32, 4800)
+		outR := make([]float32, 4800)
+		for {
+			select {
+			case <-s.stop:
+				return
+			default:
+				s.handler(in, outL, outR)
+			}
+		}
+	}()
+	return nil
+}
+
+// Stop returns only after the handler goroutine has exited, because the
+// caller reads the captured buffer that goroutine writes next.
+func (s *silentStream) Stop() error {
+	s.once.Do(func() { close(s.stop) })
+	s.wg.Wait()
+	return nil
+}
+func (s *silentStream) Close() error               { return s.Stop() }
+func (s *silentStream) Config() audio.StreamConfig { return audio.StreamConfig{SampleRate: sampleRate} }
+
+// silentBackend opens silentStreams.
+type silentBackend struct{}
+
+func (silentBackend) Name() string { return "silent" }
+func (silentBackend) Devices() ([]audio.DeviceInfo, []audio.DeviceInfo, error) {
+	return testCapture, testPlayback, nil
+}
+func (silentBackend) OpenDuplex(_ audio.StreamConfig, h audio.DuplexHandler) (audio.Stream, error) {
+	return &silentStream{handler: h, stop: make(chan struct{})}, nil
+}
+
+// TestCalibrationPassReturnsTheLatencyErrorUnchanged pins the contract
+// the settings screen renders by: the latency package writes its
+// diagnostics for a person, and calibrationPass used to stack "could not
+// measure the round trip:" on top of the package's own prefix — the
+// settings screen then showed both, reading as one garbled sentence. The
+// package's error must come through unchanged.
+func TestCalibrationPassReturnsTheLatencyErrorUnchanged(t *testing.T) {
+	_, _, err := calibrationPass(context.Background(), silentBackend{}, "cap-usb", "pb-usb", nil)
+	if err == nil {
+		t.Fatal("a silent capture produced a nil error, want the latency package's diagnosis")
+	}
+	if !strings.HasPrefix(err.Error(), "latency:") {
+		t.Errorf("error = %q, want the latency package's own message, unwrapped", err)
+	}
+	if strings.Contains(err.Error(), "could not measure the round trip") {
+		t.Errorf("error = %q still carries the cmd-layer wrapper", err)
+	}
+}
+
 // TestCalibrationPassCancel is the regression test for the uncancellable
 // calibration. A pass holds the audio device until the capture completes
 // or the 20 s deadline expires; before the context was threaded through
@@ -499,7 +620,7 @@ func TestSetupListenRollsBackTapOnFailure(t *testing.T) {
 	eng := newEngine(sc, engine.Options{})
 	app := ui.New(eng, sc, 0)
 
-	session, err := setupListen(eng, app, "", "", appconfig.Config{})
+	session, _, err := setupListen(eng, app, "", "", appconfig.Config{})
 	if err == nil {
 		session.Stop()
 		t.Fatal("setupListen with a refusing backend returned nil error")
@@ -532,7 +653,7 @@ func TestSetupListenKeepsTapOnSuccess(t *testing.T) {
 	eng := newEngine(sc, engine.Options{})
 	app := ui.New(eng, sc, 0)
 
-	session, err := setupListen(eng, app, "", "", appconfig.Config{})
+	session, _, err := setupListen(eng, app, "", "", appconfig.Config{})
 	if err != nil {
 		t.Fatalf("setupListen: %v", err)
 	}

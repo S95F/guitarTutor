@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -435,6 +436,107 @@ func TestFailedOpenLeavesPreviousSessionPlaying(t *testing.T) {
 	}
 	if _, _, closed := streams[0].counts(); closed != 1 {
 		t.Errorf("the first stream was closed %d times after the recovery open, want exactly 1", closed)
+	}
+}
+
+// TestShellAudioStoredConfidence checks the optional extension the
+// settings screen probes for to rate a stored measurement (the contract
+// method is StoredConfidence, asserted at compile time in shell.go): the
+// confidence stored beside an offset must read back, and a pair that has
+// never been measured must answer false rather than a made-up figure.
+func TestShellAudioStoredConfidence(t *testing.T) {
+	t.Setenv(appconfig.EnvConfigDir, t.TempDir())
+
+	p := &shellPrefs{}
+	a := &shellAudio{prefs: p}
+	if conf, ok := a.StoredConfidence("cap", "pb"); ok {
+		t.Fatalf("an unmeasured pair reported confidence %v, want none stored", conf)
+	}
+	if err := p.StoreOffset("cap", "pb", 1234, 0.87); err != nil {
+		t.Fatalf("StoreOffset: %v", err)
+	}
+	conf, ok := a.StoredConfidence("cap", "pb")
+	if !ok || conf != 0.87 {
+		t.Errorf("StoredConfidence = (%v, %v), want (0.87, true)", conf, ok)
+	}
+	if _, ok := a.StoredConfidence("cap", "other"); ok {
+		t.Error("a different pair read back the stored confidence")
+	}
+}
+
+// TestSplitDeviceWarning: the clock-drift check returns its text instead
+// of setting the banner itself, so an open can compose it with the other
+// conditions — and the text now carries its remedy, because a warning
+// that names a problem without naming the fix is homework.
+func TestSplitDeviceWarning(t *testing.T) {
+	backend := &stubBackend{
+		capture: []audio.DeviceInfo{
+			{ID: "cap-usb", Name: "Line In (Scarlett 2i2 USB)", Default: true},
+			{ID: "cap-rt", Name: "Microphone (Realtek(R) Audio)"},
+		},
+		playback: []audio.DeviceInfo{
+			{ID: "pb-usb", Name: "Headphones (Scarlett 2i2 USB)", Default: true},
+			{ID: "pb-rt", Name: "Speakers (Realtek(R) Audio)"},
+		},
+	}
+	useStubBackend(t, backend)
+	prefs := &shellPrefs{}
+	o := &shellOpener{prefs: prefs}
+
+	if got := o.splitDeviceWarning(); got != "" {
+		t.Errorf("same-interface defaults warned: %q", got)
+	}
+
+	prefs.SetDevices("cap-usb", "pb-rt")
+	got := o.splitDeviceWarning()
+	for _, want := range []string{
+		"different devices",
+		"Line In (Scarlett 2i2 USB)",
+		"Speakers (Realtek(R) Audio)",
+		"pick the same interface for capture and playback in settings (S)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("split warning %q does not contain %q", got, want)
+		}
+	}
+}
+
+// TestImportSummary: the banner gets one line, so a pile of importer
+// warnings is coalesced into the first one plus a count.
+func TestImportSummary(t *testing.T) {
+	cases := []struct {
+		name  string
+		warns []string
+		want  string
+	}{
+		{name: "none", warns: nil, want: ""},
+		{name: "one", warns: []string{"percussion track dropped"},
+			want: "imported with 1 warning: percussion track dropped"},
+		{name: "several", warns: []string{"percussion track dropped", "tempo map truncated", "lyrics ignored"},
+			want: "imported with 3 warnings: percussion track dropped (and 2 more)"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := importSummary(c.warns); got != c.want {
+				t.Errorf("importSummary(%v) = %q, want %q", c.warns, got, c.want)
+			}
+		})
+	}
+}
+
+// TestComposeBanner: the practice view's warning slot holds ONE message
+// (last writer wins), so the conditions of an open must arrive joined —
+// the device fallback used to vanish under the split-device warning, and
+// the missing calibration never reached the screen at all.
+func TestComposeBanner(t *testing.T) {
+	if got := composeBanner(nil); got != "" {
+		t.Errorf("composeBanner(nil) = %q, want empty", got)
+	}
+	got := composeBanner([]string{"a fallback note", uncalibratedShellWarning, "a split-device warning"})
+	for _, want := range []string{"a fallback note", "press S for settings", "a split-device warning"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("composed banner %q lost %q", got, want)
+		}
 	}
 }
 

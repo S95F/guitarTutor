@@ -472,6 +472,23 @@ func mergeNote(buf []pitch.Note, n pitch.Note) []pitch.Note {
 	return append(buf, n)
 }
 
+// liveConditions is what a successfully opened live session is operating
+// under that the player deserves to know about: which endpoints are
+// stand-ins for devices that were not there, and whether the round trip
+// the timing verdicts depend on has ever been measured. setupListen
+// prints these to stderr for the terminal-launched path, but stderr is
+// invisible to a double-clicked windowed binary — so they are also
+// RETURNED, and each caller folds them into the practice view's warning
+// banner with wording that names the remedy that caller can offer.
+type liveConditions struct {
+	// notes are the device-fallback explanations from resolveDevices: the
+	// saved device was not connected and a stand-in opened instead.
+	notes []string
+	// uncalibrated is true when no latency offset is stored for the pair
+	// of devices the stream actually opened on.
+	uncalibrated bool
+}
+
 // setupListen wires the live practice loop: duplex stream -> engine
 // playback + pitch analysis -> scorer and wait gate -> UI feeds.
 //
@@ -485,23 +502,31 @@ func mergeNote(buf []pitch.Note, n pitch.Note) []pitch.Note {
 // the file itself and passes it in, so both callers choose their source
 // explicitly.
 //
+// The conditions the session opened under come back alongside it rather
+// than being shown here: this function cannot know whether "press S for
+// settings" or "run 'guitartutor calibrate'" is the remedy that is true
+// for its caller, and a banner set here was overwritten by whichever
+// banner the caller set next (App.SetLiveWarning holds one message).
+//
 // Every failure path leaves the engine exactly as it was found: in
 // particular the event tap is rolled back, so a caller that falls back to
 // plain playback is not left with an engine feeding expectations into a
 // scorer nobody drains (see the rollback below).
-func setupListen(eng *engine.Engine, app *ui.App, inQ, outQ string, cfg appconfig.Config) (session *live.Session, err error) {
+func setupListen(eng *engine.Engine, app *ui.App, inQ, outQ string, cfg appconfig.Config) (session *live.Session, cond liveConditions, err error) {
 	b, err := liveBackend()
 	if err != nil {
-		return nil, err
+		return nil, cond, err
 	}
 	inID, outID, _, _, notes, _, _, err := resolveDevices(b, cfg, inQ, outQ)
 	if err != nil {
-		return nil, err
+		return nil, cond, err
 	}
+	cond.notes = notes
 	for _, n := range notes {
 		fmt.Fprintln(os.Stderr, "warning:", n)
 	}
 	offset, calibrated := calibratedOffset(cfg, inID, outID)
+	cond.uncalibrated = !calibrated
 	if !calibrated {
 		fmt.Fprintln(os.Stderr, "warning: no latency calibration for these devices — run 'guitartutor calibrate'.")
 		fmt.Fprintln(os.Stderr, "Scoring works, but timing verdicts are skewed by the unmeasured round trip.")
@@ -549,22 +574,15 @@ func setupListen(eng *engine.Engine, app *ui.App, inQ, outQ string, cfg appconfi
 		OnStrums: wiring.onStrums,
 	})
 	if err != nil {
-		return nil, err
+		return nil, cond, err
 	}
 	app.SetLiveStatus(func() (float64, int64) {
 		return session.InputLevel(), session.DroppedSamples()
 	})
 	app.SetWaitControl(true)
-	// A device fallback is worth a banner, not only a stderr line the
-	// windowed app has no way to show. The shell's split-device check may
-	// overwrite this with its own warning, which is the more consequential
-	// of the two.
-	if len(notes) > 0 {
-		app.SetLiveWarning(strings.Join(notes, "; "))
-	}
 	fmt.Printf("listening on %s (offset %d frames, calibrated: %v)\n", b.Name(), offset, calibrated)
 	wired = true
-	return session, nil
+	return session, cond, nil
 }
 
 // errCalibrationCanceled reports a pass abandoned through its context —
@@ -658,11 +676,13 @@ func calibrationPass(ctx context.Context, b audio.Backend, inID, outID string, p
 	stream.Stop()
 	stream.Close()
 
-	off, conf, err := latency.Estimate(sampleRate, train, captured, calSpacing, calClicks)
-	if err != nil {
-		return off, conf, fmt.Errorf("could not measure the round trip: %w", err)
-	}
-	return off, conf, nil
+	// The estimate's error passes through unchanged. The latency package
+	// already writes its diagnostics for a person — what went wrong and
+	// what to try — and the settings screen renders that message directly,
+	// trimming the package's own prefix; a second "could not measure"
+	// wrapper stacked on top read as part of the message there. A caller
+	// with a print site of its own can add its framing where it prints.
+	return latency.Estimate(sampleRate, train, captured, calSpacing, calClicks)
 }
 
 // rememberDevices adopts a calibrated pair as the saved device
@@ -689,8 +709,11 @@ func rememberDevices(cfg *appconfig.Config, inID, outID string, inFell, outFell 
 // runCalibrate measures the round-trip latency offset and stores it.
 func runCalibrate(args []string) error {
 	fs := flag.NewFlagSet("calibrate", flag.ExitOnError)
-	inQ := fs.String("in", "", "capture device (name fragment)")
-	outQ := fs.String("out", "", "playback device (name fragment)")
+	inQ := fs.String("in", "", inFlagHelp)
+	outQ := fs.String("out", "", outFlagHelp)
+	setUsage(fs, "guitartutor calibrate [-in device] [-out device]",
+		"calibrate measures the round-trip latency offset used to align scoring;",
+		"the output must be audible to the input (mic near the speakers, or a loopback).")
 	fs.Parse(args)
 	if fs.NArg() != 0 {
 		return fmt.Errorf("usage: guitartutor calibrate [-in device] [-out device]")

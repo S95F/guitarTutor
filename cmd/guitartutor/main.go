@@ -4,8 +4,10 @@
 //	guitartutor render [flags] <file>               render the piece to a WAV
 //	guitartutor version                             print the version
 //
-// A bare file argument is shorthand for play. See README.md and ROADMAP.md
-// for where this is headed.
+// A bare file argument — the invocation a double-clicked piece arrives
+// as — opens the windowed shell on that piece, so a file that will not
+// load is reported on the start screen instead of on a console that
+// closes itself. See README.md and ROADMAP.md for where this is headed.
 package main
 
 import (
@@ -79,7 +81,7 @@ func main() {
 	// app with the start screen, where a piece can be chosen and settings
 	// changed without ever touching a terminal.
 	if len(os.Args) < 2 {
-		if err := runShell(); err != nil {
+		if err := runShell(""); err != nil {
 			fmt.Fprintln(os.Stderr, "guitartutor:", err)
 			os.Exit(1)
 		}
@@ -101,15 +103,61 @@ func main() {
 		err = runCalibrate(os.Args[2:])
 	default:
 		if strings.HasPrefix(os.Args[1], "-") {
+			// A flag in command position is almost always a subcommand
+			// forgotten, not a file — say what is actually wrong before
+			// the wall of usage text, or the one line that matters is
+			// the one line that is missing.
+			fmt.Fprintln(os.Stderr, flagFirstDiagnostic(os.Args[1]))
 			usage(os.Stderr)
 			os.Exit(2)
 		}
-		err = runPlay(os.Args[1:]) // bare file argument
+		// A bare argument is a piece to practise — the invocation Windows
+		// Explorer uses for a double-clicked file — so it opens through
+		// the windowed shell, where a file that will not load is an error
+		// on the start screen rather than a console that flashes and
+		// vanishes. Anything that cannot be a piece is diagnosed here
+		// first: opening a window to say "devcies is not a file" would be
+		// worse than saying it where the typo was made.
+		if err = checkPieceArgument(os.Args[1]); err == nil {
+			err = runShell(os.Args[1])
+		}
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "guitartutor:", err)
 		os.Exit(1)
 	}
+}
+
+// flagFirstDiagnostic is the one line printed above the usage text when
+// the first argument is a flag: what was misunderstood, and the shape of
+// the invocation that would have worked.
+func flagFirstDiagnostic(arg string) string {
+	return fmt.Sprintf("guitartutor: unknown command %q — flags follow a subcommand: guitartutor play %s <file>", arg, arg)
+}
+
+// checkPieceArgument reports why a bare argument cannot be opened as a
+// piece, or nil when it carries an extension an importer reads. The
+// extension list is the browser's own (ui.PieceExtensions), so the
+// command line and the start screen cannot disagree about what counts as
+// a piece — and a load-time test pins that list to the importer switch.
+//
+// The two failure shapes are told apart with a stat, because they are
+// different mistakes: a path that does not exist is almost always a
+// mistyped subcommand and is answered with where the commands are
+// listed, while a file that really exists in a format the importers do
+// not read is named by its path — "unsupported file type """ named
+// neither the file nor the problem.
+func checkPieceArgument(arg string) error {
+	ext := strings.ToLower(filepath.Ext(arg))
+	for _, e := range ui.PieceExtensions() {
+		if ext == e {
+			return nil
+		}
+	}
+	if _, err := os.Stat(arg); err != nil {
+		return fmt.Errorf("%q is not a command or a piece file (run 'guitartutor help'; pieces are .gtab, .mid, .gp, .musicxml, .mxl)", arg)
+	}
+	return fmt.Errorf("%s: unsupported file type %q (want .gtab, .mid, .gp, .musicxml, or .mxl)", arg, filepath.Ext(arg))
 }
 
 // usage writes the help text to w. `help` and -h ask for it, so they get
@@ -155,6 +203,38 @@ devices lists audio endpoints; calibrate measures the round-trip latency
 offset used to align scoring (make the output audible to the input first:
 point a mic at the speakers, or wire a loopback).
 `)
+}
+
+// piecesLine names the piece formats, once, for every usage text that
+// takes a <file>: the top-level help and each subcommand's -h say the
+// same thing because they print the same line.
+const piecesLine = "pieces: .gtab (text tab), .mid (MIDI), .gp (Guitar Pro 7/8), .musicxml / .mxl (MusicXML)"
+
+// inFlagHelp and outFlagHelp describe the device flags the same way
+// everywhere they appear (play and calibrate): naming where the device
+// names come from, because "name fragment" alone left the user to guess
+// which names the fragment was a fragment of.
+const (
+	inFlagHelp  = "capture device for live input: a unique part of a name from 'guitartutor devices' (default: the system default)"
+	outFlagHelp = "playback device: a unique part of a name from 'guitartutor devices' (default: the system default)"
+)
+
+// setUsage replaces fs's -h output with one that starts from the
+// synopsis. Go's default dump lists the flags and nothing else — no hint
+// that a <file> is required, no word on what kind of file — so
+// 'guitartutor play -h' answered every question except the one a person
+// asking for help actually has. extra lines (the pieces line, a
+// subcommand's one-sentence description) follow the synopsis, then the
+// flag defaults.
+func setUsage(fs *flag.FlagSet, synopsis string, extra ...string) {
+	fs.Usage = func() {
+		w := fs.Output()
+		fmt.Fprintln(w, "usage:", synopsis)
+		for _, line := range extra {
+			fmt.Fprintln(w, line)
+		}
+		fs.PrintDefaults()
+	}
 }
 
 // load parses a piece by file extension.
@@ -251,11 +331,12 @@ func runPlay(args []string) error {
 	countIn := fs.Int("countin", 0, "count-in beats")
 	track := fs.Int("track", 0, "track to practise: displayed, scored and waited on (1-based)")
 	listen := fs.Bool("listen", false, "live pitch detection and scoring")
-	inQ := fs.String("in", "", "capture device for -listen (name fragment)")
-	outQ := fs.String("out", "", "playback device for -listen (name fragment)")
+	inQ := fs.String("in", "", inFlagHelp)
+	outQ := fs.String("out", "", outFlagHelp)
 	backing := fs.String("backing", "", "backing-track audio file (wav/flac/mp3)")
 	backingOff := fs.Float64("backing-offset", 0, "backing start offset in seconds (positive skips into the file)")
 	backingGain := fs.Float64("backing-gain", 1.0, "backing track volume")
+	setUsage(fs, "guitartutor play [flags] <file>", piecesLine)
 	fs.Parse(args)
 	if fs.NArg() != 1 {
 		return fmt.Errorf("usage: guitartutor play [flags] <file>")
@@ -309,11 +390,23 @@ func runPlay(args []string) error {
 		if cfgErr != nil {
 			fmt.Fprintln(os.Stderr, "warning: existing config unreadable, ignoring it:", cfgErr)
 		}
-		session, err := setupListen(eng, app, *inQ, *outQ, cfg)
+		session, cond, err := setupListen(eng, app, *inQ, *outQ, cfg)
 		if err != nil {
 			return err
 		}
 		defer session.Stop()
+		// The stderr warnings setupListen printed also go over the tab:
+		// this path opens the same window the shell does, and the person
+		// watching it is not necessarily watching the terminal it was
+		// started from. The remedy named is the CLI's — this view has no
+		// settings screen to press S for.
+		conds := cond.notes
+		if cond.uncalibrated {
+			conds = append(conds, "timing is not calibrated for these devices — quit and run 'guitartutor calibrate'")
+		}
+		if msg := composeBanner(conds); msg != "" {
+			app.SetLiveWarning(msg)
+		}
 		return app.Run()
 	}
 
@@ -345,6 +438,7 @@ func runRender(args []string) error {
 	backing := fs.String("backing", "", "backing-track audio file (wav/flac/mp3)")
 	backingOff := fs.Float64("backing-offset", 0, "backing start offset in seconds")
 	backingGain := fs.Float64("backing-gain", 1.0, "backing track volume")
+	setUsage(fs, "guitartutor render [flags] <file>", piecesLine)
 	fs.Parse(args)
 	if fs.NArg() != 1 {
 		return fmt.Errorf("usage: guitartutor render [flags] <file>")
