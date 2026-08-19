@@ -154,7 +154,7 @@ func TestParserCountsInBeats(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%q should not parse", src)
 		}
-		msg := gtabProblem(err)
+		msg := textfmt.ProblemLine(err)
 		if strings.Contains(msg, "tick") {
 			t.Errorf("the complaint counts in ticks: %q", msg)
 		}

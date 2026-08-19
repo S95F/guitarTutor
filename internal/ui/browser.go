@@ -737,7 +737,7 @@ func (b *Browser) activate() {
 		// so the reason for landing in the editor is still on screen when
 		// the user comes back from it.
 		if path, ok := b.editableSelection(); ok {
-			b.errMsg, b.warns, b.warnsFrom, b.warnsFailed = filepath.Base(e.path)+": "+e.sub, nil, "", false
+			b.ShowError(filepath.Base(e.path) + ": " + e.sub)
 			b.editPiece(path)
 			return
 		}
@@ -755,7 +755,7 @@ func (b *Browser) activate() {
 // display and never propagated: a malformed file must not end the
 // session.
 func (b *Browser) openPath(path string) {
-	b.errMsg, b.warns, b.warnsFrom, b.warnsFailed = "", nil, "", false
+	b.clearStatus()
 	if b.sh == nil || b.sh.Services().Opener == nil {
 		b.errMsg = "no importer is available in this build"
 		return
@@ -1106,14 +1106,20 @@ func (b *Browser) hintLine() string { return hintLineOf(b.browserBindings()) }
 // to read. It deliberately does NOT go through the dialog mailbox: that
 // path also clears the "a file dialog is open" guard, and borrowing it for
 // an unrelated failure would re-arm a dialog that is still on screen.
+// ShowError replaces the whole status band with one error line. It is
+// the ONE place the band's fields are written together, so a new field
+// cannot be forgotten at some of the sites that reset it.
 func (b *Browser) ShowError(msg string) { b.errMsg, b.warns, b.warnsFrom, b.warnsFailed = msg, nil, "", false }
+
+// clearStatus empties the status band.
+func (b *Browser) clearStatus() { b.ShowError("") }
 
 // startNewPiece opens the editor on a blank piece.
 func (b *Browser) startNewPiece() {
 	if b.newPiece == nil {
 		return
 	}
-	b.errMsg, b.warns, b.warnsFrom, b.warnsFailed = "", nil, "", false
+	b.clearStatus()
 	b.newPiece()
 }
 
@@ -1141,7 +1147,7 @@ func (b *Browser) editSelected() {
 	if !ok {
 		return
 	}
-	b.errMsg, b.warns, b.warnsFrom, b.warnsFailed = "", nil, "", false
+	b.clearStatus()
 	b.editPiece(path)
 }
 

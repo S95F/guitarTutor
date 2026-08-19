@@ -377,14 +377,9 @@ func TestEditorTextViewRoundTrips(t *testing.T) {
 func TestEditorTextViewAppliesEdits(t *testing.T) {
 	e := newTestEditor()
 	e.toggleText()
-	// Retitle the piece by editing the text, the way the view exists to
+	// Retune the piece by editing the text, the way the view exists to
 	// allow.
-	for i, line := range e.text.lines {
-		if strings.HasPrefix(string(line), "\\tempo") {
-			e.text.lines[i] = []rune("\\tempo 96")
-		}
-	}
-	e.text.reparse()
+	setTextLine(t, e, "\\tempo", "\\tempo 96")
 	if !e.text.ok {
 		t.Fatalf("the edited text does not parse: %s", e.text.status)
 	}

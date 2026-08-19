@@ -516,7 +516,7 @@ const loopDrawSlop = 4.0
 // coarse placement, and the edges can be refined afterwards. The loop is
 // never shorter than a beat, so it appears the moment the slop is crossed
 // instead of waiting for the drag to span a beat boundary.
-func (a *App) continueLoopDraw(p pointer) {
+func (a *App) continueLoopDraw(p pointer, l practiceLayout) {
 	if !a.loopDrawing && math.Abs(p.x-a.loopDrawX) <= loopDrawSlop {
 		return
 	}
@@ -531,7 +531,7 @@ func (a *App) continueLoopDraw(p pointer) {
 	// are immune to both.
 	var cur int64
 	if a.loopDrawOnTimeline {
-		cur = a.timelineTick(a.layout().timeline, p.x)
+		cur = a.timelineTick(l.timeline, p.x)
 	} else {
 		cur = a.loopDrawTick + int64(math.Round((p.x-a.loopDrawX)/a.loopDrawPxPerTick))
 	}
@@ -608,7 +608,7 @@ func (a *App) continueDrag(p pointer, shift bool) {
 	case dragSeekTimeline:
 		a.seekTo(a.timelineTick(l.timeline, p.x))
 	case dragLoopNew:
-		a.continueLoopDraw(p)
+		a.continueLoopDraw(p, l)
 	case dragLoopA, dragLoopB:
 		// The edge follows whichever surface the gesture started over —
 		// the timeline when the cursor is on it, the tab otherwise — so a

@@ -172,7 +172,7 @@ func TestGtabProblemIsReadable(t *testing.T) {
 	if err == nil {
 		t.Fatal("that piece should not parse: the bar is short")
 	}
-	got := gtabProblem(err)
+	got := textfmt.ProblemLine(err)
 	if strings.HasPrefix(got, "piece:") {
 		t.Errorf("the problem reads %q, which starts with a filename that does not exist", got)
 	}
@@ -185,7 +185,7 @@ func TestGtabProblemIsReadable(t *testing.T) {
 	// A failure that is not a parse error passes through unchanged rather
 	// than being mangled into a position it does not have.
 	plain := errors.New("the disk is full")
-	if got := gtabProblem(plain); got != "the disk is full" {
+	if got := textfmt.ProblemLine(plain); got != "the disk is full" {
 		t.Errorf("a non-parse error came back as %q", got)
 	}
 }

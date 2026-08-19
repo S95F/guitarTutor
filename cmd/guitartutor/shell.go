@@ -719,25 +719,20 @@ func (o *shellOpener) Open(path string) (ui.Screen, []string, error) {
 			if w := o.splitDeviceWarning(); w != "" {
 				conds = append(conds, w)
 			}
-			if s := importSummary(warns); s != "" {
-				conds = append(conds, s)
-			}
-			o.watchOutputLatency(app)
-			o.setTitleFor(path)
-			if msg := composeBanner(conds); msg != "" {
-				app.SetLiveWarning(msg)
-			}
-			return app, warns, nil
 		}
 	}
-
-	ctx, err := o.audioContext()
-	if err != nil {
-		return nil, warns, err
+	// The live path plays through its duplex session; every other way
+	// here needs the oto player. CloseCurrent above nil'd o.session, so
+	// its presence says exactly which open this was.
+	if o.session == nil {
+		ctx, err := o.audioContext()
+		if err != nil {
+			return nil, warns, err
+		}
+		o.player = ctx.NewPlayer(eng)
+		o.player.SetBufferSize(playerBufferBytes())
+		o.player.Play()
 	}
-	o.player = ctx.NewPlayer(eng)
-	o.player.SetBufferSize(playerBufferBytes())
-	o.player.Play()
 	o.watchOutputLatency(app)
 	o.setTitleFor(path)
 	if s := importSummary(warns); s != "" {

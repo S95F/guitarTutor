@@ -856,18 +856,32 @@ type practiceBinding struct {
 	// behind it, so the same key ends the process — and saying "go back"
 	// there, one line above "Q quit", promises a screen that does not
 	// exist.
-	//
-	// A binding that carries both a Reword and an Enabled gate takes on a
-	// duty: while it is off, the reworded Desc must say what would turn
-	// it on. The overlay then shows that sentence in place of its generic
-	// "(not available now)", because a greyed row that names its remedy
-	// is an explanation and one that only announces its own absence is a
-	// dead end.
 	Reword func(a *App) (hint, desc string)
+	// Caveat appends a parenthetical to the Desc — "" for none. It is for
+	// a key whose meaning is stable but whose availability has a reason
+	// worth naming ("needs live input — ..."): the Desc is written once
+	// on the row and the caveat once here, where Reword would force both
+	// to be spelled twice per branch. A caveated row that is also Off has
+	// explained itself, so the overlay skips its generic
+	// "(not available now)" stamp — a greyed row that names its remedy is
+	// an explanation, one that only announces its own absence is a dead
+	// end.
+	Caveat func(a *App) string
 }
 
 // enabled resolves the optional gate.
 func (b practiceBinding) enabled(a *App) bool { return b.Enabled == nil || b.Enabled(a) }
+
+// liveInputCaveat builds the caveat shared by every key that needs live
+// input: nothing while have() is true, the remedy while it is not.
+func liveInputCaveat(have func(a *App) bool) func(a *App) string {
+	return func(a *App) string {
+		if have(a) {
+			return ""
+		}
+		return "needs live input — " + a.liveRemedy()
+	}
+}
 
 // practiceBindings is the single source of truth for the practice view's
 // keyboard. Order matters: it is the order of both the hint line and the
@@ -899,30 +913,20 @@ var practiceBindings = []practiceBinding{
 	// itself — but its row carries the same caveat the overlay shows, so
 	// nobody has to open a silent tuner to learn why it is silent.
 	{Group: "practice", Keys: "T", Hint: "T tuner", Desc: "Tuner overlay",
-		Reword: func(a *App) (string, string) {
-			if !a.live {
-				return "T tuner", "Tuner overlay (needs live input — " + a.liveRemedy() + ")"
-			}
-			return "T tuner", "Tuner overlay"
-		}},
+		Caveat: liveInputCaveat(func(a *App) bool { return a.live })},
 	{Group: "practice", Keys: "W", Hint: "W wait", Desc: "Wait at each note until you play it",
 		Enabled: func(a *App) bool { return a.waitCtl },
-		Reword: func(a *App) (string, string) {
-			if !a.waitCtl {
-				return "W wait", "Wait at each note until you play it (needs live input — " + a.liveRemedy() + ")"
-			}
-			return "W wait", "Wait at each note until you play it"
-		}},
+		Caveat:  liveInputCaveat(func(a *App) bool { return a.waitCtl })},
 
 	{Group: "view", Keys: "+ / -", Desc: "Zoom the tab in / out (or the wheel over it)"},
 
 	{Group: "session", Keys: "S", Hint: "S settings", Desc: "Settings, without leaving the piece",
 		Enabled: func(a *App) bool { return a.settings != nil },
-		Reword: func(a *App) (string, string) {
+		Caveat: func(a *App) string {
 			if a.settings == nil {
-				return "S settings", "Settings, without leaving the piece (needs the full app — start guitarTutor without a file)"
+				return "needs the full app — start guitarTutor without a file"
 			}
-			return "S settings", "Settings, without leaving the piece"
+			return ""
 		}},
 	{Group: "session", Keys: "F5", Desc: "Re-open this piece, picking up changed settings",
 		Enabled: func(a *App) bool { return a.reload != nil }},
@@ -948,12 +952,16 @@ func (a *App) helpRows() []helpBinding {
 		if b.Reword != nil {
 			hint, desc = b.Reword(a)
 		}
+		explained := false
+		if b.Caveat != nil {
+			if c := b.Caveat(a); c != "" {
+				desc += " (" + c + ")"
+				explained = true
+			}
+		}
 		off := !b.enabled(a)
-		// An off row whose Reword names its remedy has already explained
-		// itself (the contract on the Reword field), so the overlay skips
-		// its generic unavailability stamp.
 		out[i] = helpBinding{Group: b.Group, Keys: b.Keys, Hint: hint, Desc: desc,
-			Off: off, Explained: off && b.Reword != nil}
+			Off: off, Explained: off && explained}
 	}
 	return out
 }

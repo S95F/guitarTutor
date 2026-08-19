@@ -34,15 +34,20 @@ import (
 func drawGlyph(dst *ebiten.Image, id glyphID, box rect, col color.RGBA) {
 	// Square and centred: the recipes assume equal axes.
 	side := math.Round(math.Min(box.w, box.h))
-	g := &glyphCanvas{
-		dst: dst,
-		box: rect{
-			math.Round(box.x + (box.w-side)/2),
-			math.Round(box.y + (box.h-side)/2),
-			side, side,
-		},
-		col: col,
+	// One package-level canvas, reused: drawGlyph runs dozens of times
+	// per frame (every toolbar icon, every rest in the tab), and a fresh
+	// canvas per call re-grew the vector path's arrays from nil each
+	// time. Ebitengine draws on one goroutine, and every recipe ends in
+	// stroke or fill, which Reset the path — so the scratch is clean
+	// between glyphs and its capacity is the only thing that survives.
+	g := &glyphScratch
+	g.dst = dst
+	g.box = rect{
+		math.Round(box.x + (box.w-side)/2),
+		math.Round(box.y + (box.h-side)/2),
+		side, side,
 	}
+	g.col = col
 	switch id {
 	case glyphNoteWhole:
 		drawNote(g, 0, false, false)

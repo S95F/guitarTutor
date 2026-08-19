@@ -338,7 +338,7 @@ func shotPieceFiles() (string, error) {
 // shotPieces is a plausible library: a few written pieces, described the
 // way the real scanner describes them, and one that will not parse. The
 // subtitles are what cmd/guitartutor's describePiece would say and the
-// problem line is what its shortParseError would render for the parser's
+// problem line is what its textfmt.ProblemLine would render for the parser's
 // own message — a screenshot of words the app never produces is a
 // screenshot of a different app.
 func shotPieces(dir string) []ui.PieceInfo {

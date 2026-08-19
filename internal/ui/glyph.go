@@ -193,6 +193,10 @@ type glyphCanvas struct {
 	path vector.Path
 }
 
+// glyphScratch is drawGlyph's reused canvas; see the note there. Package
+// level so the path keeps its grown capacity across calls and frames.
+var glyphScratch glyphCanvas
+
 // unit converts a length in the unit box to pixels. Glyphs are drawn in a
 // square, so one number is enough.
 func (g *glyphCanvas) unit(v float64) float64 { return v * g.box.w }

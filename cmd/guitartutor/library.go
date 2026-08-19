@@ -17,7 +17,6 @@ package main
 // than reading it again.
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -82,7 +81,7 @@ func (pieceLibrary) Scan() ([]ui.PieceInfo, error) {
 			// Listed anyway, with the reason: a piece that will not parse
 			// is exactly the one worth finding, and the editor's text view
 			// is where it gets fixed.
-			info.Problem = shortParseError(err, path)
+			info.Problem = textfmt.ProblemLine(err)
 		} else {
 			info.Title = sc.Title
 			info.Summary = describePiece(sc)
@@ -144,13 +143,3 @@ func tuningName(tr *score.Track) string {
 	return strings.Join(parts, " · ")
 }
 
-// shortParseError trims a parse error down to something that fits a list
-// row: the parser reports "path:line:col: message", and the path is
-// already the row above.
-func shortParseError(err error, path string) string {
-	var pe *textfmt.ParseError
-	if errors.As(err, &pe) {
-		return fmt.Sprintf("line %d, column %d — %s", pe.Line, pe.Col, pe.Msg)
-	}
-	return err.Error()
-}

@@ -34,6 +34,21 @@ func (e *ParseError) Error() string {
 	return fmt.Sprintf("%s:%d:%d: %s", e.Name, e.Line, e.Col, e.Msg)
 }
 
+// ProblemLine renders a parse failure as a line somebody can act on where
+// the source is already on screen: the compiler-shaped "name:line:col:"
+// prefix becomes words, and the name is dropped — it is the row above, or
+// the pane itself. Every screen that shows a parse error renders it
+// through this one function, so the library row and the editor pane
+// cannot describe one problem two ways. A non-ParseError passes through
+// unchanged.
+func ProblemLine(err error) string {
+	var pe *ParseError
+	if !errors.As(err, &pe) {
+		return err.Error()
+	}
+	return fmt.Sprintf("line %d, column %d — %s", pe.Line, pe.Col, pe.Msg)
+}
+
 // Parse parses .gtab source into a score. name identifies the source in
 // error messages and seeds the default title, used when the source has no
 // \title directive.

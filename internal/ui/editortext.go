@@ -20,7 +20,6 @@ package ui
 // hatch.
 
 import (
-	"errors"
 	"fmt"
 	"image/color"
 	"path/filepath"
@@ -124,7 +123,7 @@ func (p *gtabPane) text() string {
 func (p *gtabPane) reparse() {
 	sc, err := textfmt.Parse([]byte(p.text()), "piece")
 	if err != nil {
-		p.ok, p.status, p.bars, p.notes = false, gtabProblem(err), 0, 0
+		p.ok, p.status, p.bars, p.notes = false, textfmt.ProblemLine(err), 0, 0
 		return
 	}
 	p.ok, p.status = true, ""
@@ -139,23 +138,6 @@ func (p *gtabPane) reparse() {
 			}
 		}
 	}
-}
-
-// gtabProblem turns a parse failure into a line somebody can act on.
-//
-// The parser reports "piece:4:12: bar underfull: ...", which is the right
-// shape for a compiler and the wrong one for a pane: "piece" is a
-// filename that does not exist, and the colons read as punctuation in the
-// message rather than as a position. The position is the useful half, so
-// it is said in words and the rest is left alone — the parser's own
-// wording is already plain, and rewriting it here would put the
-// explanation of the format two files away from the format.
-func gtabProblem(err error) string {
-	var pe *textfmt.ParseError
-	if !errors.As(err, &pe) {
-		return err.Error()
-	}
-	return fmt.Sprintf("line %d, column %d — %s", pe.Line, pe.Col, pe.Msg)
 }
 
 // toggleText swaps the grid for the text and back. Going out of the text
@@ -196,7 +178,7 @@ func (e *Editor) applyText() bool {
 	}
 	sc, perr := textfmt.Parse([]byte(e.text.text()), name)
 	if perr != nil {
-		e.report(fmt.Errorf("%s", gtabProblem(perr)))
+		e.report(fmt.Errorf("%s", textfmt.ProblemLine(perr)))
 		return false
 	}
 	doc, derr := edit.Open(sc)
@@ -251,17 +233,15 @@ func (e *Editor) escapeText() error {
 	if !e.text.fromFile {
 		return nil
 	}
-	if e.text.text() == e.text.seed {
-		return e.leave()
-	}
 	// Edited-and-broken in a file-seeded pane: the first Escape is
 	// refused with the way out named, the second — with nothing typed in
 	// between — takes it. Without this, one exploratory keystroke in
-	// someone else's broken file re-arms the trap the walk-away above
-	// exists to release, and the pane has no undo to escape with.
-	if e.text.escArmed {
-		e.text = newGtabPaneFromSource([]byte(e.text.seed))
-		e.text.fromFile = true
+	// someone else's broken file would re-arm the trap the walk-away
+	// exists to release, and the pane has no undo to escape with. There
+	// is nothing to restore before leaving: the document behind a
+	// file-seeded pane is the pristine blank from NewEditorForText, so
+	// leave() pops without asking and the file on disk is untouched.
+	if e.text.text() == e.text.seed || e.text.escArmed {
 		return e.leave()
 	}
 	e.text.escArmed = true
@@ -612,12 +592,19 @@ func gtLegendLayout(r rect) []gtLegendLine {
 }
 
 // drawGtabLegend paints the explanation column.
+// gtLegendLines is the legend's layout, computed once: its inputs (the
+// legend table, the pane rect, the font metrics) are all fixed at
+// compile time, and recomputing 25 rows every frame the text view is up
+// bought nothing. The fit test reads the same layout function, so what
+// is measured is still what is drawn.
+var gtLegendLines = gtLegendLayout(gtLegendRect())
+
 func (e *Editor) drawGtabLegend(screen *ebiten.Image) {
 	r := gtLegendRect()
 	drawPanel(screen, r, colPanel, colPanelEdge)
 	drawText(screen, "WHAT THE TEXT MEANS", r.x+12, r.y+8, colInferred)
 
-	for _, l := range gtLegendLayout(r) {
+	for _, l := range gtLegendLines {
 		if l.example == "" {
 			drawTextSmall(screen, l.means, r.x+12, l.y, colGroupCap)
 			continue

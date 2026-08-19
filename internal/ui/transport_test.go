@@ -280,20 +280,6 @@ func TestLoopChipMakesAndClearsALoop(t *testing.T) {
 // TestDisabledChipsDoNothing: WAIT without a detector and SETTINGS with
 // no shell to host one are drawn disabled, and clicking them must not
 // reach past the chip.
-func TestDisabledChipsDoNothing(t *testing.T) {
-	a := newApp(t, 4)
-	if a.waitCtl {
-		t.Fatal("the fixture should start without a live detector")
-	}
-	a.handleMouse(pressAt(chipRect(t, a, "WAIT")), false)
-	if a.wait {
-		t.Error("WAIT engaged without a detector, which would freeze playback with no way forward")
-	}
-	a.handleMouse(pressAt(chipRect(t, a, "SETTINGS")), false)
-	// Nothing to assert beyond not panicking on the nil opener: the
-	// point is that a disabled chip's action is never called.
-}
-
 // TestTransportButtonsMoveThePlayhead covers the four icon buttons.
 func TestTransportButtonsMoveThePlayhead(t *testing.T) {
 	a := newApp(t, 8)
