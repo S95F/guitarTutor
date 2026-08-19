@@ -129,22 +129,19 @@ func plural(n int, noun string) string {
 	return fmt.Sprintf("%d %ss", n, noun)
 }
 
-// tuningName names a track's tuning when it is not the standard one.
-// Saying "standard E" about every piece would be noise; saying "drop D"
-// about the one piece that is in it is the whole point of a description.
+// tuningName names a track's tuning when it is not the standard one, and
+// its capo when it has one. Saying "standard E" about every piece would
+// be noise; saying "drop D" about the one piece that is in it is the
+// whole point of a description.
 func tuningName(tr *score.Track) string {
+	var parts []string
+	if !tr.Tuning.Equal(score.StandardTuning) {
+		parts = append(parts, score.TuningName(tr.Tuning))
+	}
 	if tr.Capo > 0 {
-		return fmt.Sprintf("capo %d", tr.Capo)
+		parts = append(parts, fmt.Sprintf("capo %d", tr.Capo))
 	}
-	if len(tr.Tuning) != len(score.StandardTuning) {
-		return fmt.Sprintf("%d strings", len(tr.Tuning))
-	}
-	for i, k := range tr.Tuning {
-		if k != score.StandardTuning[i] {
-			return "altered tuning"
-		}
-	}
-	return ""
+	return strings.Join(parts, " · ")
 }
 
 // shortParseError trims a parse error down to something that fits a list

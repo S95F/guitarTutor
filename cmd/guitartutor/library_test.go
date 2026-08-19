@@ -184,9 +184,23 @@ func TestDescribePiece(t *testing.T) {
 			want: []string{"capo 3"},
 		},
 		{
-			name: "altered tuning",
+			// A tuning the app knows gets its name, not a shrug.
+			name: "named tuning",
 			src:  "\\tempo 90\n\\time 4/4\n\\tuning D2 A2 D3 G3 B3 E4\n0.6.1 |\n",
+			want: []string{"drop D"},
+			not:  []string{"altered tuning"},
+		},
+		{
+			name: "unnamed tuning",
+			src:  "\\tempo 90\n\\time 4/4\n\\tuning C2 A2 D3 G3 B3 E4\n0.6.1 |\n",
 			want: []string{"altered tuning"},
+		},
+		{
+			// A capo must not hide the tuning: both are why the piece
+			// sounds the way it does.
+			name: "capo over a named tuning",
+			src:  "\\tempo 90\n\\time 4/4\n\\tuning D2 A2 D3 G3 B3 E4\n\\capo 2\n0.6.1 |\n",
+			want: []string{"drop D · capo 2"},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

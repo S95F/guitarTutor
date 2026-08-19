@@ -594,7 +594,7 @@ func TestEditorTuningCycle(t *testing.T) {
 		t.Errorf("after one cycle the tuning is %q, want drop D", got)
 	}
 	// All the way round returns to where it started.
-	for i := 1; i < len(edTunings); i++ {
+	for i := 1; i < len(score.NamedTunings); i++ {
 		e.cycleTuning()
 	}
 	if got := e.tuningName(); got != "standard E" {

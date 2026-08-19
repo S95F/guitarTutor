@@ -7,6 +7,8 @@
 // altered tunings and transposition come for free.
 package score
 
+import "fmt"
+
 // PPQ is the tick resolution: pulses (ticks) per quarter note. 960 divides
 // cleanly for triplets, dotted notes, and 32nds.
 const PPQ = 960
@@ -68,6 +70,51 @@ type Tuning []int
 // StandardTuning is EADGBE, written here from string 1 (high E4) down to
 // string 6 (low E2).
 var StandardTuning = Tuning{64, 59, 55, 50, 45, 40}
+
+// Equal reports whether two tunings are the same notes on the same number
+// of strings.
+func (t Tuning) Equal(o Tuning) bool {
+	if len(t) != len(o) {
+		return false
+	}
+	for i := range t {
+		if t[i] != o[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// NamedTunings are the tunings the app calls by name — the ones a
+// guitarist actually retunes to. The editor cycles through them; the
+// library and the editor's toolbar both name tunings from this one table
+// so no two screens can disagree about what a piece is in. Anything else
+// is reachable by editing the \tuning line in the text view.
+var NamedTunings = []struct {
+	Name   string
+	Tuning Tuning
+}{
+	{"standard E", Tuning{64, 59, 55, 50, 45, 40}},
+	{"drop D", Tuning{64, 59, 55, 50, 45, 38}},
+	{"half step down", Tuning{63, 58, 54, 49, 44, 39}},
+	{"full step down", Tuning{62, 57, 53, 48, 43, 38}},
+	{"DADGAD", Tuning{62, 57, 55, 50, 45, 38}},
+	{"open G", Tuning{62, 59, 55, 50, 43, 38}},
+}
+
+// TuningName names a tuning in a guitarist's words: a preset's name when
+// it is one, otherwise whatever can honestly be said about it.
+func TuningName(t Tuning) string {
+	for _, p := range NamedTunings {
+		if t.Equal(p.Tuning) {
+			return p.Name
+		}
+	}
+	if len(t) != len(StandardTuning) {
+		return fmt.Sprintf("%d strings", len(t))
+	}
+	return "altered tuning"
+}
 
 // Pitch derives a note's MIDI key from the track's tuning and capo.
 func (t *Track) Pitch(n Note) int { return t.Tuning[n.String-1] + t.Capo + n.Fret }

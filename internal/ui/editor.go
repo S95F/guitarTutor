@@ -1363,59 +1363,27 @@ func (e *Editor) stepTrack(back bool) {
 	e.doc.SelectTrack((i%n + n) % n)
 }
 
-// edTunings are the tunings shift+U cycles through. They are the ones a
-// guitarist actually retunes to; anything else is reachable by editing the
-// \tuning line in the text view, which is the whole format rather than the
-// part with a control.
-var edTunings = []struct {
-	name   string
-	tuning score.Tuning // highest string first, as the model stores it
-}{
-	{"standard E", score.Tuning{64, 59, 55, 50, 45, 40}},
-	{"drop D", score.Tuning{64, 59, 55, 50, 45, 38}},
-	{"half step down", score.Tuning{63, 58, 54, 49, 44, 39}},
-	{"full step down", score.Tuning{62, 57, 53, 48, 43, 38}},
-	{"DADGAD", score.Tuning{62, 57, 55, 50, 45, 38}},
-	{"open G", score.Tuning{62, 59, 55, 50, 43, 38}},
-}
-
-// cycleTuning re-tunes the current track to the next preset.
+// cycleTuning re-tunes the current track to the next preset in
+// score.NamedTunings — the tunings a guitarist actually retunes to.
+// Anything else is reachable by editing the \tuning line in the text
+// view, which is the whole format rather than the part with a control.
 func (e *Editor) cycleTuning() {
 	cur := e.doc.Track().Tuning
 	next := 0
-	for i, t := range edTunings {
-		if sameTuning(cur, t.tuning) {
-			next = (i + 1) % len(edTunings)
+	for i, t := range score.NamedTunings {
+		if cur.Equal(t.Tuning) {
+			next = (i + 1) % len(score.NamedTunings)
 		}
 	}
-	if e.report(e.doc.SetTuning(edTunings[next].tuning)) {
-		e.say("tuning: " + edTunings[next].name)
+	if e.report(e.doc.SetTuning(score.NamedTunings[next].Tuning)) {
+		e.say("tuning: " + score.NamedTunings[next].Name)
 	}
-}
-
-// sameTuning compares two tunings.
-func sameTuning(a, b score.Tuning) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // tuningName names the current tuning, or describes it when it is not one
 // of the presets.
 func (e *Editor) tuningName() string {
-	t := e.doc.Track().Tuning
-	for _, p := range edTunings {
-		if sameTuning(t, p.tuning) {
-			return p.name
-		}
-	}
-	return fmt.Sprintf("%d strings", len(t))
+	return score.TuningName(e.doc.Track().Tuning)
 }
 
 func (e *Editor) undo() {
