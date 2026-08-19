@@ -184,6 +184,20 @@ func (e *Editor) markDirtyFromText() {
 	_ = e.doc.SetTitle(e.doc.Score().Title)
 }
 
+// applyTextThen applies the text view and, when it parses, returns to the
+// notation and runs act. It is the ONE path a file action may take while
+// the text is showing — ctrl+S and the toolbar's save and practice
+// controls all go through it, so none of them can act on the document the
+// on-screen text has diverged from. Text that will not parse keeps the
+// view open with the parser's complaint and does nothing else.
+func (e *Editor) applyTextThen(act func()) {
+	if !e.applyText() {
+		return
+	}
+	e.text = nil
+	act()
+}
+
 // updateText runs the text view for one frame.
 func (e *Editor) updateText() error {
 	if err := e.textKeys(); err != nil {
@@ -217,16 +231,19 @@ func (e *Editor) textKeys() error {
 		case inpututil.IsKeyJustPressed(ebiten.KeyS):
 			// Saving from the text view has to apply it first, or the file
 			// would be written from the document the text has diverged from.
-			if e.applyText() {
-				e.text = nil
-				e.save()
-			}
+			e.applyTextThen(func() { e.save() })
 			return nil
 		}
 		return nil
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyF2) {
 		e.toggleText()
+		return nil
+	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyF1) {
+		// F1 only: the ? key is a printable character here, and a help key
+		// that also typed itself into the piece would be worse than none.
+		e.helpOpen = true
 		return nil
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyEscape) {
@@ -474,6 +491,10 @@ var gtLegend = []struct{ example, means string }{
 	{"\\tuning", "open strings, low to high"},
 	{"\\capo 2", "capo fret"},
 	{"\\track", "starts another part"},
+	// The two directives the text view is the ONLY place to set. A legend
+	// that omits them makes the one control for them undiscoverable.
+	{"\\backing", "this part is accompaniment, not yours"},
+	{"\\program 25", "instrument voice (General MIDI)"},
 	{"//", "a note to yourself"},
 }
 
@@ -481,26 +502,60 @@ var gtLegend = []struct{ example, means string }{
 // however wide its example is.
 const gtLegendCol = 84.0
 
+// Legend spacing. A row is a shade tighter than it used to be because the
+// list now carries every one of the parser's directives — \backing and
+// \program were missing, and the text view is the only place either can
+// be set — and the whole list still has to fit beside the text without
+// scrolling.
+const (
+	gtLegendTop    = 34.0 // first row, under the column's own heading
+	gtLegendRowH   = 16.0
+	gtLegendSecGap = 2.0 // extra air before a section heading
+)
+
+// A gtLegendLine is one placed legend row: a section heading when example
+// is empty.
+type gtLegendLine struct {
+	example, means string
+	y              float64
+}
+
+// gtLegendLayout places every legend row inside r, stopping at rows that
+// would run into the footnote at the bottom. Drawing and the fit test
+// both read it, so the test measures what is actually drawn rather than a
+// copy of the arithmetic that can drift away from it.
+func gtLegendLayout(r rect) []gtLegendLine {
+	var out []gtLegendLine
+	y := r.y + gtLegendTop
+	for _, row := range gtLegend {
+		if y > r.y+r.h-14 {
+			break
+		}
+		if row.example == "" {
+			y += gtLegendSecGap
+			out = append(out, gtLegendLine{means: row.means, y: y})
+			y += gtLegendRowH
+			continue
+		}
+		out = append(out, gtLegendLine{example: row.example, means: row.means, y: y})
+		y += gtLegendRowH
+	}
+	return out
+}
+
 // drawGtabLegend paints the explanation column.
 func (e *Editor) drawGtabLegend(screen *ebiten.Image) {
 	r := gtLegendRect()
 	drawPanel(screen, r, colPanel, colPanelEdge)
 	drawText(screen, "WHAT THE TEXT MEANS", r.x+12, r.y+8, colInferred)
 
-	y := r.y + 34
-	for _, row := range gtLegend {
-		if y > r.y+r.h-14 {
-			break
-		}
-		if row.example == "" {
-			y += 4
-			drawTextSmall(screen, row.means, r.x+12, y, colGroupCap)
-			y += 16
+	for _, l := range gtLegendLayout(r) {
+		if l.example == "" {
+			drawTextSmall(screen, l.means, r.x+12, l.y, colGroupCap)
 			continue
 		}
-		drawTextSmall(screen, row.example, r.x+12, y, colSounding)
-		drawTextSmall(screen, truncateW(row.means, r.w-gtLegendCol-22), r.x+gtLegendCol, y, colDim)
-		y += 17
+		drawTextSmall(screen, l.example, r.x+12, l.y, colSounding)
+		drawTextSmall(screen, truncateW(l.means, r.w-gtLegendCol-22), r.x+gtLegendCol, l.y, colDim)
 	}
 	drawTextSmall(screen, "the notation view has controls for the common ones",
 		r.x+12, r.y+r.h-18, colHint)
@@ -580,6 +635,8 @@ func (e *Editor) textBindings() []helpBinding {
 		{Group: "editing", Keys: "click", Desc: "Put the caret where you click"},
 		{Group: "session", Keys: "F2 or esc", Hint: "F2 back to the notation", Desc: "Read the text back and return to the staff"},
 		{Group: "session", Keys: "ctrl+S", Hint: "ctrl+S save", Desc: "Parse the text and save the piece"},
-		{Group: "session", Keys: "? or F1", Hint: "? help", Desc: "This key-binding list"},
+		// F1 alone: ? is a printable character in this view and just types
+		// itself, so advertising it here would be a lie.
+		{Group: "session", Keys: "F1", Hint: "F1 help", Desc: "This key-binding list"},
 	}
 }

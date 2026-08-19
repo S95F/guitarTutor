@@ -16,6 +16,7 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/vector"
 
 	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/guitarTutor/internal/score/textfmt"
 )
 
 // cursorTech is the technique bitmask on the note under the cursor.
@@ -35,6 +36,7 @@ const (
 	edEntryTempo edEntryKind = iota
 	edEntryMeter
 	edEntryTitle
+	edEntryCapo
 )
 
 // An edEntry is the prompt open over the notation.
@@ -87,6 +89,20 @@ func (e *Editor) openEntry(kind edEntryKind) {
 			buf: e.doc.Score().Title, max: 80,
 			allow: func(r rune) bool { return r >= 32 && r != 127 },
 			apply: func(e *Editor, s string) error { return e.doc.SetTitle(strings.TrimSpace(s)) },
+		}
+	case edEntryCapo:
+		e.entry = &edEntry{
+			kind: kind, prompt: "capo for this track",
+			hint: fmt.Sprintf("the fret it clamps, 0 to %d — 0 takes it off", textfmt.MaxFret),
+			buf:  strconv.Itoa(e.doc.Track().Capo), max: 2,
+			allow: func(r rune) bool { return r >= '0' && r <= '9' },
+			apply: func(e *Editor, s string) error {
+				fret, err := strconv.Atoi(s)
+				if err != nil {
+					return fmt.Errorf("%q is not a fret number", s)
+				}
+				return e.doc.SetCapo(fret)
+			},
 		}
 	}
 }

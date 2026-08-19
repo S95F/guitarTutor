@@ -185,14 +185,21 @@ func (e *Editor) toolbarGroups() []edGroup {
 	}
 	// The raw text is showing: these all edit the document underneath it,
 	// and the text is applied over that document when the view closes, so
-	// the edit would be discarded a moment later.
+	// the edit would be discarded a moment later. The why has to change
+	// with the reason — "type a fret first" is the grid's answer, and here
+	// it would send the user hunting for a fret cell that is not on screen.
 	for gi := range groups {
 		for bi := range groups[gi].buttons {
 			groups[gi].buttons[bi].disabled = true
+			groups[gi].buttons[bi].why = edTextViewWhy
 		}
 	}
 	return groups
 }
+
+// edTextViewWhy is what a greyed notation control answers while the raw
+// text is showing: the way to use it is to leave the text view.
+const edTextViewWhy = "go back to the notation first (F2)"
 
 // --- the piece row -----------------------------------------------------
 
@@ -231,6 +238,11 @@ func (e *Editor) pieceButtons() []edButton {
 			}},
 		edButton{id: "tuning", glyph: glyphTuning, name: "Tuning for this track", key: "shift+U",
 			label: e.tuningName(), act: e.cycleTuning},
+		// The capo sits beside the tuning it shifts. Without this chip a
+		// piece with a capo rendered exactly like one without, and putting
+		// one on meant knowing the text format's directive.
+		edButton{id: "capo", glyph: glyphNone, name: "Capo for this track",
+			label: e.capoLabel(), act: func() { e.openEntry(edEntryCapo) }},
 		edButton{id: "meter", glyph: glyphNone, name: "Time signature from this bar on", key: "shift+M",
 			label: fmt.Sprintf("%d/%d", e.doc.Bar().Num, e.doc.Bar().Den),
 			act:   func() { e.openEntry(edEntryMeter) }},
@@ -243,9 +255,20 @@ func (e *Editor) pieceButtons() []edButton {
 	if e.text != nil {
 		for i := range out {
 			out[i].disabled = true
+			out[i].why = edTextViewWhy
 		}
 	}
 	return out
+}
+
+// capoLabel is the capo chip's text: the fret when one is on, and just the
+// word when none is — the chip still has to say what it is for, and a
+// symbol-only chip here would be the rebus the piece row exists to avoid.
+func (e *Editor) capoLabel() string {
+	if c := e.doc.Track().Capo; c > 0 {
+		return fmt.Sprintf("capo %d", c)
+	}
+	return "capo"
 }
 
 // fileButtons is the second row's right half: what to do with the piece
@@ -254,16 +277,26 @@ func (e *Editor) pieceButtons() []edButton {
 func (e *Editor) fileButtons() []edButton {
 	view := edButton{id: "view", glyph: glyphTextView, name: "Show the piece as the text file it saves to", key: "F2",
 		act: e.toggleText}
+	save := func() { e.save() }
+	practiceKey, practice := "shift+P", e.saveAndPractice
 	if e.text != nil {
 		view = edButton{id: "view", glyph: glyphGridView, name: "Back to the notation", key: "F2",
 			on: true, act: e.toggleText}
+		// The text on screen is the piece now: saving or practising the
+		// document UNDERNEATH it would act on a version the user is no
+		// longer looking at, and say "saved" about edits that never reached
+		// the file. Both go the way ctrl+S already does — apply the text,
+		// return to the notation, then act. shift+P itself types a P here,
+		// so the practice control shows no key while the text is up.
+		save = func() { e.applyTextThen(func() { e.save() }) }
+		practiceKey, practice = "", func() { e.applyTextThen(e.saveAndPractice) }
 	}
 	return []edButton{
-		{id: "save", glyph: glyphSave, name: e.saveTip(), key: "ctrl+S", on: e.doc.Dirty(), act: func() { e.save() }},
+		{id: "save", glyph: glyphSave, name: e.saveTip(), key: "ctrl+S", on: e.doc.Dirty(), act: save},
 		view,
-		{id: "practice", glyph: glyphPlay, name: "Save and play it back", key: "shift+P",
+		{id: "practice", glyph: glyphPlay, name: edPracticeWhat, key: practiceKey,
 			disabled: e.practice == nil, why: "this build cannot play a piece from here",
-			act: e.saveAndPractice},
+			act: practice},
 		{id: "help", glyph: glyphHelp, name: "Every key this screen answers to", key: "F1",
 			act: func() { e.helpOpen = true }},
 	}

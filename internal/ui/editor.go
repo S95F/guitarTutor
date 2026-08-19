@@ -136,6 +136,11 @@ type Editor struct {
 	// leaving is the "you have unsaved changes" prompt.
 	leaving bool
 
+	// practicePending remembers that a save was asked for BY shift+P, so
+	// the dialog's answer can finish with the practice it promised — the
+	// same shape as a save asked for on the way out finishing the leaving.
+	practicePending bool
+
 	// The save dialog runs off the game loop, like every other dialog in
 	// this application, and posts its answer to a mailbox Update drains.
 	saveDialog func(suggest string)
@@ -308,8 +313,20 @@ func (e *Editor) Draw(screen *ebiten.Image) {
 		e.drawLeavePrompt(screen)
 	}
 	if e.helpOpen {
-		drawHelpOverlay(screen, "EDITOR KEYS", e.editorBindings(), editorHelpFootnote)
+		title, rows := e.helpTable()
+		drawHelpOverlay(screen, title, rows, editorHelpFootnote)
 	}
+}
+
+// helpTable is what the overlay behind ? shows: the keys of the view the
+// user is actually looking at. The grid's table tells a text-view user
+// that digits type frets and h is a hammer-on, none of which is true
+// there — in the text view those keys just type characters.
+func (e *Editor) helpTable() (title string, rows []helpBinding) {
+	if e.text != nil {
+		return "TEXT VIEW KEYS", e.textBindings()
+	}
+	return "EDITOR KEYS", e.editorBindings()
 }
 
 // headerTitle names the piece, with the unsaved marker every editor has.
@@ -807,19 +824,32 @@ func (e *Editor) drawFirstSteps(screen *ebiten.Image) {
 	if y+120 > gridBottom() {
 		return // no room for it without running into the status line
 	}
-	lines := []struct{ key, what string }{
-		{"0-24", "type a fret number onto the highlighted string"},
-		{"↑ ↓", "choose the string; [ and ] choose the note value"},
-		{"space", "move on to the next beat — and past the last bar, it makes another"},
-	}
+	lines, tail := firstStepsContent()
 	drawText(screen, "Writing a piece", edGridX, y, colInferred)
 	for i, l := range lines {
 		ly := y + 26 + float64(i)*22
 		drawTextMono(screen, l.key, edGridX, ly, colSounding)
 		drawText(screen, l.what, edGridX+64, ly, colHUD)
 	}
-	tail := "ctrl+S saves it into your library · shift+P plays it back · ? lists every key"
 	drawTextSmall(screen, tail, edGridX, y+26+float64(len(lines))*22+8, colHint)
+}
+
+// A firstStep is one line of the blank-staff guidance.
+type firstStep struct{ key, what string }
+
+// firstStepsContent is what the guidance says. It is a function rather
+// than literals inside drawFirstSteps so the tests that keep its fret
+// range and its shift+P promise honest read the strings the screen draws.
+// The fret bound comes from the format itself; a hand-written "0-24" here
+// once disagreed with the "0-30" the help overlay claimed.
+func firstStepsContent() ([]firstStep, string) {
+	lines := []firstStep{
+		{fmt.Sprintf("0-%d", textfmt.MaxFret), "type a fret number onto the highlighted string"},
+		{"↑ ↓", "choose the string; [ and ] choose the note value"},
+		{"space", "move on to the next beat — and past the last bar, it makes another"},
+	}
+	tail := "ctrl+S saves it into your library · shift+P opens it for practice · ? lists every key"
+	return lines, tail
 }
 
 // barMarking is what is written above a bar that begins a new meter or a
@@ -1475,6 +1505,8 @@ func (e *Editor) drainDialog() {
 	e.dialogBusy = false
 	path := *got
 	if path == "" {
+		// A cancelled dialog also cancels whatever the save was FOR.
+		e.practicePending = false
 		return
 	}
 	if strings.ToLower(filepath.Ext(path)) != ".gtab" {
@@ -1485,6 +1517,14 @@ func (e *Editor) drainDialog() {
 	if saved && e.leaving {
 		e.leaving = false
 		e.finishLeaving()
+	}
+	// And a save asked for by shift+P finishes with the practice it
+	// promised — the user named the file to hear the piece, not to file it.
+	if e.practicePending {
+		e.practicePending = false
+		if saved && e.practice != nil {
+			e.practice(e.path)
+		}
 	}
 }
 
@@ -1498,6 +1538,11 @@ func (e *Editor) saveAndPractice() {
 	}
 	if e.doc.Dirty() || e.path == "" {
 		if !e.save() {
+			// When the save is off asking for a file name, remember why it
+			// was asked for; drainDialog finishes the job when the answer
+			// arrives. Any other failure has already been reported and
+			// promises nothing.
+			e.practicePending = e.dialogBusy
 			return
 		}
 	}
@@ -1629,9 +1674,16 @@ func (e *Editor) drawLeavePrompt(screen *ebiten.Image) {
 
 // --- the control table ------------------------------------------------
 
+// edPracticeWhat is the one sentence shift+P is described with, everywhere
+// it appears. The toolbar tooltip used to promise "play it back", which
+// reads as an in-editor preview the editor deliberately does not have;
+// what the key actually does is save and open the piece for practice, and
+// every description of it has to make the same promise.
+const edPracticeWhat = "Save the piece and open it for practice"
+
 func (e *Editor) editorBindings() []helpBinding {
 	return []helpBinding{
-		{Group: "notes", Keys: "0-30", Hint: "0-9 fret", Desc: "Type a fret onto the cursor's string; two digits within a moment make one number"},
+		{Group: "notes", Keys: fmt.Sprintf("0-%d", textfmt.MaxFret), Hint: "0-9 fret", Desc: "Type a fret onto the cursor's string; two digits within a moment make one number"},
 		{Group: "notes", Keys: "del / R", Hint: "R rest", Desc: "Clear the note on this string, or make the whole beat a rest"},
 		{Group: "notes", Keys: "`", Hint: "` tie", Desc: "Tie the note: hold it, do not strike it again"},
 		{Group: "notes", Keys: "h / p / s", Hint: "h hammer-on", Desc: "Hammer-on, pull-off, slide"},
@@ -1655,12 +1707,12 @@ func (e *Editor) editorBindings() []helpBinding {
 		{Group: "piece", Keys: "shift+U", Desc: "Cycle the tuning: standard, drop D, half and full step down, DADGAD, open G"},
 		{Group: "piece", Keys: "tab", Hint: "tab track", Desc: "Move to the next track (shift+tab for the previous one)"},
 		{Group: "piece", Keys: "shift+A", Desc: "Add another track"},
-		{Group: "piece", Keys: "F2", Hint: "F2 file text", Desc: "Show the piece as the text file it saves to — where a capo, an unusual tuning or a comment can be set"},
+		{Group: "piece", Keys: "F2", Hint: "F2 file text", Desc: "Show the piece as the text file it saves to — where an unusual tuning, the instrument voice or a comment can be set"},
 
 		{Group: "session", Keys: "ctrl+Z / ctrl+Y", Hint: "ctrl+Z undo", Desc: "Undo and redo"},
 		{Group: "session", Keys: "ctrl+S", Hint: "ctrl+S save", Desc: "Save (ctrl+shift+S saves under a new name)"},
 		{Group: "session", Keys: "shift+P", Hint: "shift+P practice", Off: e.practice == nil,
-			Desc: "Save the piece and open it for practice"},
+			Desc: edPracticeWhat},
 		{Group: "session", Keys: "? or F1", Hint: "? help", Desc: "This key-binding list"},
 		{Group: "session", Keys: "esc", Hint: "esc back", Desc: "Leave the editor"},
 	}

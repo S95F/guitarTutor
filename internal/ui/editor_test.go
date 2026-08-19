@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -922,6 +923,7 @@ func TestEveryHelpTableFitsItsCard(t *testing.T) {
 		foot string
 	}{
 		{"editor", e.editorBindings(), editorHelpFootnote},
+		{"editor text view", e.textBindings(), editorHelpFootnote},
 		{"practice", app.helpRows(), practiceHelpFootnote},
 		{"start screen", brw.browserBindings(), browserHelpFootnote},
 		{"settings", set.settingsBindings(), ""},
@@ -1038,5 +1040,327 @@ func TestEditorFirstStepsGoAwayOnTheFirstNote(t *testing.T) {
 	press(t, e, ebiten.KeyDelete)
 	if !e.isEmpty() {
 		t.Error("clearing the only note did not leave the piece empty")
+	}
+}
+
+// --- the text view's file actions ------------------------------------------
+
+// setTextLine rewrites the first text-view line with the given prefix, so
+// a test can edit the piece the way the view exists to allow.
+func setTextLine(t *testing.T, e *Editor, prefix, replacement string) {
+	t.Helper()
+	if e.text == nil {
+		t.Fatal("the text view is not open")
+	}
+	for i, line := range e.text.lines {
+		if strings.HasPrefix(string(line), prefix) {
+			e.text.lines[i] = []rune(replacement)
+			e.text.reparse()
+			return
+		}
+	}
+	t.Fatalf("no line starts with %q", prefix)
+}
+
+func TestEditorTextViewSaveButtonSavesTheTextOnScreen(t *testing.T) {
+	// The Save icon used to serialise the DOCUMENT — the thing the
+	// on-screen text had diverged from — and say "saved" about edits that
+	// never reached the file. It has to take the path ctrl+S takes: apply
+	// the text, return to the notation, then save.
+	e := newTestEditor()
+	e.path = filepath.Join(t.TempDir(), "piece.gtab")
+	press(t, e, ebiten.KeyDigit5)
+	e.toggleText()
+	setTextLine(t, e, "\\tempo", "\\tempo 96")
+	editorButton(t, e, "save").act()
+	if e.text != nil {
+		t.Fatalf("saving did not return to the notation: %v", e.msg)
+	}
+	src, err := os.ReadFile(e.path)
+	if err != nil {
+		t.Fatalf("the file was not written: %v", err)
+	}
+	if !strings.Contains(string(src), "\\tempo 96") {
+		t.Errorf("the saved file is missing the text edit:\n%s", src)
+	}
+	if got := e.doc.TempoAtCursor(); got < 95.9 || got > 96.1 {
+		t.Errorf("the document's tempo is %g after the save, want the text's 96", got)
+	}
+}
+
+func TestEditorTextViewPracticeButtonPractisesTheTextOnScreen(t *testing.T) {
+	// The Practice icon used to see a clean document under an edited text
+	// pane, skip the save, and open the OLD file.
+	e := newTestEditor()
+	e.path = filepath.Join(t.TempDir(), "piece.gtab")
+	var practised []string
+	e.SetPractice(func(p string) { practised = append(practised, p) })
+	e.toggleText()
+	setTextLine(t, e, "\\tempo", "\\tempo 96")
+	editorButton(t, e, "practice").act()
+	if e.text != nil {
+		t.Fatalf("practising did not return to the notation: %v", e.msg)
+	}
+	if len(practised) != 1 || practised[0] != e.path {
+		t.Fatalf("practice opened %v, want [%s]", practised, e.path)
+	}
+	src, err := os.ReadFile(e.path)
+	if err != nil {
+		t.Fatalf("the piece was not saved before practising: %v", err)
+	}
+	if !strings.Contains(string(src), "\\tempo 96") {
+		t.Error("the file opened for practice is missing the text edit")
+	}
+}
+
+func TestEditorTextViewSaveButtonKeepsBrokenTextOpen(t *testing.T) {
+	e := newTestEditor()
+	e.path = filepath.Join(t.TempDir(), "piece.gtab")
+	e.toggleText()
+	e.text.lines = append(e.text.lines, []rune("this is not a piece"))
+	e.text.reparse()
+	editorButton(t, e, "save").act()
+	if e.text == nil {
+		t.Fatal("broken text closed the view, throwing the typing away")
+	}
+	if _, err := os.Stat(e.path); err == nil {
+		t.Error("a file was written from text that does not parse")
+	}
+	if msg, isErr := e.message(); !isErr || msg == "" {
+		t.Errorf("got %q (error=%v), want the parser's complaint", msg, isErr)
+	}
+}
+
+func TestEditorGreyedControlsInTextModeSayWhy(t *testing.T) {
+	// "type a fret on this string first" is the grid's answer; while the
+	// text is showing there is no fret cell on screen to type into, and the
+	// honest answer is the way back to the grid.
+	e := newTestEditor()
+	e.toggleText()
+	for _, g := range e.toolbarGroups() {
+		for _, b := range g.buttons {
+			if !b.disabled || b.why != edTextViewWhy {
+				t.Errorf("control %q is disabled=%v with why=%q, want %q",
+					b.id, b.disabled, b.why, edTextViewWhy)
+			}
+		}
+	}
+	for _, b := range e.pieceButtons() {
+		if !b.disabled || b.why != edTextViewWhy {
+			t.Errorf("piece control %q is disabled=%v with why=%q, want %q",
+				b.id, b.disabled, b.why, edTextViewWhy)
+		}
+	}
+}
+
+// --- shift+P through the first-save dialog ----------------------------------
+
+func TestEditorShiftPCarriesThroughTheFirstSaveDialog(t *testing.T) {
+	// shift+P on a never-saved piece opens the save-as dialog. Naming the
+	// file has to finish with the practice the key promised — exactly the
+	// way a save asked for on the way out finishes the leaving.
+	e := newTestEditor()
+	var practised []string
+	e.SetPractice(func(p string) { practised = append(practised, p) })
+	e.SetSaveDialog(func(string) {})
+	press(t, e, ebiten.KeyDigit5)
+	e.saveAndPractice()
+	if len(practised) != 0 {
+		t.Fatal("practice started before the piece had a file")
+	}
+	if !e.practicePending {
+		t.Fatal("the practice intent was not remembered across the dialog")
+	}
+	e.OfferSavePath(filepath.Join(t.TempDir(), "riff"))
+	e.drainDialog()
+	if len(practised) != 1 || practised[0] != e.path {
+		t.Fatalf("after naming the file, practice opened %v, want [%s]", practised, e.path)
+	}
+	if e.practicePending {
+		t.Error("the practice intent was not consumed")
+	}
+}
+
+func TestEditorCancelledSaveDialogDropsThePracticeIntent(t *testing.T) {
+	e := newTestEditor()
+	var practised []string
+	e.SetPractice(func(p string) { practised = append(practised, p) })
+	e.SetSaveDialog(func(string) {})
+	press(t, e, ebiten.KeyDigit5)
+	e.saveAndPractice()
+	e.OfferSavePath("") // cancel
+	e.drainDialog()
+	if e.practicePending {
+		t.Error("cancelling the dialog left the practice intent pending")
+	}
+	if len(practised) != 0 {
+		t.Fatalf("a cancelled save still opened practice: %v", practised)
+	}
+	// A later plain save must not surprise the user with the practice
+	// session they cancelled.
+	e.save()
+	e.OfferSavePath(filepath.Join(t.TempDir(), "riff"))
+	e.drainDialog()
+	if len(practised) != 0 {
+		t.Errorf("a plain save after the cancel opened practice: %v", practised)
+	}
+}
+
+// --- the capo chip -----------------------------------------------------------
+
+func TestEditorCapoChipShowsAndSetsTheCapo(t *testing.T) {
+	// A piece with \capo 2 used to render exactly like one without, and
+	// putting a capo on meant knowing the text format's directive.
+	e := newTestEditor()
+	if got := editorButton(t, e, "capo").label; got != "capo" {
+		t.Errorf("with no capo the chip reads %q, want just the word", got)
+	}
+	editorButton(t, e, "capo").act()
+	if e.entry == nil || e.entry.kind != edEntryCapo {
+		t.Fatal("the capo chip did not open the capo entry")
+	}
+	if e.entry.buf != "0" {
+		t.Errorf("the entry is seeded with %q, want the capo in force (0)", e.entry.buf)
+	}
+	e.entry.buf = "2"
+	e.commitEntry()
+	if e.entry != nil {
+		t.Fatalf("the entry stayed open: %v", e.msg)
+	}
+	if got := e.doc.Track().Capo; got != 2 {
+		t.Errorf("the capo is at fret %d, want 2", got)
+	}
+	if got := editorButton(t, e, "capo").label; got != "capo 2" {
+		t.Errorf("with a capo on the chip reads %q, want it to name the fret", got)
+	}
+}
+
+func TestEditorCapoEntryKeepsBadInput(t *testing.T) {
+	e := newTestEditor()
+	e.openEntry(edEntryCapo)
+	e.entry.buf = "99"
+	e.commitEntry()
+	if e.entry == nil {
+		t.Fatal("a refused capo closed the entry and threw away what was typed")
+	}
+	if msg, isErr := e.message(); !isErr || msg == "" {
+		t.Errorf("got %q (error=%v), want the refusal", msg, isErr)
+	}
+}
+
+// --- the text view's legend and help ----------------------------------------
+
+func TestGtabLegendCoversEveryDirective(t *testing.T) {
+	// \backing and \program are settable ONLY in the text view; a legend
+	// that omits them hides the one control the application offers for
+	// either.
+	for _, directive := range []string{
+		`\title`, `\tempo`, `\time`, `\tuning`, `\capo`, `\track`, `\backing`, `\program`,
+	} {
+		found := false
+		for _, row := range gtLegend {
+			if strings.HasPrefix(row.example, directive) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("the legend has no row for %s", directive)
+		}
+	}
+}
+
+func TestGtabLegendFitsItsColumn(t *testing.T) {
+	// Measured through gtLegendLayout, which is what drawGtabLegend draws
+	// from: the layout stops placing rows that would run off the column, so
+	// "every row placed" means "every row visible".
+	r := gtLegendRect()
+	lines := gtLegendLayout(r)
+	if len(lines) != len(gtLegend) {
+		t.Fatalf("only %d of the legend's %d rows fit the column", len(lines), len(gtLegend))
+	}
+	footY := r.y + r.h - 18
+	for _, l := range lines {
+		if l.y+12 > footY {
+			t.Errorf("the %q row at %.0f runs into the footnote line at %.0f",
+				l.example+l.means, l.y, footY)
+		}
+	}
+	for _, row := range gtLegend {
+		if row.example == "" {
+			continue
+		}
+		if w := textWSmall(row.example); 12+w+6 > gtLegendCol {
+			t.Errorf("the example %q is %.0fpx wide and collides with its meaning", row.example, w)
+		}
+		if w := textWSmall(row.means); w > r.w-gtLegendCol-22 {
+			t.Errorf("the meaning %q is %.0fpx wide and would be cut short", row.means, w)
+		}
+	}
+}
+
+func TestEditorHelpDescribesTheViewOnScreen(t *testing.T) {
+	// The ? overlay used to show the grid's table over the text view —
+	// telling the user that digits type frets and h is a hammer-on, none
+	// of which is true while every key just types a character.
+	e := newTestEditor()
+	if title, _ := e.helpTable(); title != "EDITOR KEYS" {
+		t.Errorf("the grid's help is titled %q, want EDITOR KEYS", title)
+	}
+	e.toggleText()
+	title, rows := e.helpTable()
+	if title != "TEXT VIEW KEYS" {
+		t.Errorf("the text view's help is titled %q, want TEXT VIEW KEYS", title)
+	}
+	for _, b := range rows {
+		if strings.Contains(b.Desc, "hammer") || strings.HasPrefix(b.Keys, "0-") {
+			t.Errorf("the text view's help teaches a grid key: %+v", b)
+		}
+	}
+	if len(rows) == 0 || rows[0].Hint != "type to edit" {
+		t.Error("the text view's help is not the text view's own table")
+	}
+}
+
+// --- one truth for the fret range and for shift+P ----------------------------
+
+func TestEditorFretRangeComesFromTheFormat(t *testing.T) {
+	// "0-24" in the first steps and "0-30" in the help overlay were two
+	// guesses at the same truth; both now read textfmt.MaxFret and cannot
+	// drift apart, or away from the parser.
+	want := fmt.Sprintf("0-%d", textfmt.MaxFret)
+	e := newTestEditor()
+	found := false
+	for _, b := range e.editorBindings() {
+		if strings.HasPrefix(b.Keys, "0-") {
+			found = true
+			if b.Keys != want {
+				t.Errorf("the help overlay says %q, want %q", b.Keys, want)
+			}
+		}
+	}
+	if !found {
+		t.Error("the help overlay has no fret-range row")
+	}
+	lines, _ := firstStepsContent()
+	if lines[0].key != want {
+		t.Errorf("the first-steps guidance says %q, want %q", lines[0].key, want)
+	}
+}
+
+func TestEditorShiftPIsDescribedAsPracticeEverywhere(t *testing.T) {
+	// The toolbar used to promise "play it back", which reads as an
+	// in-editor preview the editor deliberately does not have.
+	e := newTestEditor()
+	if got := editorButton(t, e, "practice").name; got != edPracticeWhat {
+		t.Errorf("the toolbar tooltip says %q, want %q", got, edPracticeWhat)
+	}
+	for _, b := range e.editorBindings() {
+		if b.Keys == "shift+P" && b.Desc != edPracticeWhat {
+			t.Errorf("the help overlay says %q, want %q", b.Desc, edPracticeWhat)
+		}
+	}
+	_, tail := firstStepsContent()
+	if !strings.Contains(tail, "practice") || strings.Contains(tail, "plays it back") {
+		t.Errorf("the first-steps tail still promises playback: %q", tail)
 	}
 }
