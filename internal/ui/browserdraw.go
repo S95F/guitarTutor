@@ -176,11 +176,22 @@ func (b *Browser) handleMouse(pt pointer) {
 			}
 		}
 		if pt.pressed {
-			if p != b.focus {
+			// A press on another pane is one gesture doing two things: it
+			// moves the focus there and picks the row under the cursor. It
+			// must not ALSO open that row — focusPane restores the pane's
+			// parked selection, and when the click happened to land on it
+			// (row 0 of a never-visited pane, say), click() would read one
+			// press as the promised two.
+			entered := p != b.focus
+			if entered {
 				b.focusPane(p)
 			}
 			if onRow {
-				b.click(row)
+				if entered {
+					b.setSel(row)
+				} else {
+					b.click(row)
+				}
 			}
 		}
 		return
@@ -383,6 +394,14 @@ func (b *Browser) drawStatus(screen *ebiten.Image, l browserLayout) {
 	if b.errMsg != "" {
 		drawText(screen, ellipsizeW(b.errMsg, width), uiPadX, y, colMiss)
 		y += 20
+	}
+	if len(b.warns) > 0 && b.warnsFrom != "" {
+		// The warnings can still be on screen minutes after the open,
+		// when the user comes back from practising; without the piece's
+		// name over them they are orphaned text about nothing in
+		// particular.
+		drawText(screen, truncateW(b.warnsFrom+" opened with warnings:", width), uiPadX, y, colClose)
+		y += 18
 	}
 	for i, w := range b.warns {
 		if i == maxWarn {

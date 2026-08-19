@@ -527,6 +527,39 @@ func TestBrowserOpenSuccess(t *testing.T) {
 	}
 }
 
+// TestBrowserWarningsRememberTheirPiece: importer warnings can sit in
+// the status band for minutes while the user practises and comes back,
+// so they carry the name of the piece they came from — and the name goes
+// away with them, never outliving the warnings it explains.
+func TestBrowserWarningsRememberTheirPiece(t *testing.T) {
+	root := t.TempDir()
+	browserTree(t, root, "good.gp", "clean.gp")
+	good := filepath.Join(root, "good.gp")
+	clean := filepath.Join(root, "clean.gp")
+	op := &browserFakeOpener{warns: []string{"tempo track ignored"}}
+	b := browserFixture(t, &browserFakePrefs{}, op)
+
+	b.openPath(good)
+	if b.warnsFrom != "good.gp" {
+		t.Errorf("warnsFrom = %q, want the piece the warnings came from", b.warnsFrom)
+	}
+
+	// A later open with nothing to warn about clears the heading with the
+	// warnings, and ShowError replaces the whole status.
+	op.warns = nil
+	b.openPath(clean)
+	if b.warnsFrom != "" || len(b.warns) != 0 {
+		t.Errorf("after a clean open, warnsFrom = %q with %d warnings; want both gone",
+			b.warnsFrom, len(b.warns))
+	}
+	op.warns = []string{"tempo track ignored"}
+	b.openPath(good)
+	b.ShowError("boom")
+	if b.warnsFrom != "" {
+		t.Errorf("warnsFrom = %q after ShowError, want it cleared with the warnings", b.warnsFrom)
+	}
+}
+
 // TestBrowserOpenWithoutOpener: a shell with no importer says so rather
 // than dereferencing nil.
 func TestBrowserOpenWithoutOpener(t *testing.T) {
@@ -587,6 +620,32 @@ func TestBrowserSettingsHook(t *testing.T) {
 	}
 }
 
+// TestBrowserBindingsDocumentWorkingKeys: H toggles the getting-started
+// strip and Home/End jump the selection, so the control table must list
+// them — a strip whose button says "hide (H)" while H is documented
+// nowhere is a trap. The settings hint carries the key's own capital,
+// matching the practice view and the S on the button itself.
+func TestBrowserBindingsDocumentWorkingKeys(t *testing.T) {
+	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
+	rows := map[string]helpBinding{}
+	for _, r := range b.browserBindings() {
+		rows[r.Keys] = r
+	}
+	for _, want := range []string{"H", "home / end", "page up / down"} {
+		if _, ok := rows[want]; !ok {
+			t.Errorf("browserBindings has no %q row", want)
+		}
+	}
+	if r := rows["H"]; r.Off {
+		t.Error("the H binding is marked off; the strip can always be toggled")
+	}
+
+	b.SetSettingsOpener(func() {})
+	if !strings.Contains(b.hintLine(), "S settings") {
+		t.Errorf("footer hint = %q, want the settings key shown as the capital S it is", b.hintLine())
+	}
+}
+
 // TestBrowserHitTestAndClick: hovering maps to a recents row, a first
 // click selects, and a click on the already-selected row opens.
 func TestBrowserHitTestAndClick(t *testing.T) {
@@ -629,6 +688,43 @@ func TestBrowserHitTestAndClick(t *testing.T) {
 	b.click(i)
 	if len(op.opened) != 1 || op.opened[0] != paths[2] {
 		t.Errorf("clicking the selected row opened %v, want [%q]", op.opened, paths[2])
+	}
+}
+
+// TestBrowserClickAcrossPanesSelectsBeforeOpening: a press on an
+// unfocused pane moves the focus there and picks the row under the
+// cursor — and must not ALSO open it. focusPane restores that pane's
+// parked selection (0 for a pane never visited), so a first click on its
+// first row used to count as the second click of a double-click and open
+// the piece outright, against the documented "click it again to open it".
+func TestBrowserClickAcrossPanesSelectsBeforeOpening(t *testing.T) {
+	dir := t.TempDir()
+	browserTree(t, dir, "a.gp", "x.gtab")
+	pr := &browserFakePrefs{
+		recents: []string{filepath.Join(dir, "a.gp")},
+		created: []string{filepath.Join(dir, "x.gtab")},
+	}
+	op := &browserFakeOpener{}
+	b := browserFixture(t, pr, op)
+	if b.focus != paneRecent {
+		t.Fatalf("the fixture starts on pane %d, want the recent one", b.focus)
+	}
+
+	l := b.layout()
+	over := l.panes[1]
+	press := pointer{x: over.x + 10, y: over.y + brwPaneHeadH + 4, pressed: true, down: true}
+	b.handleMouse(press)
+	if b.focus != paneCreated || b.sel != 0 {
+		t.Fatalf("the press landed on pane %d row %d, want the written pane's row 0", b.focus, b.sel)
+	}
+	if len(op.opened) != 0 {
+		t.Fatalf("one click on an unfocused pane opened %v; the first click may only select", op.opened)
+	}
+	// The pane now has the focus, so the same press again is the promised
+	// second click and opens the row.
+	b.handleMouse(press)
+	if len(op.opened) != 1 || op.opened[0] != pr.created[0] {
+		t.Errorf("clicking the row again opened %v, want [%q]", op.opened, pr.created[0])
 	}
 }
 
@@ -749,6 +845,55 @@ func TestBrowserHandleDrop(t *testing.T) {
 	}
 	if len(op.opened) != 1 || len(dialogDirs) != 1 {
 		t.Errorf("an unrecoverable drop acted: opened %v, dialogs %v", op.opened, dialogDirs)
+	}
+}
+
+// TestBrowserMultiPieceDropReportsTheRest: only the first supported
+// piece of a drop opens, and what happened to the others must be said —
+// they used to be discarded in silence, leaving the user counting
+// windows that never appeared.
+func TestBrowserMultiPieceDropReportsTheRest(t *testing.T) {
+	root := t.TempDir()
+	browserTree(t, root, "one.gp", "two.gp", "three.gtab", "notes.txt")
+	one := filepath.Join(root, "one.gp")
+	two := filepath.Join(root, "two.gp")
+	three := filepath.Join(root, "three.gtab")
+	notes := filepath.Join(root, "notes.txt")
+	op := &browserFakeOpener{}
+	b := browserFixture(t, &browserFakePrefs{}, op)
+
+	b.handleDrop(browserDropFS{paths: []string{one, two, three, notes}})
+	if len(op.opened) != 1 || op.opened[0] != one {
+		t.Fatalf("a three-piece drop opened %v, want the first piece only", op.opened)
+	}
+	if !strings.Contains(b.errMsg, "one.gp") {
+		t.Errorf("errMsg = %q, want the opened piece named in it", b.errMsg)
+	}
+	if !strings.Contains(b.errMsg, "2 more dropped pieces were ignored") {
+		t.Errorf("errMsg = %q, want the two ignored pieces counted", b.errMsg)
+	}
+
+	// One leftover piece is reported in the singular.
+	op.opened = nil
+	b.handleDrop(browserDropFS{paths: []string{one, two}})
+	if !strings.Contains(b.errMsg, "1 more dropped piece was ignored") {
+		t.Errorf("errMsg = %q, want the one ignored piece in it", b.errMsg)
+	}
+
+	// A single-piece drop has nothing to add and stays quiet.
+	op.opened = nil
+	b.handleDrop(browserDropFS{paths: []string{one}})
+	if b.errMsg != "" {
+		t.Errorf("a clean single-piece drop set errMsg %q", b.errMsg)
+	}
+}
+
+// TestBrowserEmptyRecentPaneTeachesDragAndDrop: outside the ?-overlay,
+// the empty recent pane is the one place a new user looks first, so it
+// is where drag-and-drop gets written down.
+func TestBrowserEmptyRecentPaneTeachesDragAndDrop(t *testing.T) {
+	if !strings.Contains(paneEmpty[paneRecent], "drop a file") {
+		t.Errorf("the empty recent pane says %q, want drag-and-drop taught in it", paneEmpty[paneRecent])
 	}
 }
 
@@ -1212,16 +1357,17 @@ func TestBrowserOKeyLaunchesDialog(t *testing.T) {
 
 // TestBrowserStatusStackClearsFooter pins the arithmetic behind the
 // reserved status band (verification follow-up): the worst-case stack —
-// an error line, four warnings, and the overflow line — must end above
-// the footer hint, or the two draw on top of each other and both become
-// unreadable. The panes stop above the band whether or not there is
-// anything in it, so they cannot reach it either.
+// an error line, the heading naming the piece the warnings came from,
+// the listed warnings, and the overflow line — must end above the footer
+// hint, or the two draw on top of each other and both become unreadable.
+// The panes stop above the band whether or not there is anything in it,
+// so they cannot reach it either.
 func TestBrowserStatusStackClearsFooter(t *testing.T) {
 	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
 	for _, hint := range []bool{true, false} {
 		b.hintOpen = hint
 		l := b.layout()
-		worstBottom := l.statusY + 20 + brwStatusWarnings*18 + uiTextH
+		worstBottom := l.statusY + 20 + 18 + brwStatusWarnings*18 + uiTextH
 		if worstBottom > uiFooterY {
 			t.Errorf("hint=%v: the status stack can reach y=%v, past the footer at y=%v",
 				hint, worstBottom, float64(uiFooterY))
@@ -1546,6 +1692,38 @@ func TestBrowserLibraryPieceThatWillNotParse(t *testing.T) {
 	b.editSelected()
 	if len(edited) != 1 {
 		t.Errorf("editing the broken piece ran %d times, want 1", len(edited))
+	}
+}
+
+// TestBrowserEnterOnABrokenLibraryPieceOpensTheEditor: with an editor
+// wired, Enter (and the second click of a double-click) on a piece that
+// will not parse goes where the E key goes instead of dead-ending in a
+// message about the E key — and the parse error stays in the status so
+// the reason for landing in the editor is on screen on the way back.
+func TestBrowserEnterOnABrokenLibraryPieceOpensTheEditor(t *testing.T) {
+	op := &browserFakeOpener{}
+	lib := stubLibrary{pieces: []PieceInfo{
+		{Path: `C:\pieces\broken.gtab`, Name: "broken", Problem: "line 7:14: bar underfull"},
+	}}
+	b := browserLibFixtureWith(t, lib, op)
+	waitForLibrary(t, b)
+	var edited []string
+	b.SetEditPiece(func(p string) { edited = append(edited, p) })
+	b.focusPane(paneLibrary)
+	b.setSel(0)
+
+	b.activate()
+	if len(edited) != 1 || edited[0] != `C:\pieces\broken.gtab` {
+		t.Fatalf("Enter edited %v, want the broken piece", edited)
+	}
+	if len(op.opened) != 0 {
+		t.Errorf("a piece that will not parse reached the importer: %v", op.opened)
+	}
+	if !strings.Contains(b.errMsg, "bar underfull") || !strings.Contains(b.errMsg, "broken.gtab") {
+		t.Errorf("the status says %q, want the file and its parse problem", b.errMsg)
+	}
+	if strings.Contains(b.errMsg, "press E") {
+		t.Errorf("the status says %q; the E advice belongs to the build with no editor wired", b.errMsg)
 	}
 }
 

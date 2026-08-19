@@ -84,13 +84,15 @@ const (
 	// is anything in it. Reserving room for the worst case — an error plus
 	// every warning an import can produce — would hold a third of the
 	// screen empty for something that appears for a few seconds after an
-	// import; reserving three lines and letting a long stack say how many
-	// more there are keeps both the panes and the messages readable.
-	brwStatusLines = 4
+	// import; reserving a handful of lines and letting a long stack say
+	// how many more there are keeps both the panes and the messages
+	// readable.
+	brwStatusLines = 5
 	// brwStatusWarnings is how many warnings are listed before the rest
-	// are counted. The band has to hold the error line, these, and the
-	// "and N more" line under them — four lines for two warnings, which is
-	// what a browser test checks rather than trusts.
+	// are counted. The band has to hold the error line, the heading that
+	// names the piece the warnings came from, these, and the "and N more"
+	// line under them — five lines for two warnings, which is what a
+	// browser test checks rather than trusts.
 	brwStatusWarnings = 2
 )
 
@@ -110,7 +112,7 @@ const (
 var paneTitles = [paneCount]string{"RECENT", "WRITTEN HERE", "YOUR LIBRARY"}
 
 var paneEmpty = [paneCount]string{
-	"pieces you open will be listed here",
+	"pieces you open will be listed here — or drop a file anywhere on this window",
 	"pieces you write here will be listed here",
 	"nothing in the folder yet — write a piece and it lands here",
 }
@@ -230,6 +232,11 @@ type Browser struct {
 
 	errMsg string
 	warns  []string
+	// warnsFrom names the piece the warnings came from. The status band
+	// can be read minutes after the open — the user practises, comes
+	// back — and a bare "warning:" with no piece over it is orphaned
+	// text about nothing in particular. It lives and dies with warns.
+	warnsFrom string
 
 	// hintOpen mirrors the stored "has the getting-started strip been put
 	// away" flag, so the screen can be driven without preferences.
@@ -718,6 +725,17 @@ func (b *Browser) activate() {
 	case e.missing:
 		b.errMsg = "not found: " + e.path + "  (press Del to forget it)"
 	case e.problem:
+		// A piece that will not parse is listed ON PURPOSE, and the editor
+		// is the one place it can be repaired — so Enter goes where the E
+		// key goes instead of dead-ending in a message about the E key.
+		// The status keeps the parse error, without the dead-end phrasing,
+		// so the reason for landing in the editor is still on screen when
+		// the user comes back from it.
+		if path, ok := b.editableSelection(); ok {
+			b.errMsg, b.warns, b.warnsFrom = filepath.Base(e.path)+": "+e.sub, nil, ""
+			b.editPiece(path)
+			return
+		}
 		b.errMsg = filepath.Base(e.path) + ": " + e.sub + "  (press E to fix it in the editor)"
 	default:
 		b.openPath(e.path)
@@ -728,13 +746,16 @@ func (b *Browser) activate() {
 // display and never propagated: a malformed file must not end the
 // session.
 func (b *Browser) openPath(path string) {
-	b.errMsg, b.warns = "", nil
+	b.errMsg, b.warns, b.warnsFrom = "", nil, ""
 	if b.sh == nil || b.sh.Services().Opener == nil {
 		b.errMsg = "no importer is available in this build"
 		return
 	}
 	warns, err := b.sh.OpenPiece(path)
 	b.warns = warns
+	if len(warns) > 0 {
+		b.warnsFrom = filepath.Base(path)
+	}
 	if err != nil {
 		b.errMsg = fmt.Sprintf("cannot open %s: %v", filepath.Base(path), err)
 		return
@@ -859,13 +880,39 @@ func (b *Browser) noteSkipped(skipped int) {
 	b.errMsg += "; " + browserSkipNote(skipped)
 }
 
+// browserIgnoredNote describes the readable pieces of a drop beyond the
+// one that opened, in the singular or the plural.
+func browserIgnoredNote(n int) string {
+	if n == 1 {
+		return "1 more dropped piece was ignored — drop pieces one at a time to open each"
+	}
+	return fmt.Sprintf("%d more dropped pieces were ignored — drop pieces one at a time to open each", n)
+}
+
+// noteIgnored reports what happened to the rest of a multi-piece drop.
+// Only one piece can be practised at a time, so only the first opens —
+// but discarding the others in silence would leave the user counting
+// windows that never appeared. Naming the piece that DID open matters
+// too: without it, the note reads as if the whole drop was refused.
+func (b *Browser) noteIgnored(opened string, n int) {
+	if n <= 0 {
+		return
+	}
+	if b.errMsg == "" {
+		b.errMsg = "opened " + opened + "; " + browserIgnoredNote(n)
+		return
+	}
+	b.errMsg += "; " + browserIgnoredNote(n)
+}
+
 // handleDrop acts on files dropped onto the window: the first supported
 // piece is opened, and a dropped FOLDER opens the OS file dialog rooted
 // there — the closest honest reading of "here is where my tabs live"
 // now that the screen carries no directory listing of its own. Items the
 // platform could not hand over are skipped, and the outcome is always
-// reported — including a drop of nothing usable, which must say so
-// rather than fail silently.
+// reported — including the readable pieces beyond the first, which are
+// not opened, and a drop of nothing usable, which must say so rather
+// than fail silently.
 func (b *Browser) handleDrop(fsys fs.FS) {
 	paths, skipped := browserDroppedPaths(fsys)
 	if len(paths) == 0 {
@@ -873,10 +920,17 @@ func (b *Browser) handleDrop(fsys fs.FS) {
 		b.noteSkipped(skipped)
 		return
 	}
-	for _, p := range paths {
+	for i, p := range paths {
 		if browserSupported(p) && !browserIsDir(p) {
+			rest := 0
+			for _, q := range paths[i+1:] {
+				if browserSupported(q) && !browserIsDir(q) {
+					rest++
+				}
+			}
 			// openPath resets the status line and fills it in on failure.
 			b.openPath(p)
+			b.noteIgnored(filepath.Base(p), rest)
 			b.noteSkipped(skipped)
 			return
 		}
@@ -1015,10 +1069,12 @@ func (b *Browser) browserBindings() []helpBinding {
 
 		{Group: "choosing", Keys: "up / down", Hint: "up/dn select", Desc: "Move the selection"},
 		{Group: "choosing", Keys: "page up / down", Desc: "Move the selection a screenful at a time"},
+		{Group: "choosing", Keys: "home / end", Desc: "Jump to the first or last entry"},
 		{Group: "choosing", Keys: "click", Desc: "Select an entry; click it again to open it"},
 
-		{Group: "session", Keys: "S", Hint: "s settings", Off: b.settings == nil,
+		{Group: "session", Keys: "S", Hint: "S settings", Off: b.settings == nil,
 			Desc: "Audio devices, latency calibration, SoundFont and count-in"},
+		{Group: "session", Keys: "H", Desc: "Show or hide the getting-started strip"},
 		{Group: "session", Keys: "? or F1", Hint: "? help", Desc: "This key-binding list"},
 		leave,
 		{Group: "session", Keys: "Q", Desc: "Quit guitarTutor"},
@@ -1041,14 +1097,14 @@ func (b *Browser) hintLine() string { return hintLineOf(b.browserBindings()) }
 // to read. It deliberately does NOT go through the dialog mailbox: that
 // path also clears the "a file dialog is open" guard, and borrowing it for
 // an unrelated failure would re-arm a dialog that is still on screen.
-func (b *Browser) ShowError(msg string) { b.errMsg, b.warns = msg, nil }
+func (b *Browser) ShowError(msg string) { b.errMsg, b.warns, b.warnsFrom = msg, nil, "" }
 
 // startNewPiece opens the editor on a blank piece.
 func (b *Browser) startNewPiece() {
 	if b.newPiece == nil {
 		return
 	}
-	b.errMsg, b.warns = "", nil
+	b.errMsg, b.warns, b.warnsFrom = "", nil, ""
 	b.newPiece()
 }
 
@@ -1076,7 +1132,7 @@ func (b *Browser) editSelected() {
 	if !ok {
 		return
 	}
-	b.errMsg, b.warns = "", nil
+	b.errMsg, b.warns, b.warnsFrom = "", nil, ""
 	b.editPiece(path)
 }
 
