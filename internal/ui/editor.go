@@ -189,6 +189,7 @@ func NewEditorForText(sh *Shell, src []byte, path string) *Editor {
 		e.path = path
 	}
 	e.text = newGtabPaneFromSource(src)
+	e.text.fromFile = true
 	return e
 }
 
@@ -1539,6 +1540,10 @@ func (e *Editor) drainDialog() {
 		if !e.applyText() {
 			e.practicePending = false
 			e.leaving = false
+			// applyText reported the parse position, but the user just
+			// answered a SAVE dialog and the standing pane status shows
+			// the same complaint — the news is that nothing was written.
+			e.report(fmt.Errorf("not saved — the text does not parse; the complaint is under the pane"))
 			return
 		}
 		e.text = nil
@@ -1589,6 +1594,12 @@ func (e *Editor) saveAndPractice() {
 
 // leave ends the editing session, asking first when there is unsaved work.
 func (e *Editor) leave() error {
+	// While the OS save dialog floats, it has the user's attention;
+	// leaving underneath it would pop the editor its answer is addressed
+	// to, and the answer would arrive to a mailbox nobody drains.
+	if e.dialogBusy {
+		return nil
+	}
 	if e.doc.Dirty() {
 		e.leaving = true
 		return nil

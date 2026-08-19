@@ -111,22 +111,28 @@ func (e *Editor) openEntry(kind edEntryKind) {
 			},
 		}
 	}
-	e.entry.seeded = true
+	// Only the numeric prompts replace their seed on the first digit:
+	// nobody edits "0" into "12" by appending, but a title IS edited by
+	// appending, and eating it on the first keystroke would punish
+	// exactly the person adding one word to a long name.
+	e.entry.seeded = kind != edEntryTitle
 }
 
-// typeRune feeds one typed rune into the entry: the first one replaces a
-// seeded value whole (see edEntry.seeded), later ones append up to max.
-func (en *edEntry) typeRune(r rune) {
-	if !en.allow(r) {
-		return
+// feed types this frame's runes into the entry: the first allowed one
+// replaces a seeded value whole (see edEntry.seeded), later ones append
+// up to max.
+func (en *edEntry) feed(runes []rune) {
+	for _, r := range runes {
+		if !en.allow(r) {
+			continue
+		}
+		if en.seeded {
+			en.buf, en.seeded = "", false
+		}
+		if len([]rune(en.buf)) < en.max {
+			en.buf += string(r)
+		}
 	}
-	if en.seeded {
-		en.buf, en.seeded = "", false
-	}
-	if len([]rune(en.buf)) >= en.max {
-		return
-	}
-	en.buf += string(r)
 }
 
 // parseMeterText reads "n/d".
@@ -147,9 +153,7 @@ func parseMeterText(s string) (num, den int, ok bool) {
 // typing a digit into a tempo cannot also write a fret.
 func (e *Editor) updateEntry() {
 	en := e.entry
-	for _, r := range ebiten.AppendInputChars(nil) {
-		en.typeRune(r)
-	}
+	en.feed(ebiten.AppendInputChars(nil))
 	switch {
 	case inpututil.IsKeyJustPressed(ebiten.KeyBackspace):
 		if r := []rune(en.buf); len(r) > 0 {

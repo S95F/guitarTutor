@@ -1163,6 +1163,21 @@ func TestEditorOpensBrokenTextForRepair(t *testing.T) {
 		t.Error("walking away must not pretend the text was applied")
 	}
 
+	// Typing something that still does not parse re-guards the exit —
+	// once. The first Escape is refused with the way out named; the
+	// second takes it.
+	e.text.insertRune('x')
+	e.text.reparse()
+	if err := e.escapeText(); err != nil {
+		t.Errorf("the first escape from edited broken text returned %v, want a refusal (nil)", err)
+	}
+	if msg, isErr := e.message(); !isErr || !strings.Contains(msg, "esc again") {
+		t.Errorf("the refusal says %q (error=%v), want it to name the second-escape way out", msg, isErr)
+	}
+	if err := e.escapeText(); err != errQuit {
+		t.Errorf("the second escape returned %v, want errQuit", err)
+	}
+
 	// Fixing the text and saving writes the repair back to the same file.
 	e.text = newGtabPaneFromSource([]byte("\\tempo 100\n0.6.1 |\n"))
 	e.applyTextThen(func() { e.save() })
@@ -1228,6 +1243,93 @@ func TestEditorShiftPCarriesThroughTheFirstSaveDialog(t *testing.T) {
 	}
 }
 
+func TestEditorDialogAnswerAppliesTheOnScreenText(t *testing.T) {
+	// The OS dialog floats while the editor stays interactive: the user
+	// can open the text view and type while it is up. The answer must
+	// save what the screen shows, not the document it diverged from.
+	e := newTestEditor()
+	e.SetSaveDialog(func(string) {})
+	press(t, e, ebiten.KeyDigit5)
+	e.save() // opens the dialog: no path yet
+	if !e.dialogBusy {
+		t.Fatal("the save did not go through the dialog; the test proves nothing")
+	}
+	e.toggleText()
+	e.text = newGtabPaneFromSource([]byte("\\tempo 77\n0.6.1 |\n"))
+	e.OfferSavePath(filepath.Join(t.TempDir(), "riff"))
+	e.drainDialog()
+	b, err := os.ReadFile(e.path)
+	if err != nil {
+		t.Fatalf("reading the saved file: %v", err)
+	}
+	if !strings.Contains(string(b), "\\tempo 77") {
+		t.Errorf("the file holds %q, want the on-screen text's tempo in it", b)
+	}
+
+	// And when the on-screen text will not parse, nothing is written and
+	// every intent hanging off the answer is dropped.
+	e2 := newTestEditor()
+	var practised []string
+	e2.SetPractice(func(p string) { practised = append(practised, p) })
+	e2.SetSaveDialog(func(string) {})
+	press(t, e2, ebiten.KeyDigit5)
+	e2.saveAndPractice()
+	e2.toggleText()
+	e2.text = newGtabPaneFromSource([]byte("this is not a piece"))
+	target := filepath.Join(t.TempDir(), "broken")
+	e2.OfferSavePath(target)
+	e2.drainDialog()
+	if _, err := os.Stat(target + ".gtab"); err == nil {
+		t.Error("a file was written from text that does not parse")
+	}
+	if len(practised) != 0 || e2.practicePending {
+		t.Errorf("practice fired (%v) or stayed pending (%v) off an aborted save", practised, e2.practicePending)
+	}
+	if e2.text == nil {
+		t.Error("the aborted save closed the text view, throwing the typing away")
+	}
+	if msg, isErr := e2.message(); !isErr || !strings.Contains(msg, "not saved") {
+		t.Errorf("got %q (error=%v), want a 'not saved' report", msg, isErr)
+	}
+}
+
+func TestEditorOneDialogAnswerCannotLeaveAndPractise(t *testing.T) {
+	// shift+P floats the dialog, Escape then arms the leave. The single
+	// answer must not pop the editor AND push practice — the user's last
+	// word was "leave". (Escape while the dialog floats is now inert, so
+	// the leave is armed here directly, the way a queued prompt would.)
+	e := newTestEditor()
+	var practised []string
+	e.SetPractice(func(p string) { practised = append(practised, p) })
+	e.SetSaveDialog(func(string) {})
+	press(t, e, ebiten.KeyDigit5)
+	e.saveAndPractice()
+	e.leaving = true
+	e.OfferSavePath(filepath.Join(t.TempDir(), "riff"))
+	e.drainDialog()
+	if len(practised) != 0 {
+		t.Errorf("one answer both left the editor and opened practice: %v", practised)
+	}
+	if e.leaving || e.practicePending {
+		t.Errorf("intents survived the drain: leaving=%v practicePending=%v", e.leaving, e.practicePending)
+	}
+}
+
+func TestEditorEscapeIsInertWhileTheDialogFloats(t *testing.T) {
+	// Escape popping the editor from UNDER the floating dialog would
+	// orphan the answer: the dialog's goroutine posts to a mailbox
+	// nothing drains.
+	e := newTestEditor()
+	e.SetSaveDialog(func(string) {})
+	e.save()
+	if !e.dialogBusy {
+		t.Fatal("the save did not go through the dialog")
+	}
+	if err := e.leave(); err != nil {
+		t.Errorf("leave under a floating dialog returned %v, want nil (inert)", err)
+	}
+}
+
 func TestEditorCancelledSaveDialogDropsThePracticeIntent(t *testing.T) {
 	e := newTestEditor()
 	var practised []string
@@ -1271,12 +1373,23 @@ func TestEditorCapoChipShowsAndSetsTheCapo(t *testing.T) {
 	}
 	// Typing replaces the seed rather than appending to it: with max 2,
 	// "12" over a seeded "0" used to become "01" and silently commit
-	// capo 1.
-	e.entry.typeRune('1')
-	e.entry.typeRune('2')
+	// capo 1. feed is the same seam updateEntry hands real keystrokes to.
+	e.entry.feed([]rune("12"))
 	if e.entry.buf != "12" {
 		t.Fatalf("typing 1 2 over the seed leaves %q, want 12", e.entry.buf)
 	}
+	// The title entry is the exception: a title IS edited by appending,
+	// and eating it on the first keystroke would punish exactly the
+	// person adding one word to a long name.
+	e.entry = nil
+	if e.report(e.doc.SetTitle("My Riff")) {
+		e.openEntry(edEntryTitle)
+		e.entry.feed([]rune(" 2"))
+		if e.entry.buf != "My Riff 2" {
+			t.Errorf("typing into the title left %q, want the seed kept and appended to", e.entry.buf)
+		}
+	}
+	e.openEntry(edEntryCapo)
 	e.entry.buf = "2"
 	e.commitEntry()
 	if e.entry != nil {

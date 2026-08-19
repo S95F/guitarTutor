@@ -395,17 +395,7 @@ func (b *Browser) drawStatus(screen *ebiten.Image, l browserLayout) {
 		drawText(screen, ellipsizeW(b.errMsg, width), uiPadX, y, colMiss)
 		y += 20
 	}
-	if len(b.warns) > 0 && b.warnsFrom != "" {
-		// The warnings can still be on screen minutes after the open,
-		// when the user comes back from practising; without the piece's
-		// name over them they are orphaned text about nothing in
-		// particular. An open can also fail WITH warnings (the importer
-		// read enough to complain before the error), and then the piece
-		// did not open, so the heading must not say it did.
-		head := b.warnsFrom + " opened with warnings:"
-		if b.errMsg != "" {
-			head = "warnings from " + b.warnsFrom + ":"
-		}
+	if head := b.warnsHeading(); head != "" {
 		drawText(screen, truncateW(head, width), uiPadX, y, colClose)
 		y += 18
 	}
@@ -417,4 +407,23 @@ func (b *Browser) drawStatus(screen *ebiten.Image, l browserLayout) {
 		drawText(screen, truncateW("warning: "+w, width), uiPadX, y, colClose)
 		y += 18
 	}
+}
+
+// warnsHeading names the piece over the warning lines, or "" when there
+// is nothing to head. The warnings can still be on screen minutes after
+// the open, when the user comes back from practising; without the
+// piece's name over them they are orphaned text about nothing in
+// particular. An open can also fail WITH warnings (the importer read
+// enough to complain before the error), and then the piece did not open,
+// so the heading must not say it did — warnsFailed records that at open
+// time, because errMsg is cleared by unrelated actions while the
+// warnings stay.
+func (b *Browser) warnsHeading() string {
+	if len(b.warns) == 0 || b.warnsFrom == "" {
+		return ""
+	}
+	if b.warnsFailed {
+		return "warnings from " + b.warnsFrom + ":"
+	}
+	return b.warnsFrom + " opened with warnings:"
 }

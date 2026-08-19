@@ -192,6 +192,7 @@ type App struct {
 	loopDrawX          float64
 	loopDrawing        bool
 	loopDrawOnTimeline bool
+	loopDrawPxPerTick  float64
 
 	// ph is the drawn playback position (playhead.go): the engine's, but
 	// carried smoothly between its once-per-block publishes.

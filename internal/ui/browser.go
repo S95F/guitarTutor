@@ -235,8 +235,13 @@ type Browser struct {
 	// warnsFrom names the piece the warnings came from. The status band
 	// can be read minutes after the open — the user practises, comes
 	// back — and a bare "warning:" with no piece over it is orphaned
-	// text about nothing in particular. It lives and dies with warns.
-	warnsFrom string
+	// text about nothing in particular. warnsFailed records whether that
+	// open failed, because the heading must not say a piece "opened" that
+	// did not — and it must be recorded, not inferred from errMsg, which
+	// other actions (the O key, a drop) clear while the warnings stay.
+	// Both live and die with warns.
+	warnsFrom   string
+	warnsFailed bool
 
 	// hintOpen mirrors the stored "has the getting-started strip been put
 	// away" flag, so the screen can be driven without preferences.
@@ -732,7 +737,7 @@ func (b *Browser) activate() {
 		// so the reason for landing in the editor is still on screen when
 		// the user comes back from it.
 		if path, ok := b.editableSelection(); ok {
-			b.errMsg, b.warns, b.warnsFrom = filepath.Base(e.path)+": "+e.sub, nil, ""
+			b.errMsg, b.warns, b.warnsFrom, b.warnsFailed = filepath.Base(e.path)+": "+e.sub, nil, "", false
 			b.editPiece(path)
 			return
 		}
@@ -746,7 +751,7 @@ func (b *Browser) activate() {
 // display and never propagated: a malformed file must not end the
 // session.
 func (b *Browser) openPath(path string) {
-	b.errMsg, b.warns, b.warnsFrom = "", nil, ""
+	b.errMsg, b.warns, b.warnsFrom, b.warnsFailed = "", nil, "", false
 	if b.sh == nil || b.sh.Services().Opener == nil {
 		b.errMsg = "no importer is available in this build"
 		return
@@ -754,7 +759,7 @@ func (b *Browser) openPath(path string) {
 	warns, err := b.sh.OpenPiece(path)
 	b.warns = warns
 	if len(warns) > 0 {
-		b.warnsFrom = filepath.Base(path)
+		b.warnsFrom, b.warnsFailed = filepath.Base(path), err != nil
 	}
 	if err != nil {
 		b.errMsg = fmt.Sprintf("cannot open %s: %v", filepath.Base(path), err)
@@ -1097,14 +1102,14 @@ func (b *Browser) hintLine() string { return hintLineOf(b.browserBindings()) }
 // to read. It deliberately does NOT go through the dialog mailbox: that
 // path also clears the "a file dialog is open" guard, and borrowing it for
 // an unrelated failure would re-arm a dialog that is still on screen.
-func (b *Browser) ShowError(msg string) { b.errMsg, b.warns, b.warnsFrom = msg, nil, "" }
+func (b *Browser) ShowError(msg string) { b.errMsg, b.warns, b.warnsFrom, b.warnsFailed = msg, nil, "", false }
 
 // startNewPiece opens the editor on a blank piece.
 func (b *Browser) startNewPiece() {
 	if b.newPiece == nil {
 		return
 	}
-	b.errMsg, b.warns, b.warnsFrom = "", nil, ""
+	b.errMsg, b.warns, b.warnsFrom, b.warnsFailed = "", nil, "", false
 	b.newPiece()
 }
 
@@ -1132,7 +1137,7 @@ func (b *Browser) editSelected() {
 	if !ok {
 		return
 	}
-	b.errMsg, b.warns, b.warnsFrom = "", nil, ""
+	b.errMsg, b.warns, b.warnsFrom, b.warnsFailed = "", nil, "", false
 	b.editPiece(path)
 }
 

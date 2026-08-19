@@ -560,6 +560,36 @@ func TestBrowserWarningsRememberTheirPiece(t *testing.T) {
 	}
 }
 
+func TestBrowserWarningsHeadingIsHonestAboutFailure(t *testing.T) {
+	root := t.TempDir()
+	browserTree(t, root, "good.gp")
+	good := filepath.Join(root, "good.gp")
+	op := &browserFakeOpener{warns: []string{"tempo track ignored"}}
+	b := browserFixture(t, &browserFakePrefs{}, op)
+
+	b.openPath(good)
+	if got := b.warnsHeading(); got != "good.gp opened with warnings:" {
+		t.Errorf("after a clean open the heading is %q", got)
+	}
+
+	// An importer can warn AND fail; the heading must not claim the
+	// piece opened.
+	op.err = fmt.Errorf("truncated file")
+	b.openPath(good)
+	if got := b.warnsHeading(); got != "warnings from good.gp:" {
+		t.Errorf("after a failed open the heading is %q, want it not to claim the piece opened", got)
+	}
+
+	// The verdict is recorded at open time, not inferred from the error
+	// line: launching the open dialog clears errMsg but keeps the
+	// warnings, and the heading must keep telling the truth.
+	b.SetOpenDialog(func(string) {})
+	b.launchOpenDialog("")
+	if got := b.warnsHeading(); got != "warnings from good.gp:" {
+		t.Errorf("after the O key cleared the error line the heading became %q", got)
+	}
+}
+
 // TestBrowserOpenWithoutOpener: a shell with no importer says so rather
 // than dereferencing nil.
 func TestBrowserOpenWithoutOpener(t *testing.T) {

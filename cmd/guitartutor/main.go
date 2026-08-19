@@ -120,19 +120,19 @@ func main() {
 		// worse than saying it where the typo was made.
 		if err = checkPieceArgument(os.Args[1]); err == nil {
 			// Whatever follows the piece would be silently lost — the
-			// shell opens exactly one file. A flag means the play
-			// subcommand was meant, and refusing puts the diagnostic
-			// where the flag was typed; extra files mean a multi-select
-			// drop onto the executable, and there refusing would leave a
-			// vanishing console as the only witness, so the first file
-			// still opens and stderr names the rest for whoever can see
-			// it.
-			if len(os.Args) > 2 && strings.HasPrefix(os.Args[2], "-") {
-				err = fmt.Errorf("flags go with the play subcommand: guitartutor play %s %s", os.Args[2], os.Args[1])
+			// shell opens exactly one file. A flag anywhere in the tail
+			// means the play subcommand was meant, and refusing puts the
+			// diagnostic where the flag was typed; extra files mean a
+			// multi-select drop onto the executable, and there refusing
+			// would leave a vanishing console as the only witness, so
+			// the first file still opens and stderr names the rest for
+			// whoever can see it.
+			var note string
+			if note, err = checkExtraArguments(os.Args[1], os.Args[2:]); err != nil {
 				break
 			}
-			if n := len(os.Args) - 2; n > 0 {
-				fmt.Fprintf(os.Stderr, "guitartutor: opening %s; %d more files were given — the window opens one piece at a time (drop the others onto it later)\n", os.Args[1], n)
+			if note != "" {
+				fmt.Fprintln(os.Stderr, "guitartutor:", note)
 			}
 			err = runShell(os.Args[1])
 		}
@@ -148,6 +148,30 @@ func main() {
 // the invocation that would have worked.
 func flagFirstDiagnostic(arg string) string {
 	return fmt.Sprintf("guitartutor: unknown command %q — flags follow a subcommand: guitartutor play %s <file>", arg, arg)
+}
+
+// checkExtraArguments diagnoses everything after the one piece a bare
+// invocation can open. Any flag in the tail refuses the whole invocation
+// — the generic shape is suggested rather than the user's arguments
+// respliced, because value-taking flags make any reordering wrong — while
+// extra files come back as a stderr note naming what was skipped, and the
+// first piece still opens: from Explorer, a refusal's console vanishes
+// before it can be read.
+func checkExtraArguments(piece string, rest []string) (note string, err error) {
+	for _, a := range rest {
+		if strings.HasPrefix(a, "-") {
+			return "", fmt.Errorf("flags go with the play subcommand: guitartutor play [flags] %q", piece)
+		}
+	}
+	if len(rest) == 0 {
+		return "", nil
+	}
+	noun := "file"
+	if len(rest) > 1 {
+		noun = "files"
+	}
+	return fmt.Sprintf("opening %q; skipping %d more %s (%s) — the window opens one piece at a time; open the rest from its start screen",
+		piece, len(rest), noun, strings.Join(rest, ", ")), nil
 }
 
 // checkPieceArgument reports why a bare argument cannot be opened as a

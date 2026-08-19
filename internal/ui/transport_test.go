@@ -776,6 +776,47 @@ func TestShiftDragDrawsALoopOnTheTab(t *testing.T) {
 	}
 }
 
+func TestShiftDragStaysOnItsAnchorSurface(t *testing.T) {
+	// The tab and the timeline map pixels to ticks at scales an order of
+	// magnitude apart. A drag that drifts a few pixels onto the other
+	// surface must keep the mapping it was anchored with, or the loop
+	// jumps mid-gesture.
+	a := newApp(t, 8)
+	l := a.layout()
+	tabY := l.tab.y + l.tab.h/2
+	tlY := l.timeline.y + l.timeline.h/2
+
+	// Anchored on the tab, drifting down onto the timeline strip: the
+	// span stays tab-scale pixels.
+	a.handleMouse(pointer{x: screenW*playheadX + 400, y: tabY, down: true, pressed: true}, true)
+	a.handleMouse(heldAt(screenW*playheadX+500, tlY), true)
+	la, lb, on := a.eng.Loop()
+	if !on {
+		t.Fatal("the drifted tab drag drew no loop")
+	}
+	dragged := int64(100 / a.loopDrawPxPerTick)
+	if got := lb - la; got > dragged+2*960 {
+		t.Errorf("drifting onto the timeline blew the loop up to %d ticks, want about %d", got, dragged)
+	}
+
+	// Anchored on the timeline, drifting up onto the tab: still the
+	// whole-piece mapping, so dragging a tenth of the strip spans about
+	// a tenth of the piece.
+	b := newApp(t, 8)
+	l = b.layout()
+	start := l.timeline.x + l.timeline.w/2
+	b.handleMouse(pointer{x: start, y: tlY, down: true, pressed: true}, true)
+	b.handleMouse(heldAt(start+l.timeline.w/10, tabY), true)
+	la, lb, on = b.eng.Loop()
+	if !on {
+		t.Fatal("the drifted timeline drag drew no loop")
+	}
+	tenth := b.pieceEnd() / 10
+	if got := lb - la; got < tenth/2 || got > tenth*2 {
+		t.Errorf("a tenth-of-the-strip drag spans %d ticks, want near %d — it fell back to the tab's scale", got, tenth)
+	}
+}
+
 // TestShiftPressOnALoopEdgeStillResizes: the edges are tested before the
 // new-loop gesture, so shift+dragging an existing edge keeps meaning
 // tick-exact resizing rather than starting a second loop.

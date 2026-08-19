@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"image/color"
+	"path/filepath"
 	"strings"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -57,12 +58,18 @@ type gtabPane struct {
 	// is good news.
 	status string
 	ok     bool
-	// seed is the text the pane opened with when it was seeded from a
-	// FILE rather than rendered from the document — see
-	// newGtabPaneFromSource. Escape compares against it: unchanged
-	// broken text is someone else's problem the user only came to look
-	// at, and may be walked away from; edited text is theirs and is kept.
-	seed string
+	// seed is the text the pane opened with, and fromFile marks a pane
+	// seeded from a FILE rather than rendered from the document — see
+	// NewEditorForText. Escape treats a file-seeded pane differently:
+	// unchanged broken text is someone else's problem the user only came
+	// to look at, and may be walked away from; edited text is theirs and
+	// is kept — unless a second Escape says otherwise (escArmed).
+	seed     string
+	fromFile bool
+	// escArmed remembers that the last Escape was refused for text that
+	// will not parse, so the next one — with nothing typed in between —
+	// may discard the typing and leave. Any edit disarms it.
+	escArmed bool
 	// bars and notes describe a text that parses, so the pane can say what
 	// it would produce rather than only that it is valid.
 	bars, notes int
@@ -83,8 +90,12 @@ func newGtabPane(doc *edit.Doc) (*gtabPane, error) {
 // has no document to render, and this pane is where it gets repaired.
 func newGtabPaneFromSource(src []byte) *gtabPane {
 	p := &gtabPane{}
-	for _, line := range strings.Split(strings.TrimRight(string(src), "\n"), "\n") {
-		p.lines = append(p.lines, []rune(line))
+	for _, line := range strings.Split(strings.TrimRight(string(src), "\r\n"), "\n") {
+		// A file broken by editing in Notepad arrives with \r\n endings;
+		// an invisible \r at the end of every line would put the caret
+		// behind a rune the user cannot see and shift every reported
+		// column by one.
+		p.lines = append(p.lines, []rune(strings.TrimRight(line, "\r")))
 	}
 	if len(p.lines) == 0 {
 		p.lines = [][]rune{{}}
@@ -172,7 +183,15 @@ func (e *Editor) applyText() bool {
 	if err == nil && string(current) == e.text.text() {
 		return true
 	}
-	sc, perr := textfmt.Parse([]byte(e.text.text()), "piece")
+	// The source name seeds Score.Title when the text has no \title
+	// directive, so it must be the piece's own name where one exists:
+	// parsing a title-less file under a placeholder would write
+	// "\title piece" back into it on the next save.
+	name := "piece"
+	if e.path != "" {
+		name = strings.TrimSuffix(filepath.Base(e.path), filepath.Ext(e.path))
+	}
+	sc, perr := textfmt.Parse([]byte(e.text.text()), name)
 	if perr != nil {
 		e.report(fmt.Errorf("%s", gtabProblem(perr)))
 		return false
@@ -226,9 +245,24 @@ func (e *Editor) escapeText() error {
 		e.text = nil
 		return nil
 	}
-	if e.text.seed != "" && e.text.text() == e.text.seed {
+	if !e.text.fromFile {
+		return nil
+	}
+	if e.text.text() == e.text.seed {
 		return e.leave()
 	}
+	// Edited-and-broken in a file-seeded pane: the first Escape is
+	// refused with the way out named, the second — with nothing typed in
+	// between — takes it. Without this, one exploratory keystroke in
+	// someone else's broken file re-arms the trap the walk-away above
+	// exists to release, and the pane has no undo to escape with.
+	if e.text.escArmed {
+		e.text = newGtabPaneFromSource([]byte(e.text.seed))
+		e.text.fromFile = true
+		return e.leave()
+	}
+	e.text.escArmed = true
+	e.report(fmt.Errorf("the text does not parse and was not applied — esc again discards your typing and leaves"))
 	return nil
 }
 
@@ -310,6 +344,9 @@ func (e *Editor) textKeys() error {
 	}
 	if changed {
 		p.reparse()
+		// New typing withdraws the second-Escape discard offer: it must
+		// only ever throw away exactly the keystrokes the refusal named.
+		p.escArmed = false
 	}
 	return nil
 }

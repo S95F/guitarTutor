@@ -497,6 +497,10 @@ func (a *App) beginLoopDraw(tick int64, x float64, onTimeline bool) {
 	a.drag = dragLoopNew
 	a.loopDrawTick, a.loopDrawX, a.loopDrawing = tick, x, false
 	a.loopDrawOnTimeline = onTimeline
+	// The press-time scale rides the whole gesture: the zoom keys are
+	// not gated during a drag, and a rescale mid-gesture would jump the
+	// far edge with the mouse stationary.
+	a.loopDrawPxPerTick = a.pxPerTick()
 	a.seekTo(tick)
 }
 
@@ -529,7 +533,7 @@ func (a *App) continueLoopDraw(p pointer) {
 	if a.loopDrawOnTimeline {
 		cur = a.timelineTick(a.layout().timeline, p.x)
 	} else {
-		cur = a.loopDrawTick + int64(math.Round((p.x-a.loopDrawX)/a.pxPerTick()))
+		cur = a.loopDrawTick + int64(math.Round((p.x-a.loopDrawX)/a.loopDrawPxPerTick))
 	}
 	lo, hi := a.loopDrawTick, cur
 	if hi < lo {

@@ -281,3 +281,55 @@ func TestRenderAllRunawayGuard(t *testing.T) {
 		t.Fatal("renderAll with a looping engine returned nil error, want runaway-guard error")
 	}
 }
+
+func TestCheckExtraArguments(t *testing.T) {
+	for _, tt := range []struct {
+		name, piece string
+		rest        []string
+		wantNote    []string // substrings the note must carry; nil = no note
+		wantErr     []string // substrings the error must carry; nil = no error
+	}{
+		{name: "nothing extra", piece: "song.gtab"},
+		{
+			// The suggestion is the generic shape, never the user's
+			// arguments respliced: 'play -scale song.gtab' would feed the
+			// file to the flag.
+			name: "trailing flag", piece: "song.gtab", rest: []string{"-listen"},
+			wantErr: []string{"play [flags]", `"song.gtab"`},
+		},
+		{
+			// A flag hiding behind another file must not be counted as a
+			// file and dropped.
+			name: "flag after extra file", piece: "a.gtab", rest: []string{"b.gtab", "-listen"},
+			wantErr: []string{"play [flags]"},
+		},
+		{
+			name: "one extra file", piece: "a.gtab", rest: []string{"b.gtab"},
+			wantNote: []string{"1 more file (b.gtab)", "start screen"},
+		},
+		{
+			name: "several extra files", piece: "My Song.gtab", rest: []string{"b.gtab", "c.mid"},
+			wantNote: []string{`"My Song.gtab"`, "2 more files (b.gtab, c.mid)"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			note, err := checkExtraArguments(tt.piece, tt.rest)
+			if (err != nil) != (tt.wantErr != nil) {
+				t.Fatalf("err = %v, want error: %v", err, tt.wantErr != nil)
+			}
+			for _, w := range tt.wantErr {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("err %q does not mention %q", err, w)
+				}
+			}
+			if (note != "") != (tt.wantNote != nil) {
+				t.Fatalf("note = %q, want a note: %v", note, tt.wantNote != nil)
+			}
+			for _, w := range tt.wantNote {
+				if !strings.Contains(note, w) {
+					t.Errorf("note %q does not mention %q", note, w)
+				}
+			}
+		})
+	}
+}
