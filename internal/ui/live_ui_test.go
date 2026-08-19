@@ -13,6 +13,8 @@ package ui
 import (
 	"strings"
 	"testing"
+
+	"github.com/S95F/guitarTutor/internal/practice"
 )
 
 // splitDeviceMsg is the real thing warnOnSplitDevices raises in
@@ -160,6 +162,43 @@ func TestLegendItemsAreEvenlySpaced(t *testing.T) {
 	last := len(xs) - 1
 	if right := xs[last] + textW(legendItems[last].s); right > screenW-uiPadX {
 		t.Errorf("the legend ends at %.0f, past the %.0f margin", right, screenW-uiPadX)
+	}
+}
+
+// TestLiveStatsLineEarnsItsPercentage: Accuracy() answers 1.0 with
+// nothing judged — right for the scorer, but printed as "100%" the moment
+// a session opens it is a grade nobody earned. The percentage waits for
+// the first judged note.
+func TestLiveStatsLineEarnsItsPercentage(t *testing.T) {
+	if got := liveStatsLine(practice.Stats{}); strings.Contains(got, "%") {
+		t.Errorf("with nothing judged the stats line %q still grades the player", got)
+	}
+	if got := liveStatsLine(practice.Stats{}); !strings.Contains(got, "hit 0") {
+		t.Errorf("the zero counts must still show, got %q", got)
+	}
+	if got := liveStatsLine(practice.Stats{Hit: 1, Miss: 1}); !strings.Contains(got, "50%") {
+		t.Errorf("one hit and one miss should read 50%%, got %q", got)
+	}
+}
+
+// TestTunerIdleLineIsHonest: T works in every session, but "listening..."
+// is only true in a live one — without a capture device the honest line
+// says what to change, and it has to fit the window at the scale it is
+// drawn at.
+func TestTunerIdleLineIsHonest(t *testing.T) {
+	a := newApp(t, 1)
+	s, scale := a.tunerIdleLine()
+	if !strings.Contains(s, "settings") {
+		t.Errorf("with no live input the tuner says %q, want it to point at settings", s)
+	}
+	if w := textWScaled(s, scale); w > screenW {
+		t.Errorf("the idle line is %.0f px wide at scale %v, past the %d px window", w, scale, screenW)
+	}
+
+	a.SetLiveStatus(func() (float64, int64) { return -20, 0 })
+	a.syncLive()
+	if s, _ := a.tunerIdleLine(); s != "listening..." {
+		t.Errorf("a live session's idle tuner says %q, want %q", s, "listening...")
 	}
 }
 

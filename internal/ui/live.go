@@ -297,12 +297,21 @@ func (a *App) drawLiveHUD(screen *ebiten.Image) {
 	tx := x0 + meterW*float32(57.0/60.0)
 	vector.StrokeLine(screen, tx, y0-2, tx, y0+meterH+2, 1, colBarline, false)
 
-	st := a.stats
-	s := fmt.Sprintf("hit %d  close %d  miss %d  |  %.0f%%", st.Hit, st.Close, st.Miss, st.Accuracy()*100)
-	drawTextRight(screen, s, screenW-uiPadX, float64(y0)+18, colHUD)
+	drawTextRight(screen, liveStatsLine(a.stats), screenW-uiPadX, float64(y0)+18, colHUD)
 	if a.dropped > 0 {
 		drawTextRight(screen, fmt.Sprintf("dropped %d samples", a.dropped), screenW-uiPadX, float64(y0)+34, colMiss)
 	}
+}
+
+// liveStatsLine is the hit/close/miss readout. Accuracy() answers 1.0
+// with nothing judged — the right neutral value for the scorer — but
+// printed as "100%" the moment a session opens it is a grade nobody has
+// earned yet, so the percentage waits for the first judged note.
+func liveStatsLine(st practice.Stats) string {
+	if st.Hit+st.Close+st.Miss == 0 {
+		return "hit 0  close 0  miss 0"
+	}
+	return fmt.Sprintf("hit %d  close %d  miss %d  |  %.0f%%", st.Hit, st.Close, st.Miss, st.Accuracy()*100)
 }
 
 // The live-warning banner's interior. The banner is a fixed rectangle
@@ -507,8 +516,7 @@ func keyName(key int) string {
 // ASCII-only, so cents take a plain "c" suffix rather than a cent sign.
 func (a *App) drawTuner(screen *ebiten.Image) {
 	if !a.tunerSounding {
-		s := "listening..."
-		scale := 3.0
+		s, scale := a.tunerIdleLine()
 		drawTextScaled(screen, s, centreXScaled(s, 0, screenW, scale), 300, scale, colString)
 		return
 	}
@@ -545,4 +553,17 @@ func (a *App) drawTuner(screen *ebiten.Image) {
 	vector.DrawFilledRect(screen, cx+float32(c/50)*barW/2-3, y0-4, 6, barH+8, mcol, false)
 	drawText(screen, "-50", float64(x0)-30, float64(y0)+4, colBarline)
 	drawText(screen, "+50", float64(x0)+barW+8, float64(y0)+4, colBarline)
+}
+
+// tunerIdleLine is what the tuner overlay says while no note sounds, with
+// the scale to draw it at. "listening..." is only true in a live session
+// — without one the tuner feed never runs, and the overlay used to claim
+// to listen forever. The honest line instead says what to change, so the
+// message itself is the fix; being a sentence rather than a word, it is
+// drawn smaller to stay inside the window.
+func (a *App) tunerIdleLine() (string, float64) {
+	if !a.live {
+		return "no live input — choose your interface in settings to use the tuner", 2
+	}
+	return "listening...", 3
 }

@@ -42,6 +42,11 @@ type helpBinding struct {
 	// a key that is visibly unavailable is an explanation — and dropped
 	// from the footer, which has no room to explain itself.
 	Off bool
+	// Explained marks an Off row whose Desc already says what would turn
+	// the key on. The overlay then leaves the Desc alone instead of
+	// stamping its generic "(not available now)" over a sentence that has
+	// answered the better question.
+	Explained bool
 }
 
 // A helpSection is one heading of the overlay with its rows.
@@ -162,6 +167,16 @@ func helpLayout(rows []helpBinding, footnote string) helpFlow {
 	return f
 }
 
+// overlayDesc is the description a row is drawn with. An unavailable
+// binding is marked as such unless its Desc already explains itself
+// (Explained) — one explanation helps, two in a row read as nagging.
+func overlayDesc(b helpBinding) string {
+	if b.Off && !b.Explained {
+		return b.Desc + "  (not available now)"
+	}
+	return b.Desc
+}
+
 // drawHelpOverlay paints a resolved table over everything else. footnote
 // is an optional line under the table for anything the rows cannot say —
 // the practice view uses it to explain its track chips.
@@ -181,9 +196,9 @@ func drawHelpOverlay(dst *ebiten.Image, title string, rows []helpBinding, footno
 		drawText(dst, strings.ToUpper(g.Name), helpX, y, colSounding)
 		y += helpHeadH
 		for _, b := range g.Rows {
-			col, desc := colNote, b.Desc
+			col, desc := colNote, overlayDesc(b)
 			if b.Off {
-				col, desc = colBarline, b.Desc+"  (not available now)"
+				col = colBarline
 			}
 			drawText(dst, b.Keys, helpKeysX, y, col)
 			drawText(dst, truncateW(desc, screenW-uiPadX-helpDescX), helpDescX, y, col)

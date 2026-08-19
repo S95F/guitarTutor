@@ -820,6 +820,159 @@ func TestHintLineFromTable(t *testing.T) {
 	}
 }
 
+// TestStatusLineCountsPassesOnlyInsideALoop: the pass counter counts laps
+// of a loop, and shown unconditionally it read "pass 0" for the whole of
+// every straight-through session.
+func TestStatusLineCountsPassesOnlyInsideALoop(t *testing.T) {
+	a := newApp(t, 2)
+	if got := a.statusLine(); strings.Contains(got, "pass") {
+		t.Errorf("status %q counts passes with no loop armed", got)
+	}
+	a.eng.SetLoop(0, 3840)
+	if got := a.statusLine(); !strings.Contains(got, "pass 0") {
+		t.Errorf("status %q should count passes once a loop is armed", got)
+	}
+}
+
+// TestRampExplainsWhenItCannotAct: the R toggle stands either way, but a
+// chip lighting up when nothing can happen is a promise — the transient
+// line says what is still missing.
+func TestRampExplainsWhenItCannotAct(t *testing.T) {
+	a := newApp(t, 2)
+
+	a.toggleRamp()
+	if !a.ramp {
+		t.Fatal("the explanation must not block the toggle itself")
+	}
+	if got := a.bpmMessage(); !strings.Contains(got, "set a loop first") {
+		t.Errorf("ramp with no loop said %q, want it to ask for a loop", got)
+	}
+
+	// Toggling OFF explains nothing: there is nothing to arm.
+	a.frame += bpmMsgFrames
+	a.toggleRamp()
+	if got := a.bpmMessage(); got != "" {
+		t.Errorf("toggling ramp off posted %q", got)
+	}
+
+	// With a loop but already at full speed, the ramp has nowhere to go.
+	a.eng.SetLoop(0, 3840)
+	a.toggleRamp()
+	if got := a.bpmMessage(); !strings.Contains(got, "full speed") {
+		t.Errorf("ramp at full speed said %q, want it to say so", got)
+	}
+
+	// A loop and headroom: the ramp will act, so no caveat.
+	a.frame += bpmMsgFrames
+	a.toggleRamp()
+	a.eng.SetTempoScale(0.75)
+	a.toggleRamp()
+	if got := a.bpmMessage(); got != "" {
+		t.Errorf("an actionable ramp posted the caveat %q", got)
+	}
+}
+
+// TestHelpRowsNameTheirRemedies: a greyed W or S row used to say only
+// "(not available now)"; each now says what would turn the key on, and
+// the overlay drops the generic stamp for rows that explained themselves.
+// T stays active either way but carries the same caveat, so nobody has to
+// open a silent tuner to learn why it is silent.
+func TestHelpRowsNameTheirRemedies(t *testing.T) {
+	a := newApp(t, 1)
+	row := func(keys string) helpBinding {
+		t.Helper()
+		for _, b := range a.helpRows() {
+			if b.Keys == keys {
+				return b
+			}
+		}
+		t.Fatalf("no binding row for %q", keys)
+		return helpBinding{}
+	}
+
+	w := row("W")
+	if !w.Off || !strings.Contains(w.Desc, "live input") {
+		t.Errorf("the unavailable W row is %+v, want it off and naming live input", w)
+	}
+	if got := overlayDesc(w); strings.Contains(got, "not available now") {
+		t.Errorf("W's overlay line %q stamps the generic marker over its own explanation", got)
+	}
+
+	s := row("S")
+	if !s.Off || !strings.Contains(s.Desc, "full app") {
+		t.Errorf("the standalone S row is %+v, want it off and naming the full app", s)
+	}
+
+	tr := row("T")
+	if tr.Off {
+		t.Error("T must stay active without live input; the overlay it opens explains itself")
+	}
+	if !strings.Contains(tr.Desc, "live input") {
+		t.Errorf("T's row %q should carry the live-input caveat", tr.Desc)
+	}
+
+	// A greyed row with no explanation of its own keeps the generic
+	// marker — better a stamp than silence.
+	f5 := row("F5")
+	if !f5.Off {
+		t.Fatal("the fixture has no reloader, so F5 should be off")
+	}
+	if got := overlayDesc(f5); !strings.Contains(got, "not available now") {
+		t.Errorf("the unexplained F5 row lost its marker: %q", got)
+	}
+
+	// With the live wiring and a shell in place, every caveat withdraws.
+	a.SetWaitControl(true)
+	a.SetLiveStatus(func() (float64, int64) { return -20, 0 })
+	a.syncLive()
+	a.SetSettingsOpener(func() {})
+	if w := row("W"); w.Off || strings.Contains(w.Desc, "live input") {
+		t.Errorf("with a detector the W row is %+v, want it plain", w)
+	}
+	if tr := row("T"); strings.Contains(tr.Desc, "live input") {
+		t.Errorf("in a live session the T row still carries the caveat: %q", tr.Desc)
+	}
+	if s := row("S"); s.Off || strings.Contains(s.Desc, "full app") {
+		t.Errorf("with an opener the S row is %+v, want it plain", s)
+	}
+}
+
+// TestNoteCueKeepsBothChannels is the regression for the drawTab colour
+// fight: the verdict branch used to win the glyph colour from the
+// sounding branch, so from the second loop pass on the note being played
+// right now wore last pass's green or red instead of the you-are-here
+// highlight. The cues are separate channels and must coexist.
+func TestNoteCueKeepsBothChannels(t *testing.T) {
+	a := newApp(t, 2)
+
+	if col, sounding := a.noteCue(3840, 3840, 6, false, 0, 0, nil); col != colNote || sounding {
+		t.Errorf("an unjudged note ahead of the playhead = %v sounding=%v, want plain and silent", col, sounding)
+	}
+	if col, _ := a.noteCue(3840, 3840, 6, true, 0, 0, nil); col != colInferred {
+		t.Errorf("an inferred note = %v, want colInferred", col)
+	}
+	if col, sounding := a.noteCue(0, 3840, 6, false, 100, 100, nil); col != colNote || !sounding {
+		t.Errorf("a sounding unjudged note = %v sounding=%v; the position cue lives on its own channel now", col, sounding)
+	}
+
+	a.OfferResults([]practice.NoteResult{result(0, 6, practice.VerdictHit)})
+	a.syncLive()
+	col, sounding := a.noteCue(0, 3840, 6, false, 100, 100, nil)
+	if col != colHit {
+		t.Errorf("a judged note's glyph = %v, want the verdict tint", col)
+	}
+	if !sounding {
+		t.Error("the verdict displaced the sounding cue; both must show at once")
+	}
+
+	// An active wait point still owns the glyph — it is the one cue that
+	// demands something of the player right now.
+	waiting := map[noteKey]bool{{0, 6}: true}
+	if col, _ := a.noteCue(0, 3840, 6, false, 100, 100, waiting); col != a.pulseCol() {
+		t.Errorf("a waited-on note = %v, want the wait pulse", col)
+	}
+}
+
 // --- Phase 5: live warning banner ---
 
 // TestLiveWarning: the app layer raises and clears the banner, the user

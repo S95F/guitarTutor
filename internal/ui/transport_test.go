@@ -675,6 +675,177 @@ func TestWheelDoesNotZoomUnderTheTuner(t *testing.T) {
 	}
 }
 
+// TestShiftDragDrawsALoopOnTheTimeline: one gesture, one intent — the
+// press anchors an edge, the drag carries the other, both snapped to
+// beats. Dragging back across the anchor swaps the edges rather than
+// collapsing the loop.
+func TestShiftDragDrawsALoopOnTheTimeline(t *testing.T) {
+	a := newApp(t, 8)
+	tl := a.layout().timeline
+	xFor := func(tick int64) float64 { return a.timelineX(tl, tick) }
+
+	a.handleMouse(pointer{x: xFor(3840), y: tl.y + tl.h/2, down: true, pressed: true}, true)
+	if a.drag != dragLoopNew {
+		t.Fatalf("a shift-press on the timeline started %v, want dragLoopNew", a.drag)
+	}
+	if _, _, on := a.eng.Loop(); on {
+		t.Fatal("the press alone made a loop; it must wait for the drag to mean one")
+	}
+
+	a.handleMouse(heldAt(xFor(11520), tl.y+tl.h/2), true)
+	la, lb, on := a.eng.Loop()
+	if !on || la != 3840 || lb != 11520 {
+		t.Errorf("shift-drag made loop [%d, %d) on=%v, want [3840, 11520) on=true", la, lb, on)
+	}
+
+	// Back across the anchor: the anchor becomes the END of the loop.
+	a.handleMouse(heldAt(xFor(0), tl.y+tl.h/2), true)
+	la, lb, on = a.eng.Loop()
+	if !on || la != 0 || lb != 3840 {
+		t.Errorf("dragging left of the anchor made [%d, %d) on=%v, want [0, 3840) on=true", la, lb, on)
+	}
+
+	// Releasing keeps the loop and frees the pointer.
+	a.handleMouse(pointer{x: xFor(0), y: tl.y + 2}, true)
+	if a.drag != dragNone {
+		t.Error("releasing the button should end the gesture")
+	}
+	if _, _, on := a.eng.Loop(); !on {
+		t.Error("the loop must survive the release")
+	}
+}
+
+// TestShiftPressWithinSlopStaysAPlainSeek: a modifier held a moment too
+// long must not leave a surprise loop behind — under the slop the press
+// is exactly the seek it would have been without shift.
+func TestShiftPressWithinSlopStaysAPlainSeek(t *testing.T) {
+	a := newApp(t, 8)
+	tl := a.layout().timeline
+	a.handleMouse(pressAt(tl), true)
+	want := a.pieceEnd() / 2
+	if got := a.eng.PosTick(); abs64(got-want) > 64 {
+		t.Errorf("the shift-press seeked to %d, want about %d", got, want)
+	}
+	a.handleMouse(heldAt(tl.x+tl.w/2+loopDrawSlop-1, tl.y+2), true)
+	if _, _, on := a.eng.Loop(); on {
+		t.Error("a wobble inside the slop drew a loop")
+	}
+	a.handleMouse(pointer{x: tl.x + tl.w/2, y: tl.y + 2}, true)
+	if _, _, on := a.eng.Loop(); on {
+		t.Error("releasing inside the slop drew a loop")
+	}
+	if a.drag != dragNone {
+		t.Error("the gesture should be over after the release")
+	}
+}
+
+// TestShiftDragDrawsALoopOnTheTab: the tab is the fine-grained surface,
+// and the gesture must work where the eyes already are.
+func TestShiftDragDrawsALoopOnTheTab(t *testing.T) {
+	a := newApp(t, 8)
+	tab := a.layout().tab
+	y := tab.y + tab.h/2
+	a.handleMouse(pointer{x: screenW*playheadX + 200, y: y, down: true, pressed: true}, true)
+	if a.drag != dragLoopNew {
+		t.Fatalf("a shift-press on the tab started %v, want dragLoopNew", a.drag)
+	}
+	a.handleMouse(heldAt(screenW*playheadX+500, y), true)
+	la, lb, on := a.eng.Loop()
+	if !on {
+		t.Fatal("shift-dragging the tab drew no loop")
+	}
+	if la >= lb || la%960 != 0 || lb%960 != 0 {
+		t.Errorf("loop [%d, %d) is not snapped to beats", la, lb)
+	}
+
+	// The tuner replaces the tab, so the gesture must not reach the
+	// invisible score behind it.
+	b := newApp(t, 8)
+	b.tunerView = true
+	b.handleMouse(pointer{x: screenW*playheadX + 200, y: y, down: true, pressed: true}, true)
+	if b.drag != dragNone {
+		t.Errorf("shift-press over the tuner started %v", b.drag)
+	}
+}
+
+// TestShiftPressOnALoopEdgeStillResizes: the edges are tested before the
+// new-loop gesture, so shift+dragging an existing edge keeps meaning
+// tick-exact resizing rather than starting a second loop.
+func TestShiftPressOnALoopEdgeStillResizes(t *testing.T) {
+	a := newApp(t, 8)
+	a.eng.SetLoop(3840, 7680)
+	l := a.layout()
+	a.handleMouse(pressAt(l.loopA), true)
+	if a.drag != dragLoopA {
+		t.Errorf("shift-pressing the loop start began %v, want dragLoopA", a.drag)
+	}
+}
+
+// TestTimelineHintTeachesTheMissingGesture: "drag the loop edges" is a
+// lie when no loop has edges; with none set the line teaches the gesture
+// that makes one.
+func TestTimelineHintTeachesTheMissingGesture(t *testing.T) {
+	a := newApp(t, 4)
+	if got := a.timelineHint(); !contains(got, "shift-drag") {
+		t.Errorf("with no loop the hint is %q, want it to teach shift-drag", got)
+	}
+	a.eng.SetLoop(0, 3840)
+	if got := a.timelineHint(); !contains(got, "drag the loop edges") {
+		t.Errorf("with a loop the hint is %q, want it to teach the edge drag", got)
+	}
+}
+
+// TestSeekLastBarJumpsToTheEnding: End mirrors Home because the ending
+// of a piece is exactly where A/B loops get set. The binding row is
+// checked here too — a key the overlay does not teach may as well not
+// exist.
+func TestSeekLastBarJumpsToTheEnding(t *testing.T) {
+	a := newApp(t, 8)
+	a.seekLastBar()
+	if got := a.eng.PosTick(); got != 7*3840 {
+		t.Errorf("End landed at %d, want the last bar's start %d", got, 7*3840)
+	}
+
+	empty := newApp(t, 0)
+	empty.seekLastBar() // must not panic or move
+	if got := empty.eng.PosTick(); got != 0 {
+		t.Errorf("End on a bar-less track moved to %d", got)
+	}
+
+	found := false
+	for _, b := range practiceBindings {
+		if b.Keys == "home / end" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("no binding row teaches home / end together")
+	}
+}
+
+// TestDisabledChipClickExplains: a greyed chip still swallows the click,
+// but the swallow now answers — the transient line names what would
+// enable the control instead of leaving a click that visibly did nothing.
+func TestDisabledChipClickExplains(t *testing.T) {
+	a := newApp(t, 4)
+	if a.waitCtl || a.settings != nil {
+		t.Fatal("the fixture should start with WAIT and SETTINGS disabled")
+	}
+
+	a.handleMouse(pressAt(chipRect(t, a, "WAIT")), false)
+	if a.wait {
+		t.Error("the disabled WAIT chip engaged wait mode")
+	}
+	if got := a.bpmMessage(); !contains(got, "live input") {
+		t.Errorf("clicking greyed WAIT said %q, want it to name the missing live input", got)
+	}
+
+	a.handleMouse(pressAt(chipRect(t, a, "SETTINGS")), false)
+	if got := a.bpmMessage(); !contains(got, "full app") {
+		t.Errorf("clicking greyed SETTINGS said %q, want it to explain the standalone window", got)
+	}
+}
+
 // TestTransportRowSharesOneHeight: the icon buttons and the toggle chips
 // are one visual row, and a couple of pixels of difference between two
 // rounded panels side by side reads as a rendering fault.

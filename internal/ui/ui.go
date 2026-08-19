@@ -180,6 +180,15 @@ type App struct {
 	drag     dragTarget
 	wheelAcc float64
 
+	// The shift+drag loop gesture (dragLoopNew). loopDrawTick and
+	// loopDrawX anchor the press — the tick under it and the pixel it
+	// landed on — and loopDrawing latches once the pointer has travelled
+	// far enough that the gesture means "draw a loop" rather than the
+	// seek the same press performs without shift.
+	loopDrawTick int64
+	loopDrawX    float64
+	loopDrawing  bool
+
 	// ph is the drawn playback position (playhead.go): the engine's, but
 	// carried smoothly between its once-per-block publishes.
 	ph playhead
@@ -326,6 +335,8 @@ func (a *App) handleKeys() error {
 		a.togglePlay()
 	case inpututil.IsKeyJustPressed(ebiten.KeyHome):
 		a.seekTo(0)
+	case inpututil.IsKeyJustPressed(ebiten.KeyEnd):
+		a.seekLastBar()
 	case inpututil.IsKeyJustPressed(ebiten.KeyLeft):
 		a.seekPrevBar()
 	case inpututil.IsKeyJustPressed(ebiten.KeyRight):
@@ -511,6 +522,19 @@ func (a *App) toggleMetronome() {
 func (a *App) toggleRamp() {
 	a.ramp = !a.ramp
 	a.eng.SetRamp(engine.RampConfig{Enabled: a.ramp, Increment: 0.05, Target: 1.0})
+	if !a.ramp {
+		return
+	}
+	// The toggle stands either way — arming the ramp before setting the
+	// loop is a fine order to do things in — but a chip that lights up
+	// when nothing can happen is a promise, so the transient line says
+	// what is still missing. Rising toward 1.0 is all the engine's ramp
+	// does, which is why full speed has nothing to ramp to.
+	if _, _, on := a.eng.Loop(); !on {
+		a.setBPMMessage("ramp raises the speed after each loop pass — set a loop first")
+	} else if a.eng.TempoScale() >= 1.0 {
+		a.setBPMMessage("already at full speed — slow down first and ramp brings you back up")
+	}
 }
 
 // SetInitialMetronome records the metronome state chosen at startup so the
@@ -827,6 +851,13 @@ type practiceBinding struct {
 	// behind it, so the same key ends the process — and saying "go back"
 	// there, one line above "Q quit", promises a screen that does not
 	// exist.
+	//
+	// A binding that carries both a Reword and an Enabled gate takes on a
+	// duty: while it is off, the reworded Desc must say what would turn
+	// it on. The overlay then shows that sentence in place of its generic
+	// "(not available now)", because a greyed row that names its remedy
+	// is an explanation and one that only announces its own absence is a
+	// dead end.
 	Reword func(a *App) (hint, desc string)
 }
 
@@ -839,7 +870,7 @@ func (b practiceBinding) enabled(a *App) bool { return b.Enabled == nil || b.Ena
 var practiceBindings = []practiceBinding{
 	{Group: "transport", Keys: "space", Hint: "space play/pause", Desc: "Start or pause playback"},
 	{Group: "transport", Keys: "left / right", Hint: "arrows seek", Desc: "Jump to the previous / next bar; inside a loop, right wraps to the loop start"},
-	{Group: "transport", Keys: "home", Desc: "Jump back to the first bar"},
+	{Group: "transport", Keys: "home / end", Desc: "Jump to the first / last bar"},
 	{Group: "transport", Keys: "click / drag", Desc: "On the tab or the timeline: move the playhead"},
 
 	{Group: "tempo", Keys: "up / down", Hint: "up/dn tempo", Desc: "Practice speed up / down by 5%"},
@@ -847,23 +878,47 @@ var practiceBindings = []practiceBinding{
 	{Group: "tempo", Keys: "R", Desc: "Ramp the speed up 5% after each loop pass"},
 	{Group: "tempo", Keys: "C", Desc: "Count-in on / off for the next play"},
 
-	{Group: "loop", Keys: "A", Hint: "A/B loop", Desc: "Set the loop start at the current bar"},
-	{Group: "loop", Keys: "B", Desc: "Set the loop end at the current bar"},
+	// A and B share a row: the overlay has no scrolling and the card is
+	// full, so a new gesture buys its line from a pair that reads as one
+	// idea anyway.
+	{Group: "loop", Keys: "A / B", Hint: "A/B loop", Desc: "Set the loop start / end at the current bar"},
 	{Group: "loop", Keys: "L", Desc: "Clear the loop"},
+	{Group: "loop", Keys: "shift+drag", Desc: "Drag out a new loop on the tab or the timeline, snapped to beats"},
 	{Group: "loop", Keys: "drag an edge", Desc: "Move a loop end: snaps to the beat, shift for tick-exact"},
 
 	{Group: "tracks", Keys: "1..9", Hint: "1-9 mute", Desc: "Mute / unmute a track (or click its chip)"},
 	{Group: "tracks", Keys: "shift+1..9", Desc: "Solo a track; press again to release (or right-click it)"},
 
 	{Group: "practice", Keys: "M", Hint: "M click", Desc: "Metronome click on / off"},
-	{Group: "practice", Keys: "T", Hint: "T tuner", Desc: "Tuner overlay"},
+	// T stays active without live input — the overlay it opens explains
+	// itself — but its row carries the same caveat the overlay shows, so
+	// nobody has to open a silent tuner to learn why it is silent.
+	{Group: "practice", Keys: "T", Hint: "T tuner", Desc: "Tuner overlay",
+		Reword: func(a *App) (string, string) {
+			if !a.live {
+				return "T tuner", "Tuner overlay (needs live input — choose your interface in settings)"
+			}
+			return "T tuner", "Tuner overlay"
+		}},
 	{Group: "practice", Keys: "W", Hint: "W wait", Desc: "Wait at each note until you play it",
-		Enabled: func(a *App) bool { return a.waitCtl }},
+		Enabled: func(a *App) bool { return a.waitCtl },
+		Reword: func(a *App) (string, string) {
+			if !a.waitCtl {
+				return "W wait", "Wait at each note until you play it (needs live input — choose your interface in settings)"
+			}
+			return "W wait", "Wait at each note until you play it"
+		}},
 
 	{Group: "view", Keys: "+ / -", Desc: "Zoom the tab in / out (or the wheel over it)"},
 
 	{Group: "session", Keys: "S", Hint: "S settings", Desc: "Settings, without leaving the piece",
-		Enabled: func(a *App) bool { return a.settings != nil }},
+		Enabled: func(a *App) bool { return a.settings != nil },
+		Reword: func(a *App) (string, string) {
+			if a.settings == nil {
+				return "S settings", "Settings, without leaving the piece (needs the full app — start guitarTutor without a file)"
+			}
+			return "S settings", "Settings, without leaving the piece"
+		}},
 	{Group: "session", Keys: "F5", Desc: "Re-open this piece, picking up changed settings",
 		Enabled: func(a *App) bool { return a.reload != nil }},
 	{Group: "session", Keys: "? or F1", Hint: "? help", Desc: "This key-binding list"},
@@ -888,7 +943,12 @@ func (a *App) helpRows() []helpBinding {
 		if b.Reword != nil {
 			hint, desc = b.Reword(a)
 		}
-		out[i] = helpBinding{Group: b.Group, Keys: b.Keys, Hint: hint, Desc: desc, Off: !b.enabled(a)}
+		off := !b.enabled(a)
+		// An off row whose Reword names its remedy has already explained
+		// itself (the contract on the Reword field), so the overlay skips
+		// its generic unavailability stamp.
+		out[i] = helpBinding{Group: b.Group, Keys: b.Keys, Hint: hint, Desc: desc,
+			Off: off, Explained: off && b.Reword != nil}
 	}
 	return out
 }
@@ -975,23 +1035,7 @@ func (a *App) drawTab(screen *ebiten.Image) {
 				if n.Tech&score.TechDead != 0 {
 					label = "x"
 				}
-				// Sounding/inferred are the base; a verdict tints
-				// over them once the playhead has reached the
-				// note (latest wins — loops re-judge each pass);
-				// an active wait point pulses over all.
-				col := colNote
-				if n.Inferred {
-					col = colInferred
-				}
-				if float64(beat.Start) <= pos && pos < float64(beat.Start+beat.Dur) {
-					col = colSounding
-				}
-				if v, ok := a.verdictAt(beat.Start, n.String, posTick); ok {
-					col = verdictColor(v)
-				}
-				if waiting[noteKey{beat.Start, n.String}] {
-					col = a.pulseCol()
-				}
+				col, sounding := a.noteCue(beat.Start, beat.Dur, n.String, n.Inferred, pos, posTick, waiting)
 				// Blank out the string line behind the number. Fret
 				// numbers are mono so a 12 reads as wide as two 1s and
 				// chord columns stay aligned; the box is the measured
@@ -999,6 +1043,9 @@ func (a *App) drawTab(screen *ebiten.Image) {
 				w := float32(textWMono(label))
 				vector.DrawFilledRect(screen, nx-2, ny-9, w+4, 18, colNoteBG, false)
 				drawTextMono(screen, label, float64(nx), float64(ny)-9, col)
+				if sounding {
+					vector.DrawFilledRect(screen, nx-2, ny+9, w+4, 2, colSounding, false)
+				}
 			}
 		}
 	}
@@ -1012,6 +1059,32 @@ func (a *App) drawTab(screen *ebiten.Image) {
 	// Playhead.
 	vector.StrokeLine(screen, phX, tabTop-24, phX, float32(tabTop+(nStr-1)*stringGap+24), 2, colPlayhead, false)
 
+}
+
+// noteCue resolves the two independent cues a fret glyph carries: the
+// colour of the number itself — inferred base, a verdict tinting over it
+// once the playhead has reached the note (latest wins, loops re-judge each
+// pass), an active wait point pulsing over all — and whether the
+// "sounding now" underline is drawn beneath it.
+//
+// The sounding cue used to be one more colour in the same channel, which
+// failed twice over: colSounding and colClose are indistinguishable at
+// 13px, and the verdict branch won the fight, so from the second loop
+// pass on the note under the playhead wore last pass's green or red
+// instead of the you-are-here highlight. On its own channel the position
+// cue and the verdict coexist on every pass.
+func (a *App) noteCue(start, dur int64, str int, inferred bool, pos float64, posTick int64, waiting map[noteKey]bool) (col color.RGBA, sounding bool) {
+	col = colNote
+	if inferred {
+		col = colInferred
+	}
+	if v, ok := a.verdictAt(start, str, posTick); ok {
+		col = verdictColor(v)
+	}
+	if waiting[noteKey{start, str}] {
+		col = a.pulseCol()
+	}
+	return col, float64(start) <= pos && pos < float64(start+dur)
 }
 
 // drawHUD paints everything around the notation: the header, the
@@ -1070,8 +1143,14 @@ func (a *App) statusLine() string {
 	if in, _ := a.eng.CountingIn(); in {
 		state = "count-in"
 	}
-	s := fmt.Sprintf("%s     %.0f BPM  (x%.2f)     pass %d",
-		state, a.eng.EffectiveBPM(), a.eng.TempoScale(), a.eng.PassCount())
+	s := fmt.Sprintf("%s     %.0f BPM  (x%.2f)", state, a.eng.EffectiveBPM(), a.eng.TempoScale())
+	// The pass counter counts laps of a loop, so it only appears while a
+	// loop is armed; shown unconditionally it read "pass 0" for the whole
+	// of every straight-through session — a lap count for a race nobody
+	// was running.
+	if _, _, on := a.eng.Loop(); on {
+		s += fmt.Sprintf("     pass %d", a.eng.PassCount())
+	}
 	if a.live {
 		s += "     live"
 	}

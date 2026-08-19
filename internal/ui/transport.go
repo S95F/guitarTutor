@@ -74,6 +74,11 @@ const (
 	dragSeekTimeline
 	dragLoopA
 	dragLoopB
+	// dragLoopNew is the shift+drag that creates a loop in one gesture:
+	// the press anchors one edge and the drag carries the other. Without
+	// it a mouse user needed three gestures — click LOOP, drag A, drag B
+	// — for one intent.
+	dragLoopNew
 )
 
 // A practiceChip is one toggle in the transport row. The table drives the
@@ -90,6 +95,12 @@ type practiceChip struct {
 	// disabled reports whether the chip cannot be used right now. nil
 	// means always usable.
 	disabled func(a *App) bool
+	// whenOff is the transient line a click on the disabled chip posts.
+	// The click is still swallowed — nothing behind the chip may take it
+	// — but a greyed control that swallows it in silence reads as broken,
+	// while a sentence naming what would enable it turns the dead click
+	// into the answer.
+	whenOff string
 	// act is what a click does.
 	act func(a *App)
 }
@@ -112,6 +123,7 @@ var practiceChips = []practiceChip{
 	{label: "WAIT", key: "W",
 		on:       func(a *App) bool { return a.wait },
 		disabled: func(a *App) bool { return !a.waitCtl },
+		whenOff:  "wait mode needs live input — choose your capture device in settings (S)",
 		act:      func(a *App) { a.toggleWait() }},
 	{label: "TUNER", key: "T",
 		on:  func(a *App) bool { return a.tunerView },
@@ -120,6 +132,7 @@ var practiceChips = []practiceChip{
 		act: func(a *App) { a.openBPMEntry() }},
 	{label: "SETTINGS", key: "S",
 		disabled: func(a *App) bool { return a.settings == nil },
+		whenOff:  "settings need the full app — start guitarTutor without a file",
 		act:      func(a *App) { a.openSettings() }},
 	{label: "HELP", key: "?",
 		on:  func(a *App) bool { return a.helpOpen },
@@ -451,12 +464,18 @@ func (a *App) handleMouse(p pointer, shift bool) {
 		return
 	}
 	// Loop edges are tested before the surfaces they sit on, so grabbing
-	// an edge never reads as a seek to the tick under it.
+	// an edge never reads as a seek to the tick under it — and before the
+	// new-loop gesture, so shift+dragging an existing edge still means
+	// tick-exact resizing rather than a second loop.
 	switch {
 	case p.over(l.loopA) || p.over(l.tlLoopA):
 		a.drag = dragLoopA
 	case p.over(l.loopB) || p.over(l.tlLoopB):
 		a.drag = dragLoopB
+	case shift && p.over(l.timeline):
+		a.beginLoopDraw(a.timelineTick(l.timeline, p.x), p.x)
+	case shift && p.over(l.tab) && !a.tunerView:
+		a.beginLoopDraw(a.tickAtX(p.x), p.x)
 	case p.over(l.timeline):
 		a.drag = dragSeekTimeline
 		a.continueDrag(p, shift)
@@ -464,6 +483,65 @@ func (a *App) handleMouse(p pointer, shift bool) {
 		a.drag = dragSeekTab
 		a.continueDrag(p, shift)
 	}
+}
+
+// beginLoopDraw starts the shift+drag gesture that creates a loop. The
+// press itself only anchors and seeks: committing a loop is deferred until
+// the pointer has travelled loopDrawSlop, so a shift-press that never
+// really moves stays the plain seek it would have been without shift —
+// nobody is punished for a modifier held a moment too long. The seek
+// happens up front, exactly as an unshifted press would, which also parks
+// the playhead at the section about to be looped.
+func (a *App) beginLoopDraw(tick int64, x float64) {
+	a.drag = dragLoopNew
+	a.loopDrawTick, a.loopDrawX, a.loopDrawing = tick, x, false
+	a.seekTo(tick)
+}
+
+// loopDrawSlop is how far the pointer must travel before a shift+drag
+// means "draw a loop" rather than "seek". A few pixels of hand tremor on
+// a click must not leave a surprise loop behind.
+const loopDrawSlop = 4.0
+
+// continueLoopDraw advances the new-loop gesture: the loop runs from the
+// anchored press tick to the tick under the pointer, both snapped to
+// beats. Unlike an edge drag — where shift releases the snap — this whole
+// gesture rides on shift, so it cannot also mean tick-exact; drawing is
+// coarse placement, and the edges can be refined afterwards. The loop is
+// never shorter than a beat, so it appears the moment the slop is crossed
+// instead of waiting for the drag to span a beat boundary.
+func (a *App) continueLoopDraw(p pointer) {
+	if !a.loopDrawing && math.Abs(p.x-a.loopDrawX) <= loopDrawSlop {
+		return
+	}
+	a.loopDrawing = true
+	l := a.layout()
+	cur := a.tickAtX(p.x)
+	if p.over(l.timeline) {
+		cur = a.timelineTick(l.timeline, p.x)
+	}
+	lo, hi := a.loopDrawTick, cur
+	if hi < lo {
+		lo, hi = hi, lo
+	}
+	// snapToBeat only answers with bar and beat starts, so both edges land
+	// inside the piece; all that is left to guard is the two collapsing
+	// onto one tick, which the engine would read as "no loop".
+	lo, hi = a.snapToBeat(lo), a.snapToBeat(hi)
+	minLen := a.beatLenAt(lo)
+	if hi < lo+minLen {
+		hi = lo + minLen
+	}
+	if e := a.pieceEnd(); hi > e {
+		hi = e
+		if lo > hi-minLen {
+			lo = hi - minLen
+			if lo < 0 {
+				lo = 0
+			}
+		}
+	}
+	a.eng.SetLoop(lo, hi)
 }
 
 // hitChrome dispatches a press against the buttons, chips and track
@@ -481,8 +559,15 @@ func (a *App) hitChrome(p pointer, l practiceLayout) bool {
 		c := practiceChips[i]
 		if states[i].disabled {
 			// Still a hotspot: a disabled control must swallow the click
-			// rather than let it fall through to the tab behind it.
-			spots = append(spots, hotspot{r: l.chips[i]})
+			// rather than let it fall through to the tab behind it. But a
+			// swallowed click that says nothing reads as a broken chip, so
+			// it answers on the transient line with what would enable it.
+			msg := c.whenOff
+			spots = append(spots, hotspot{r: l.chips[i], on: func() {
+				if msg != "" {
+					a.setBPMMessage(msg)
+				}
+			}})
 			continue
 		}
 		spots = append(spots, hotspot{r: l.chips[i], on: func() { c.act(a) }})
@@ -507,6 +592,8 @@ func (a *App) continueDrag(p pointer, shift bool) {
 		a.seekTo(a.tickAtX(p.x))
 	case dragSeekTimeline:
 		a.seekTo(a.timelineTick(l.timeline, p.x))
+	case dragLoopNew:
+		a.continueLoopDraw(p)
 	case dragLoopA, dragLoopB:
 		// The edge follows whichever surface the gesture started over —
 		// the timeline when the cursor is on it, the tab otherwise — so a
@@ -560,7 +647,14 @@ func (a *App) moveLoopEdge(which dragTarget, tick int64) {
 // to a quarter note when the meter map has nothing to say.
 func (a *App) minLoopLen() int64 {
 	start, _, _ := a.eng.Loop()
-	if n := a.sc.Meters.At(start).BeatLen(); n > 0 {
+	return a.beatLenAt(start)
+}
+
+// beatLenAt is one beat of the meter at tick, with the quarter-note
+// fallback. It exists apart from minLoopLen because the new-loop drag
+// needs the answer before any loop exists to ask the engine about.
+func (a *App) beatLenAt(tick int64) int64 {
+	if n := a.sc.Meters.At(tick).BeatLen(); n > 0 {
 		return n
 	}
 	return score.PPQ
@@ -630,6 +724,18 @@ func (a *App) seekNextBar() {
 		return
 	}
 	a.eng.SeekTick(target)
+}
+
+// seekLastBar (the End key) jumps to the start of the final bar. The
+// ending of a piece is exactly where A/B loops get set, and with Home
+// bound and End not, reaching it meant arrowing through every bar — the
+// most expensive trip to the place practice most often starts.
+func (a *App) seekLastBar() {
+	bars := a.displayed().Bars
+	if len(bars) == 0 {
+		return
+	}
+	a.seekTo(bars[len(bars)-1].Start)
 }
 
 func (a *App) zoomIn() {
@@ -798,8 +904,19 @@ func (a *App) drawTimeline(dst *ebiten.Image, l practiceLayout, p pointer) {
 		vector.StrokeLine(dst, float32(p.x), float32(tl.y+tl.h), float32(p.x), float32(tl.y+tl.h+4), 1, colDim, false)
 	}
 	drawTextMono(dst, a.positionCaption(), uiPadX, a.captionY(), colHUD)
-	drawTextSmall(dst, "click or drag to move   ·   drag the loop edges to resize",
-		screenW-uiPadX-textWSmall("click or drag to move   ·   drag the loop edges to resize"), a.captionY()+2, colBarline)
+	hint := a.timelineHint()
+	drawTextSmall(dst, hint, screenW-uiPadX-textWSmall(hint), a.captionY()+2, colBarline)
+}
+
+// timelineHint is the small teaching line above the timeline. It follows
+// the state because "drag the loop edges to resize" is a lie when no loop
+// has edges — and the moment before a loop exists is exactly when the
+// gesture that creates one needs teaching.
+func (a *App) timelineHint() string {
+	if _, _, on := a.eng.Loop(); on {
+		return "click or drag to move   ·   drag the loop edges to resize"
+	}
+	return "click or drag to move   ·   shift-drag to loop a section"
 }
 
 // positionCaption is the "where am I" line above the timeline: the bar
