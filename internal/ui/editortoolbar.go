@@ -476,7 +476,10 @@ func drawValueButton(dst *ebiten.Image, r rect, b edButton, av animValues) {
 	fill, edge, ink := colPanel, colPanelEdge, colHUD
 	switch {
 	case b.disabled:
-		fill, edge, ink = colBG, colBarline, colBarline
+		// colDisabled, not colBarline, for the same reason as the icon
+		// buttons: the piece row spends the whole text view disabled, and
+		// a rule colour is not readable ink.
+		fill, edge, ink = colBG, colBarline, colDisabled
 	case b.on:
 		fill, edge, ink = colOn, colOnEdge, colNote
 		fill = lerpCol(fill, colOnHover, av.hover)

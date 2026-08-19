@@ -119,6 +119,21 @@ func main() {
 		// first: opening a window to say "devcies is not a file" would be
 		// worse than saying it where the typo was made.
 		if err = checkPieceArgument(os.Args[1]); err == nil {
+			// Whatever follows the piece would be silently lost — the
+			// shell opens exactly one file. A flag means the play
+			// subcommand was meant, and refusing puts the diagnostic
+			// where the flag was typed; extra files mean a multi-select
+			// drop onto the executable, and there refusing would leave a
+			// vanishing console as the only witness, so the first file
+			// still opens and stderr names the rest for whoever can see
+			// it.
+			if len(os.Args) > 2 && strings.HasPrefix(os.Args[2], "-") {
+				err = fmt.Errorf("flags go with the play subcommand: guitartutor play %s %s", os.Args[2], os.Args[1])
+				break
+			}
+			if n := len(os.Args) - 2; n > 0 {
+				fmt.Fprintf(os.Stderr, "guitartutor: opening %s; %d more files were given — the window opens one piece at a time (drop the others onto it later)\n", os.Args[1], n)
+			}
 			err = runShell(os.Args[1])
 		}
 	}

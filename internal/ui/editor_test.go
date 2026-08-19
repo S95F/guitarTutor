@@ -1131,6 +1131,53 @@ func TestEditorTextViewSaveButtonKeepsBrokenTextOpen(t *testing.T) {
 	}
 }
 
+func TestEditorOpensBrokenTextForRepair(t *testing.T) {
+	// A library piece that will not parse has no score to build a
+	// document from; NewEditorForText is its way into the text view,
+	// which is the only place it can be repaired.
+	src := "\\tempo nope\n0.6.1 |\n"
+	path := filepath.Join(t.TempDir(), "broken.gtab")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEditorForText(nil, []byte(src), path)
+	if e.text == nil {
+		t.Fatal("the editor did not open in the text view")
+	}
+	if e.text.ok {
+		t.Fatal("the pane believes the broken fixture parses; the test proves nothing")
+	}
+	if e.path != path {
+		t.Errorf("the editor's save target is %q, want the broken file %q", e.path, path)
+	}
+	if got := e.text.text(); got != src {
+		t.Errorf("the pane holds %q, want the file's own text %q", got, src)
+	}
+
+	// Escape with nothing typed walks away instead of holding the user
+	// hostage to a parse error they did not make.
+	if err := e.escapeText(); err != errQuit {
+		t.Errorf("escape from the untouched broken text returned %v, want errQuit", err)
+	}
+	if e.text == nil {
+		t.Error("walking away must not pretend the text was applied")
+	}
+
+	// Fixing the text and saving writes the repair back to the same file.
+	e.text = newGtabPaneFromSource([]byte("\\tempo 100\n0.6.1 |\n"))
+	e.applyTextThen(func() { e.save() })
+	if e.text != nil {
+		t.Fatal("repaired text did not return to the notation")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the repaired file back: %v", err)
+	}
+	if !strings.Contains(string(b), "\\tempo 100") {
+		t.Errorf("the repaired file holds %q, want the fixed tempo in it", b)
+	}
+}
+
 func TestEditorGreyedControlsInTextModeSayWhy(t *testing.T) {
 	// "type a fret on this string first" is the grid's answer; while the
 	// text is showing there is no fret cell on screen to type into, and the
@@ -1221,6 +1268,14 @@ func TestEditorCapoChipShowsAndSetsTheCapo(t *testing.T) {
 	}
 	if e.entry.buf != "0" {
 		t.Errorf("the entry is seeded with %q, want the capo in force (0)", e.entry.buf)
+	}
+	// Typing replaces the seed rather than appending to it: with max 2,
+	// "12" over a seeded "0" used to become "01" and silently commit
+	// capo 1.
+	e.entry.typeRune('1')
+	e.entry.typeRune('2')
+	if e.entry.buf != "12" {
+		t.Fatalf("typing 1 2 over the seed leaves %q, want 12", e.entry.buf)
 	}
 	e.entry.buf = "2"
 	e.commitEntry()

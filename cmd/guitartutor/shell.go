@@ -65,17 +65,7 @@ func runShell(initialPath string) error {
 	// thing the application has to lend it is the save dialog and the
 	// recents list.
 	browser.SetNewPiece(func() { opener.showEditor(nil, "") })
-	browser.SetEditPiece(func(path string) {
-		sc, warns, err := load(path)
-		if err != nil {
-			browser.ShowError(fmt.Sprintf("cannot open %s for editing: %v", filepath.Base(path), err))
-			return
-		}
-		for _, w := range warns {
-			fmt.Fprintln(os.Stderr, "warning:", w)
-		}
-		opener.showEditor(sc, path)
-	})
+	browser.SetEditPiece(opener.editPiece)
 	// The command-line piece goes through the dialog mailbox rather than a
 	// path of its own: the browser already drains it on the game loop,
 	// already shows a failed load inline, and already records a successful
@@ -106,6 +96,50 @@ func (o *shellOpener) showEditor(sc *score.Score, path string) {
 		fmt.Fprintln(os.Stderr, "guitartutor: cannot edit that piece:", err)
 		return
 	}
+	o.installEditor(ed)
+}
+
+// showTextEditor opens the editor straight into its text view on raw
+// .gtab source — the entry for a file that will not parse and therefore
+// has no score to hand showEditor.
+func (o *shellOpener) showTextEditor(src []byte, path string) {
+	if o.shell == nil {
+		return
+	}
+	o.installEditor(ui.NewEditorForText(o.shell, src, path))
+}
+
+// editPiece opens a piece for editing — the action behind the browser's E
+// key, its Edit button, and Enter on a library entry that will not parse.
+func (o *shellOpener) editPiece(path string) {
+	sc, warns, err := load(path)
+	if err != nil {
+		// A .gtab that will not parse is the one file the editor's text
+		// view exists to repair — the browser sent it here for exactly
+		// that — so re-parsing and refusing would dead-end the only
+		// repair loop the app has. The raw text goes in instead, with
+		// the pane's own reparse showing the problem.
+		if strings.EqualFold(filepath.Ext(path), ".gtab") {
+			if src, rerr := os.ReadFile(path); rerr == nil {
+				o.showTextEditor(src, path)
+				return
+			}
+		}
+		if o.browser != nil {
+			o.browser.ShowError(fmt.Sprintf("cannot open %s for editing: %v", filepath.Base(path), err))
+		}
+		return
+	}
+	for _, w := range warns {
+		fmt.Fprintln(os.Stderr, "warning:", w)
+	}
+	o.showEditor(sc, path)
+}
+
+// installEditor lends the editor the only things the application has to
+// provide — the save dialog, the recents list, and a way to practise what
+// was written — and shows it.
+func (o *shellOpener) installEditor(ed *ui.Editor) {
 	// The save dialog blocks while the user browses, so it runs on its own
 	// goroutine and posts to the editor's mailbox — the same pattern the
 	// start screen and the settings screen use. The guard against two

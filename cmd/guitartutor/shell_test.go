@@ -604,3 +604,42 @@ func TestBytesPerFrameMatchesTheStreamFormat(t *testing.T) {
 		t.Errorf("the configured read-ahead reads back as %v, want %v", got, playerReadAhead)
 	}
 }
+
+// TestEditPieceOpensBrokenGtabInTheEditor: a library entry that will not
+// parse routes to editPiece with the promise that the editor's text view
+// is where it gets repaired. The promise used to be empty — editPiece
+// re-parsed the file and refused on the identical error — so the one
+// guard that matters is that a broken .gtab still pushes an editor.
+func TestEditPieceOpensBrokenGtabInTheEditor(t *testing.T) {
+	dir := t.TempDir()
+	broken := filepath.Join(dir, "broken.gtab")
+	if err := os.WriteFile(broken, []byte("\tempo nope\n0.6.1 |\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prefs := &shellPrefs{}
+	o := &shellOpener{prefs: prefs}
+	sh, browser := ui.NewBrowserShell(ui.Services{Opener: o, Prefs: prefs, Library: pieceLibrary{}})
+	o.shell, o.browser = sh, browser
+	t.Cleanup(o.CloseCurrent)
+
+	if got := sh.Depth(); got != 1 {
+		t.Fatalf("the fresh shell is %d deep, want 1 (the browser)", got)
+	}
+	o.editPiece(broken)
+	if err := sh.Update(); err != nil {
+		t.Fatalf("draining the shell: %v", err)
+	}
+	if got := sh.Depth(); got != 2 {
+		t.Fatalf("editPiece on a broken .gtab left the shell %d deep, want 2 — the editor never opened", got)
+	}
+
+	// A file that cannot even be read keeps the old refusal, on the
+	// browser rather than a pushed screen.
+	o.editPiece(filepath.Join(dir, "gone.gtab"))
+	if err := sh.Update(); err != nil {
+		t.Fatalf("draining the shell: %v", err)
+	}
+	if got := sh.Depth(); got != 2 {
+		t.Errorf("editPiece on a missing file changed the stack to %d deep, want it untouched at 2", got)
+	}
+}

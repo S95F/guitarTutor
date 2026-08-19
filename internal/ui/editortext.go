@@ -57,6 +57,12 @@ type gtabPane struct {
 	// is good news.
 	status string
 	ok     bool
+	// seed is the text the pane opened with when it was seeded from a
+	// FILE rather than rendered from the document — see
+	// newGtabPaneFromSource. Escape compares against it: unchanged
+	// broken text is someone else's problem the user only came to look
+	// at, and may be walked away from; edited text is theirs and is kept.
+	seed string
 	// bars and notes describe a text that parses, so the pane can say what
 	// it would produce rather than only that it is valid.
 	bars, notes int
@@ -68,6 +74,14 @@ func newGtabPane(doc *edit.Doc) (*gtabPane, error) {
 	if err != nil {
 		return nil, err
 	}
+	return newGtabPaneFromSource(src), nil
+}
+
+// newGtabPaneFromSource readies raw .gtab text for editing — including
+// text that does not parse, which is the whole reason the pane can be
+// seeded from a file rather than only from a document: a broken piece
+// has no document to render, and this pane is where it gets repaired.
+func newGtabPaneFromSource(src []byte) *gtabPane {
 	p := &gtabPane{}
 	for _, line := range strings.Split(strings.TrimRight(string(src), "\n"), "\n") {
 		p.lines = append(p.lines, []rune(line))
@@ -76,7 +90,8 @@ func newGtabPane(doc *edit.Doc) (*gtabPane, error) {
 		p.lines = [][]rune{{}}
 	}
 	p.reparse()
-	return p, nil
+	p.seed = p.text()
+	return p
 }
 
 // text is the pane's content as one string.
@@ -198,6 +213,25 @@ func (e *Editor) applyTextThen(act func()) {
 	act()
 }
 
+// escapeText is what Escape means in the text view: back to the grid
+// rather than out of the editor — the way out of the application is one
+// more Escape, and losing a screenful of typing to a mistaken keypress is
+// not a way out. Text that will not parse holds the view open with the
+// complaint — except when it is exactly the broken file this editor was
+// opened ON (see NewEditorForText) and nothing has been typed over it:
+// the user came to look, decided not to fix it today, and holding them
+// hostage to a parse error they did not make protects nothing.
+func (e *Editor) escapeText() error {
+	if e.applyText() {
+		e.text = nil
+		return nil
+	}
+	if e.text.seed != "" && e.text.text() == e.text.seed {
+		return e.leave()
+	}
+	return nil
+}
+
 // updateText runs the text view for one frame.
 func (e *Editor) updateText() error {
 	if err := e.textKeys(); err != nil {
@@ -247,13 +281,7 @@ func (e *Editor) textKeys() error {
 		return nil
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyEscape) {
-		// Escape leaves the text view for the grid rather than the editor:
-		// the way out of the application is one more Escape, and losing a
-		// screenful of typing to a mistaken keypress is not a way out.
-		if e.applyText() {
-			e.text = nil
-		}
-		return nil
+		return e.escapeText()
 	}
 
 	changed := false

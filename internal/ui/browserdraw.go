@@ -399,8 +399,14 @@ func (b *Browser) drawStatus(screen *ebiten.Image, l browserLayout) {
 		// The warnings can still be on screen minutes after the open,
 		// when the user comes back from practising; without the piece's
 		// name over them they are orphaned text about nothing in
-		// particular.
-		drawText(screen, truncateW(b.warnsFrom+" opened with warnings:", width), uiPadX, y, colClose)
+		// particular. An open can also fail WITH warnings (the importer
+		// read enough to complain before the error), and then the piece
+		// did not open, so the heading must not say it did.
+		head := b.warnsFrom + " opened with warnings:"
+		if b.errMsg != "" {
+			head = "warnings from " + b.warnsFrom + ":"
+		}
+		drawText(screen, truncateW(head, width), uiPadX, y, colClose)
 		y += 18
 	}
 	for i, w := range b.warns {

@@ -745,7 +745,7 @@ func TestShiftDragDrawsALoopOnTheTab(t *testing.T) {
 	a := newApp(t, 8)
 	tab := a.layout().tab
 	y := tab.y + tab.h/2
-	a.handleMouse(pointer{x: screenW*playheadX + 200, y: y, down: true, pressed: true}, true)
+	a.handleMouse(pointer{x: screenW*playheadX + 400, y: y, down: true, pressed: true}, true)
 	if a.drag != dragLoopNew {
 		t.Fatalf("a shift-press on the tab started %v, want dragLoopNew", a.drag)
 	}
@@ -756,6 +756,14 @@ func TestShiftDragDrawsALoopOnTheTab(t *testing.T) {
 	}
 	if la >= lb || la%960 != 0 || lb%960 != 0 {
 		t.Errorf("loop [%d, %d) is not snapped to beats", la, lb)
+	}
+	// The span must be the pixels DRAGGED, not the pointer's distance
+	// from the playhead column: the press's own seek recentres the tab,
+	// and measuring through the recentered view used to add the whole
+	// press-to-column distance (400px here) to the loop.
+	dragged := int64(100 / a.pxPerTick())
+	if got := lb - la; got > dragged+2*960 {
+		t.Errorf("a 100px drag drew a %d-tick loop, want about %d (± a beat of snap)", got, dragged)
 	}
 
 	// The tuner replaces the tab, so the gesture must not reach the

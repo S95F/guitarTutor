@@ -563,7 +563,19 @@ func (a *App) drawTuner(screen *ebiten.Image) {
 // drawn smaller to stay inside the window.
 func (a *App) tunerIdleLine() (string, float64) {
 	if !a.live {
-		return "no live input — choose your interface in settings to use the tuner", 2
+		return "no live input — " + a.liveRemedy(), 2
 	}
 	return "listening...", 3
+}
+
+// liveRemedy names the step that would turn live input on from where the
+// user is standing. Naming the settings screen is only honest when one is
+// wired behind S; a window started as `guitartutor play <file>` has no
+// settings at all, and pointing its user at a greyed chip would send them
+// in a circle.
+func (a *App) liveRemedy() string {
+	if a.settings != nil {
+		return "choose your capture device in settings (S)"
+	}
+	return "quit and re-run with: guitartutor play -listen <file>"
 }

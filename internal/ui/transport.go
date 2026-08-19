@@ -99,8 +99,9 @@ type practiceChip struct {
 	// The click is still swallowed — nothing behind the chip may take it
 	// — but a greyed control that swallows it in silence reads as broken,
 	// while a sentence naming what would enable it turns the dead click
-	// into the answer.
-	whenOff string
+	// into the answer. A func, because the right remedy depends on how
+	// the window was started (see liveRemedy).
+	whenOff func(a *App) string
 	// act is what a click does.
 	act func(a *App)
 }
@@ -123,7 +124,7 @@ var practiceChips = []practiceChip{
 	{label: "WAIT", key: "W",
 		on:       func(a *App) bool { return a.wait },
 		disabled: func(a *App) bool { return !a.waitCtl },
-		whenOff:  "wait mode needs live input — choose your capture device in settings (S)",
+		whenOff:  func(a *App) string { return "wait mode needs live input — " + a.liveRemedy() },
 		act:      func(a *App) { a.toggleWait() }},
 	{label: "TUNER", key: "T",
 		on:  func(a *App) bool { return a.tunerView },
@@ -132,7 +133,7 @@ var practiceChips = []practiceChip{
 		act: func(a *App) { a.openBPMEntry() }},
 	{label: "SETTINGS", key: "S",
 		disabled: func(a *App) bool { return a.settings == nil },
-		whenOff:  "settings need the full app — start guitarTutor without a file",
+		whenOff:  func(a *App) string { return "settings need the full app — start guitarTutor without a file" },
 		act:      func(a *App) { a.openSettings() }},
 	{label: "HELP", key: "?",
 		on:  func(a *App) bool { return a.helpOpen },
@@ -473,9 +474,9 @@ func (a *App) handleMouse(p pointer, shift bool) {
 	case p.over(l.loopB) || p.over(l.tlLoopB):
 		a.drag = dragLoopB
 	case shift && p.over(l.timeline):
-		a.beginLoopDraw(a.timelineTick(l.timeline, p.x), p.x)
+		a.beginLoopDraw(a.timelineTick(l.timeline, p.x), p.x, true)
 	case shift && p.over(l.tab) && !a.tunerView:
-		a.beginLoopDraw(a.tickAtX(p.x), p.x)
+		a.beginLoopDraw(a.tickAtX(p.x), p.x, false)
 	case p.over(l.timeline):
 		a.drag = dragSeekTimeline
 		a.continueDrag(p, shift)
@@ -492,9 +493,10 @@ func (a *App) handleMouse(p pointer, shift bool) {
 // nobody is punished for a modifier held a moment too long. The seek
 // happens up front, exactly as an unshifted press would, which also parks
 // the playhead at the section about to be looped.
-func (a *App) beginLoopDraw(tick int64, x float64) {
+func (a *App) beginLoopDraw(tick int64, x float64, onTimeline bool) {
 	a.drag = dragLoopNew
 	a.loopDrawTick, a.loopDrawX, a.loopDrawing = tick, x, false
+	a.loopDrawOnTimeline = onTimeline
 	a.seekTo(tick)
 }
 
@@ -515,10 +517,19 @@ func (a *App) continueLoopDraw(p pointer) {
 		return
 	}
 	a.loopDrawing = true
-	l := a.layout()
-	cur := a.tickAtX(p.x)
-	if p.over(l.timeline) {
-		cur = a.timelineTick(l.timeline, p.x)
+	// The whole drag stays in the coordinate system it was anchored in,
+	// the way dragSeekTimeline does. Two reasons: the pointer drifting a
+	// few pixels off its surface must not flip the loop to the other
+	// surface's very different scale mid-gesture — and on the tab the
+	// press's own seek recentres the view, so the pressed tick is no
+	// longer under the pressed pixel and tickAtX would measure from the
+	// playhead column instead of from the press. Press-relative pixels
+	// are immune to both.
+	var cur int64
+	if a.loopDrawOnTimeline {
+		cur = a.timelineTick(a.layout().timeline, p.x)
+	} else {
+		cur = a.loopDrawTick + int64(math.Round((p.x-a.loopDrawX)/a.pxPerTick()))
 	}
 	lo, hi := a.loopDrawTick, cur
 	if hi < lo {
@@ -562,10 +573,10 @@ func (a *App) hitChrome(p pointer, l practiceLayout) bool {
 			// rather than let it fall through to the tab behind it. But a
 			// swallowed click that says nothing reads as a broken chip, so
 			// it answers on the transient line with what would enable it.
-			msg := c.whenOff
+			whenOff := c.whenOff
 			spots = append(spots, hotspot{r: l.chips[i], on: func() {
-				if msg != "" {
-					a.setBPMMessage(msg)
+				if whenOff != nil {
+					a.setBPMMessage(whenOff(a))
 				}
 			}})
 			continue

@@ -187,12 +187,18 @@ func TestLiveStatsLineEarnsItsPercentage(t *testing.T) {
 // drawn at.
 func TestTunerIdleLineIsHonest(t *testing.T) {
 	a := newApp(t, 1)
+	// Without a settings screen wired (a standalone play window) the
+	// remedy must not point at the greyed settings chip.
 	s, scale := a.tunerIdleLine()
-	if !strings.Contains(s, "settings") {
-		t.Errorf("with no live input the tuner says %q, want it to point at settings", s)
+	if strings.Contains(s, "settings") || !strings.Contains(s, "-listen") {
+		t.Errorf("with no live input and no settings screen the tuner says %q, want the command-line remedy", s)
 	}
 	if w := textWScaled(s, scale); w > screenW {
 		t.Errorf("the idle line is %.0f px wide at scale %v, past the %d px window", w, scale, screenW)
+	}
+	a.SetSettingsOpener(func() {})
+	if s, _ := a.tunerIdleLine(); !strings.Contains(s, "settings") {
+		t.Errorf("with settings wired the tuner says %q, want it to point at settings", s)
 	}
 
 	a.SetLiveStatus(func() (float64, int64) { return -20, 0 })

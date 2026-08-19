@@ -46,6 +46,12 @@ type edEntry struct {
 	hint   string
 	buf    string
 	max    int
+	// seeded marks buf as the value already in force rather than
+	// something the user typed. The first typed rune replaces it whole:
+	// nobody edits "0" into "12" by appending, and a seed that has to be
+	// backspaced away first turns every entry into three keystrokes of
+	// correction before the real one.
+	seeded bool
 	// allow reports whether a typed rune belongs in this entry, so a
 	// numeric field cannot be filled with letters.
 	allow func(r rune) bool
@@ -105,6 +111,22 @@ func (e *Editor) openEntry(kind edEntryKind) {
 			},
 		}
 	}
+	e.entry.seeded = true
+}
+
+// typeRune feeds one typed rune into the entry: the first one replaces a
+// seeded value whole (see edEntry.seeded), later ones append up to max.
+func (en *edEntry) typeRune(r rune) {
+	if !en.allow(r) {
+		return
+	}
+	if en.seeded {
+		en.buf, en.seeded = "", false
+	}
+	if len([]rune(en.buf)) >= en.max {
+		return
+	}
+	en.buf += string(r)
 }
 
 // parseMeterText reads "n/d".
@@ -126,15 +148,12 @@ func parseMeterText(s string) (num, den int, ok bool) {
 func (e *Editor) updateEntry() {
 	en := e.entry
 	for _, r := range ebiten.AppendInputChars(nil) {
-		if len([]rune(en.buf)) >= en.max || !en.allow(r) {
-			continue
-		}
-		en.buf += string(r)
+		en.typeRune(r)
 	}
 	switch {
 	case inpututil.IsKeyJustPressed(ebiten.KeyBackspace):
 		if r := []rune(en.buf); len(r) > 0 {
-			en.buf = string(r[:len(r)-1])
+			en.buf, en.seeded = string(r[:len(r)-1]), false
 		}
 	case inpututil.IsKeyJustPressed(ebiten.KeyEscape):
 		e.entry = nil

@@ -184,10 +184,14 @@ type App struct {
 	// loopDrawX anchor the press — the tick under it and the pixel it
 	// landed on — and loopDrawing latches once the pointer has travelled
 	// far enough that the gesture means "draw a loop" rather than the
-	// seek the same press performs without shift.
-	loopDrawTick int64
-	loopDrawX    float64
-	loopDrawing  bool
+	// seek the same press performs without shift. loopDrawOnTimeline
+	// remembers which surface anchored the gesture, because the two map
+	// pixels to ticks at very different scales and the drag must stay in
+	// the one it started in.
+	loopDrawTick       int64
+	loopDrawX          float64
+	loopDrawing        bool
+	loopDrawOnTimeline bool
 
 	// ph is the drawn playback position (playhead.go): the engine's, but
 	// carried smoothly between its once-per-block publishes.
@@ -896,7 +900,7 @@ var practiceBindings = []practiceBinding{
 	{Group: "practice", Keys: "T", Hint: "T tuner", Desc: "Tuner overlay",
 		Reword: func(a *App) (string, string) {
 			if !a.live {
-				return "T tuner", "Tuner overlay (needs live input — choose your interface in settings)"
+				return "T tuner", "Tuner overlay (needs live input — " + a.liveRemedy() + ")"
 			}
 			return "T tuner", "Tuner overlay"
 		}},
@@ -904,7 +908,7 @@ var practiceBindings = []practiceBinding{
 		Enabled: func(a *App) bool { return a.waitCtl },
 		Reword: func(a *App) (string, string) {
 			if !a.waitCtl {
-				return "W wait", "Wait at each note until you play it (needs live input — choose your interface in settings)"
+				return "W wait", "Wait at each note until you play it (needs live input — " + a.liveRemedy() + ")"
 			}
 			return "W wait", "Wait at each note until you play it"
 		}},

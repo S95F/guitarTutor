@@ -176,6 +176,22 @@ func NewEditorFor(sh *Shell, sc *score.Score, path string) (*Editor, error) {
 	return &Editor{sh: sh, doc: doc, path: path}, nil
 }
 
+// NewEditorForText opens the editor directly in its text view on raw
+// .gtab source — the way in for a file that will NOT parse, which has no
+// score to build a document from and whose only route to repair is the
+// text it already is. The pane's own reparse shows the problem; fixing
+// the text and leaving the view (or saving) takes the normal applyText
+// path. The document behind the pane is a blank piece nobody sees: the
+// grid only appears once the text parses into a real document.
+func NewEditorForText(sh *Shell, src []byte, path string) *Editor {
+	e := NewEditor(sh)
+	if strings.ToLower(filepath.Ext(path)) == ".gtab" {
+		e.path = path
+	}
+	e.text = newGtabPaneFromSource(src)
+	return e
+}
+
 // SetSaveDialog installs the integrator's save dialog. It is called with a
 // suggested file name, blocks while the user chooses, and must always
 // answer through OfferSavePath — with "" when the user cancels, so the
@@ -1512,10 +1528,30 @@ func (e *Editor) drainDialog() {
 	if strings.ToLower(filepath.Ext(path)) != ".gtab" {
 		path += ".gtab"
 	}
+	// The dialog floats while the editor stays interactive, so the text
+	// view can have been opened — and edited — since the save was asked
+	// for. Writing e.doc then would file a document the screen no longer
+	// shows; the answer must go through the same apply-first discipline
+	// as every other file action (see applyTextThen). Text that will not
+	// parse keeps its view open with the complaint and the save waits for
+	// another day, along with whatever it was for.
+	if e.text != nil {
+		if !e.applyText() {
+			e.practicePending = false
+			e.leaving = false
+			return
+		}
+		e.text = nil
+	}
 	saved := e.writeTo(path)
-	// A save asked for on the way out finishes the leaving.
+	// A save asked for on the way out finishes the leaving — and wins
+	// over a practice promised earlier: both can be armed against one
+	// dialog (shift+P asks, then Escape arms the leave), and the user's
+	// last word was "leave", so popping the editor AND pushing practice
+	// would navigate twice from one answer.
 	if saved && e.leaving {
 		e.leaving = false
+		e.practicePending = false
 		e.finishLeaving()
 	}
 	// And a save asked for by shift+P finishes with the practice it
