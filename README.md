@@ -3,7 +3,7 @@
 
 Plug in your electric guitar. Load a piece. Practice it properly.
 
-guitarTutor is an open-source guitar practice companion written in Go. You import a piece of music (or write one in a simple text format), and the app plays it back — synthesized from the score, with a metronome and scrolling tablature — while you play along on a real guitar plugged into your audio interface. Loop the hard bars, slow them down, and let the app ramp the tempo back up as you nail each pass. Later phases listen to your playing and tell you which notes you hit.
+guitarTutor is an open-source guitar practice companion written in Go. You import a piece of music (or write one in a simple text format), and the app plays it back — synthesized from the score, with a metronome and scrolling tablature — while you play along on a real guitar plugged into your audio interface. Loop the hard bars, slow them down, and let the app ramp the tempo back up as you nail each pass. It listens to your playing and tells you which notes you hit.
 
 > **Status: Phases 1–4 core work, pre-alpha.** The practice player is functional; the app can hear you (`play -listen`: live pitch detection, hit/close/miss on the tab, a tuner, wait mode); and it now opens **Guitar Pro 7/8 `.gp`** and **MusicXML** files directly and plays **backing tracks** (WAV/FLAC/MP3) pinned to score time. Chords are now scored by verifying each expected note against the strum's spectrum. The importers are built clean-room against the documented formats and validated on a self-authored corpus, and detection thresholds are tuned on synthesized audio — real Guitar-Pro/MuseScore exports and real guitar recordings are the remaining validation gaps, so files and bug reports are gold. The app shell (Phase 5) has since landed: run the binary bare and you get a start screen with recent pieces, opening through the system's own file dialog, drag-and-drop, and in-app settings for devices, latency calibration, SoundFont and count-in — the command line remains the fastest path for anyone who prefers it. See the [roadmap](ROADMAP.md) and [decisions](docs/DECISIONS.md).
 
@@ -16,21 +16,21 @@ guitarTutor aims to fill it with the practice loop every guitarist converges on:
 1. Pick a section of the piece.
 2. Loop it — gaplessly, or with a count-in before each pass.
 3. Slow it down — without pitch change, since playback is synthesized from the score.
-4. Ramp the tempo up automatically, pass by pass. Once the app can hear you (Phase 2), the ramp gates on accuracy instead of mere completion.
-5. (Phase 2) Get honest, forgiving feedback on which notes you actually played.
+4. Ramp the tempo up automatically, pass by pass. The app can hear you now; gating the ramp on accuracy instead of mere completion is next on the roadmap.
+5. Get honest, forgiving feedback on which notes you actually played.
 
 ## Planned features
 
-**Phase 1 — practice player (no microphone needed)**
+**Phase 1 — practice player, no microphone needed (landed)**
 
-- Import Standard MIDI Files, or write pieces in a small text tab format. (Until Guitar Pro import lands in Phase 3, get your songs in by exporting MIDI from Guitar Pro, TuxGuitar, or MuseScore — MIDI loses fingering data, so the app infers fingerings and marks them as inferred.)
+- Import Standard MIDI Files, or write pieces in a small text tab format. (MIDI loses fingering data, so the app infers fingerings and marks them as inferred.)
 - Synthesized playback with scrolling tablature and a playback cursor — a built-in plucked-string voice out of the box, or any SoundFont you supply (`-sf2`)
 - Sample-accurate A/B section looping, gapless or with optional count-in
 - Tempo scaling (percentage or fixed BPM) with an automatic per-pass speed ramp
 - Metronome (visual + audio), track mute/solo
 - Single-binary Windows build, pure Go
 
-**Phase 2 — the guitar plugs in**
+**Phase 2 — the guitar plugs in (landed)**
 
 - Live input from your audio interface (WASAPI, one duplex stream for input + playback)
 - Monophonic pitch detection tuned for guitar (riffs, lines, solos, bends)
@@ -63,7 +63,7 @@ guitarTutor aims to fill it with the practice loop every guitarist converges on:
 
 See the full [ROADMAP](ROADMAP.md) for phasing, acceptance criteria, and explicit non-goals.
 
-## How it will work
+## How it works
 
 ```mermaid
 flowchart LR
@@ -91,7 +91,7 @@ flowchart LR
 A few load-bearing design rules, distilled from research into why comparable apps succeed or fail (details in [docs/DECISIONS.md](docs/DECISIONS.md)):
 
 - **The score is tick-based** (PPQ 960 + tempo map, SMF semantics). Wall-clock time is always derived, never stored — this is what makes looping, tempo scaling, and scoring drift-free.
-- **One clock.** When live input arrives (Phase 2), capture and playback run in a single full-duplex audio callback so scoring timestamps and playback share a frame counter. That only truly holds when both run on the same physical interface — so the app steers you to plug headphones into the interface your guitar is plugged into, and treats split-device setups (which drift) as a case to detect, not ignore.
+- **One clock.** With live input, capture and playback run in a single full-duplex audio callback so scoring timestamps and playback share a frame counter. That only truly holds when both run on the same physical interface — so the app steers you to plug headphones into the interface your guitar is plugged into, and treats split-device setups (which drift) as a case to detect, not ignore.
 - **Synthesis is the primary playback path.** Tempo change is exact and free when the piece is rendered from the score; audio backing tracks are a secondary import.
 - **Scoring is forgiving and optional.** Detection latency has a physics floor (~25–50 ms at low E's 82.4 Hz); feedback is scored against timing windows, never marketed as instant. Nothing blocks your practice if detection misfires.
 - **Pure Go until it can't be.** Phase 1 builds with no C toolchain at all. cgo arrives with audio capture in Phase 2 — release builds require it from then on, but a pure-Go playback-only backend stays maintained for contributor and CI builds. ONNX (for ML pitch) remains optional behind a build tag.
@@ -119,7 +119,7 @@ Run it with no arguments — or double-click the binary — and it opens the sta
 
 **Tab** and the arrow keys move between the lists; the wheel scrolls whichever one the cursor is over. Under them are the four things the screen does — open a file (the system's own dialog, filtered to the formats it imports), write a new piece, edit the selected one, and settings. Drag-and-drop onto the window still works.
 
-A getting-started strip across the top tracks the two things that have to happen before the app can hear a guitar, and ticks them off against the real configuration rather than just listing them. Press **H** to put it away — for good; everything it points at is a row in settings.
+A getting-started strip across the top tracks three steps — choose your audio interface, measure the round trip, open (or write) a piece — and ticks each off against the real configuration rather than just listing them. Press **H** to put it away, and **H** again to bring it back; the choice is remembered, and everything it points at is a row in settings.
 
 ```bash
 ./guitartutor
@@ -135,7 +135,7 @@ Or go straight to a piece:
 
 Not everything you practise exists as a file. The start screen's **Write a new piece** button (or **N**) opens a tablature editor. The rhythm of writing a piece in it is three keys:
 
-- **0–24** types a fret onto the highlighted string (two digits within a moment make one number),
+- **0–30** types a fret onto the highlighted string (two digits within a moment make one number),
 - **↑ ↓** choose the string, **[** and **]** the note value,
 - **space** moves on to the next beat — and past the last bar, makes another, so writing never stops to ask for room.
 
