@@ -100,15 +100,6 @@ func TestAnimatorForgetsControlsThatStopBeingDrawn(t *testing.T) {
 	}
 }
 
-func TestAnimatorForget(t *testing.T) {
-	var a animator
-	step60(&a, "b", true, false, 5)
-	a.forget()
-	if len(a.states) != 0 {
-		t.Errorf("forget left %d controls", len(a.states))
-	}
-}
-
 func TestEaseArrivesAndDoesNotOvershoot(t *testing.T) {
 	// A dropped frame — or a window suspended for a minute — hands the
 	// easing a huge dt. It has to arrive, not fly past.

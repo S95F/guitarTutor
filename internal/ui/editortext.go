@@ -3,12 +3,15 @@ package ui
 // The raw .gtab view: the same piece, as the text that will be saved.
 //
 // It exists because the grid has controls for what a guitarist reaches for
-// most and the format has more than that — a capo, a General MIDI program,
-// an arbitrary tuning, a comment explaining a passage to yourself. Rather
-// than grow a control for each, F2 shows the file. Nothing here is a
-// second source of truth: switching in serialises the document, switching
-// out parses the text back into one, and a text that will not parse simply
-// does not switch — with the line and column the parser named.
+// most and the format has more than that — a General MIDI program, a
+// backing flag, an arbitrary tuning, a comment explaining a passage to
+// yourself. Rather than grow a control for each, F2 shows the file.
+// Nothing here is a second source of truth: switching in serialises the
+// document, switching out parses the text back into one, and a text that
+// will not parse simply does not switch — with the line and column the
+// parser named. The one other way in is a broken file from the library
+// (NewEditorForText), which opens straight into this view because the
+// text it already is happens to be the only form it has.
 //
 // The editing is deliberately small: a caret, insertion, deletion, and
 // movement. There is no selection and no clipboard, because Ebitengine
@@ -693,12 +696,21 @@ func itoa(n int) string {
 
 // textBindings is the control table while the text view is showing.
 func (e *Editor) textBindings() []helpBinding {
+	// In the ordinary F2 view, esc and F2 both read the text back to the
+	// staff. A broken file opened straight into this view has no staff
+	// to return to until the text parses, and esc there walks away from
+	// the piece instead (escapeText) — the row must say which contract
+	// is on screen.
+	back := helpBinding{Group: "session", Keys: "F2 or esc", Hint: "F2 back to the notation", Desc: "Read the text back and return to the staff"}
+	if e.text != nil && e.text.fromFile {
+		back.Desc = "F2 reads the repaired text onto the staff; esc leaves the piece while it will not parse"
+	}
 	return []helpBinding{
 		{Group: "editing", Keys: "type", Hint: "type to edit", Desc: "The text is the file that will be saved"},
 		{Group: "editing", Keys: "arrows / home / end", Desc: "Move the caret"},
 		{Group: "editing", Keys: "enter / backspace / del", Desc: "Split a line, and delete either way"},
 		{Group: "editing", Keys: "click", Desc: "Put the caret where you click"},
-		{Group: "session", Keys: "F2 or esc", Hint: "F2 back to the notation", Desc: "Read the text back and return to the staff"},
+		back,
 		{Group: "session", Keys: "ctrl+S", Hint: "ctrl+S save", Desc: "Parse the text and save the piece"},
 		// F1 alone: ? is a printable character in this view and just types
 		// itself, so advertising it here would be a lie.

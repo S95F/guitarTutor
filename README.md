@@ -145,7 +145,7 @@ The staff is labelled with your tuning down the left, note lengths are drawn as 
 
 Pieces are saved as `.gtab` — the small, git-diffable [text format](docs/TEXTFORMAT.md) — into the app's own pieces folder by default, where they show up in your library. **shift+P** saves and opens the piece for practice; **esc** comes back to the editing, so writing a bar, hearing it, and fixing it is a loop rather than a round trip.
 
-**F2** swaps the notation for the raw `.gtab` text, parsed as you type, with a legend beside it explaining every piece of the format — so the escape hatch does not require having read the format documentation first. That is where the parts of the format the toolbar has no button for live: a capo, a General MIDI program, an unusual tuning, a comment to yourself.
+**F2** swaps the notation for the raw `.gtab` text, parsed as you type, with a legend beside it explaining every piece of the format — so the escape hatch does not require having read the format documentation first. That is where the parts of the format the toolbar has no button for live: a General MIDI program, a backing-track flag, an unusual tuning, a comment to yourself.
 
 Bars stay exactly full, across every track at once — the editor refuses an edit that would overflow a bar rather than spilling it into the next one, and says what would not fit.
 

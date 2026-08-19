@@ -493,20 +493,3 @@ func TestPiecesDirIsUnderTheConfigDir(t *testing.T) {
 	}
 }
 
-func TestInPiecesDir(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv(EnvConfigDir, dir)
-	pieces := filepath.Join(dir, PiecesDirName)
-	if !InPiecesDir(filepath.Join(pieces, "mine.gtab")) {
-		t.Error("a file in the pieces folder is not recognised")
-	}
-	if InPiecesDir(filepath.Join(dir, "elsewhere.gtab")) {
-		t.Error("a file beside the folder is claimed as managed")
-	}
-	if InPiecesDir(filepath.Join(pieces, "sub", "deep.gtab")) {
-		t.Error("a file in a subfolder is claimed as managed")
-	}
-	if InPiecesDir("") {
-		t.Error("the empty path is claimed as managed")
-	}
-}

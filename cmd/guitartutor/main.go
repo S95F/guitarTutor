@@ -1,8 +1,13 @@
 // Command guitartutor is the guitarTutor practice application.
 //
-//	guitartutor play [flags] <file.gtab|file.mid>   open the practice view
-//	guitartutor render [flags] <file>               render the piece to a WAV
-//	guitartutor version                             print the version
+//	guitartutor <file>                    open a piece in the windowed shell
+//	guitartutor play [flags] <file>       open the practice view from the terminal
+//	guitartutor render [flags] <file>     render the piece to a WAV
+//	guitartutor devices                   list audio endpoints
+//	guitartutor calibrate [flags]         measure the round-trip latency
+//	guitartutor version                   print the version
+//
+// Pieces are .gtab, .mid, .gp, .musicxml, or .mxl files.
 //
 // A bare file argument — the invocation a double-clicked piece arrives
 // as — opens the windowed shell on that piece, so a file that will not
@@ -212,8 +217,7 @@ usage:
   guitartutor calibrate [flags]
   guitartutor version
 
-pieces: .gtab (text tab), .mid (MIDI), .gp (Guitar Pro 7/8),
-        .musicxml / .mxl (MusicXML)
+`+piecesLine+`
 
 play flags:
   -sf2 <path>     SoundFont for synthesis (default: built-in pluck)

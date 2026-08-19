@@ -127,11 +127,6 @@ func (a *animator) step(id string, hovered, down bool, dt float64) animValues {
 	return st.animValues
 }
 
-// forget drops every control's state. A screen that has changed what it
-// is showing entirely — a different piece, a different pane — calls it so
-// nothing inherits an animation from a control that no longer exists.
-func (a *animator) forget() { a.states = nil }
-
 // ease moves v toward target at rate per second, without overshooting for
 // any sane frame time. The clamp is what makes a dropped frame — or a
 // window that was suspended for a minute — arrive rather than fly past.

@@ -111,24 +111,6 @@ func silence(seconds float64) []float32 {
 	return make([]float32, int(seconds*testSR))
 }
 
-// mix sums signals sample-wise into a new buffer as long as the longest —
-// several strings sounding at once.
-func mix(sigs ...[]float32) []float32 {
-	n := 0
-	for _, s := range sigs {
-		if len(s) > n {
-			n = len(s)
-		}
-	}
-	out := make([]float32, n)
-	for _, s := range sigs {
-		for i, v := range s {
-			out[i] += v
-		}
-	}
-	return out
-}
-
 // scale returns x with every sample multiplied by g.
 func scale(x []float32, g float32) []float32 {
 	out := make([]float32, len(x))

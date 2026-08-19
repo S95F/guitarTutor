@@ -99,8 +99,9 @@ arc rather than `~`, a cross rather than `x` — because the letters below
 are the right way to write a file down and the wrong way to label a
 button.
 
-The format has more than the toolbar does: a capo, a General MIDI
-program, an arbitrary tuning, a comment explaining a passage to yourself.
+The format has more than the toolbar does: a General MIDI program,
+whether a track is backing, an arbitrary tuning, a comment explaining a
+passage to yourself.
 **F2** in the editor shows this text instead, parsed as you type, with a
 legend beside it covering everything on this page in one column. Neither
 view is the real one; both are the same piece.

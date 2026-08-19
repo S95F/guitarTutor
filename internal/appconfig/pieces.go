@@ -54,23 +54,6 @@ func EnsurePiecesDir() (string, error) {
 	return dir, nil
 }
 
-// InPiecesDir reports whether a path is a piece the application manages —
-// that is, a file sitting directly in the pieces directory. It is how a
-// screen tells "I wrote this" from "I opened this once", and it compares
-// the same way recents do, so Windows spelling and case do not split one
-// piece into two.
-func InPiecesDir(path string) bool {
-	dir, err := PiecesDir()
-	if err != nil {
-		return false
-	}
-	p := normalizeRecent(path)
-	if p == "" {
-		return false
-	}
-	return sameRecentPath(filepath.Dir(p), normalizeRecent(dir))
-}
-
 // AddCreated records a piece as the most recently written, exactly as
 // AddRecent records one as the most recently opened: an entry already in
 // the list moves to the front rather than being duplicated, and the list

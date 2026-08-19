@@ -766,9 +766,9 @@ func composeBanner(conds []string) string {
 
 // importSummary coalesces importer warnings into a banner-sized line:
 // the first warning spelled out, and a count for the rest. The full list
-// stays on the Open return value (and on stderr) — this is the headline,
-// raised where the user actually lands, because the browser's inline
-// list is behind them the moment the practice screen opens.
+// stays on the Open return value — this is the headline, raised where
+// the user actually lands, because the browser's inline list is behind
+// them the moment the practice screen opens.
 func importSummary(warns []string) string {
 	switch len(warns) {
 	case 0:

@@ -741,7 +741,11 @@ func (b *Browser) activate() {
 			b.editPiece(path)
 			return
 		}
-		b.errMsg = filepath.Base(e.path) + ": " + e.sub + "  (press E to fix it in the editor)"
+		// Reached only when editPiece is unwired: with it wired,
+		// editableSelection sent the entry to the editor above. So the
+		// line must not promise the E key — E is exactly as dead as
+		// Enter here.
+		b.errMsg = filepath.Base(e.path) + ": " + e.sub + "  (editing is not available in this build)"
 	default:
 		b.openPath(e.path)
 	}
