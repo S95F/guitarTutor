@@ -241,7 +241,7 @@ func (e *Editor) pieceButtons() []edButton {
 		// The capo sits beside the tuning it shifts. Without this chip a
 		// piece with a capo rendered exactly like one without, and putting
 		// one on meant knowing the text format's directive.
-		edButton{id: "capo", glyph: glyphNone, name: "Capo for this track",
+		edButton{id: "capo", glyph: glyphCapo, name: "Capo for this track",
 			label: e.capoLabel(), act: func() { e.openEntry(edEntryCapo) }},
 		edButton{id: "meter", glyph: glyphNone, name: "Time signature from this bar on", key: "shift+M",
 			label: fmt.Sprintf("%d/%d", e.doc.Bar().Num, e.doc.Bar().Den),

@@ -348,7 +348,7 @@ func shotPieces(dir string) []ui.PieceInfo {
 		{Path: filepath.Join(dir, "turnaround.gtab"), Name: "turnaround", Title: "Blues turnaround",
 			Summary: "12/8 · 76 BPM · 4 bars · 2 tracks"},
 		{Path: filepath.Join(dir, "dropd.gtab"), Name: "dropd", Title: "Drop D riff",
-			Summary: "4/4 · 148 BPM · 16 bars · altered tuning"},
+			Summary: "4/4 · 148 BPM · 16 bars · drop D"},
 		{Path: filepath.Join(dir, "etude.gtab"), Name: "etude", Title: "Etude no. 1",
 			Summary: "3/4 · 60 BPM · 24 bars · capo 2"},
 		{Path: filepath.Join(dir, "broken.gtab"), Name: "broken",
