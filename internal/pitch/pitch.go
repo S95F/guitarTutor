@@ -40,6 +40,25 @@ type Config struct {
 	// RMS is below it is unvoiced without any pitch analysis, and onsets
 	// never fire below it. 0 takes the default (-55 dBFS).
 	NoiseFloorDB float64
+	// OnsetDipDB enables the dip-recovery onset — the wind re-articulation
+	// trigger — and sets its arming depth: a hop whose RMS falls at least
+	// this many dB below the smoothed level opens a re-articulation
+	// candidate, and the onset fires when the level climbs back (see the
+	// onsetDip* tunables in detector.go). 0 is OFF, and off is the guitar
+	// default on purpose: a plucked string cannot re-articulate without a
+	// pick attack the level/flux triggers already see, so the dip path
+	// would only add a way for tremolo picking to double-trigger.
+	//
+	// The wind tuning (windOnsetDipDB via ConfigForKeys) is measured on
+	// the synthesized reed voice only and is provisional until real
+	// recordings exist (docs/TESTDATA.md, wind/articulation).
+	OnsetDipDB float64
+	// OnsetDipRecoverHops is the dip trigger's recovery window: hops after
+	// arming within which the level must climb back for the dip to count
+	// as a re-articulation rather than a release. 0 takes the default
+	// (8 hops ~ 80 ms at the default hop) when OnsetDipDB enables the
+	// path; ignored otherwise.
+	OnsetDipRecoverHops int
 	// Strums enables chroma accumulation and Strum emission (Phase 4
 	// chord verification). Off by default: it costs a spectral fold on
 	// every hop — not just the hops of a span, because the hop BEFORE an
@@ -78,18 +97,39 @@ func DefaultConfig(sampleRate int) Config {
 	}
 }
 
-// ConfigForKeys returns the defaults with the f0 search range fitted to an
-// instrument whose sounding compass is lowKey..highKey (MIDI): the floor a
-// whole tone under the lowest note, the ceiling a fourth over the highest
-// (players overshoot, and altissimo exists above every published range).
-// Fitting the range matters both ways: a floor far below the instrument
-// enlarges the subharmonic-error surface for nothing, and the guitar
-// default's 1500 Hz ceiling sits only three semitones over a soprano sax's
-// top E6 — anything higher would be forced unvoiced by the alias guard.
+// windOnsetDipDB is the dip-recovery arming depth ConfigForKeys enables.
+// Measured on the synthesized reed across eight hop-grid phases (see the
+// onsetDip* tunables in detector.go for the full table): the loudest
+// excursion any non-rearticulation wind gesture produced is 4.1 dB (a
+// slur with a 4 dB velocity drop), a 7 dB soft tongue stroke reaches
+// 5.3–6.4 dB, and full tongue gaps of 15 ms and up reach 7.3 dB and
+// beyond. 5 catches every stroke of 7 dB or deeper at every phase while
+// keeping ~1 dB over the slur; the 6 dB stroke is the edge (5/8 phases).
+// Provisional until real recordings exist (docs/TESTDATA.md,
+// wind/articulation).
+const windOnsetDipDB = 5
+
+// ConfigForKeys returns the defaults fitted to a wind instrument whose
+// sounding compass is lowKey..highKey (MIDI) — the per-instrument config
+// the live session and the wind round trip share.
+//
+// The f0 search range follows the compass: the floor a whole tone under
+// the lowest note, the ceiling a fourth over the highest (players
+// overshoot, and altissimo exists above every published range). Fitting
+// the range matters both ways: a floor far below the instrument enlarges
+// the subharmonic-error surface for nothing, and the guitar default's
+// 1500 Hz ceiling sits only three semitones over a soprano sax's top E6 —
+// anything higher would be forced unvoiced by the alias guard.
+//
+// It also arms the dip-recovery onset (windOnsetDipDB): winds re-articulate
+// by tonguing, a level dip-and-recover the guitar-tuned rise-only triggers
+// cannot see, and without it repeated same-pitch notes merge into one
+// detection and score a false Miss (docs/DECISIONS.md D5, D8).
 func ConfigForKeys(sampleRate, lowKey, highKey int) Config {
 	cfg := DefaultConfig(sampleRate)
 	cfg.MinHz = keyHz(lowKey - 2)
 	cfg.MaxHz = keyHz(highKey + 5)
+	cfg.OnsetDipDB = windOnsetDipDB
 	return cfg
 }
 
@@ -142,6 +182,12 @@ func (cfg Config) withDefaults() Config {
 	}
 	if cfg.NoiseFloorDB == 0 {
 		cfg.NoiseFloorDB = def.NoiseFloorDB
+	}
+	// OnsetDipDB is NOT defaulted: zero means the dip path is off, which
+	// is the guitar default. Its companion window only takes a value once
+	// something turned the path on.
+	if cfg.OnsetDipDB > 0 && cfg.OnsetDipRecoverHops <= 0 {
+		cfg.OnsetDipRecoverHops = defaultOnsetDipRecoverHops
 	}
 	if cfg.StrumWindowHops <= 0 {
 		cfg.StrumWindowHops = def.StrumWindowHops

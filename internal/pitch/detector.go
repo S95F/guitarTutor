@@ -114,6 +114,65 @@ const (
 	onsetFluxMaxHz = 2500
 )
 
+// Dip-recovery onset tunables. The two triggers above both look for a
+// RISE: the level trigger for an 8 dB jump in one hop, the flux trigger
+// for magnitude that is new since the previous hop. A wind player's
+// re-articulation provides neither. A tongue stroke occludes the reed for
+// tens of milliseconds — the level DIPS and recovers — and with the reed's
+// 90 ms release T60 the dip is partial, so the rise on the far side is far
+// below 8 dB, and a soft stroke recovers slowly enough that the flux stays
+// under its threshold too. Measured on the synthesized reed at the default
+// hop, sweeping the stroke across eight phases of the hop grid
+// (Config.OnsetDipDB gates the path; "excursion" is the arming variable —
+// smoothed level over hop RMS, in dB — at its worst-case phase):
+//
+//	tongue gap 15 ms   hop RMS dips ~11 dB below steady, excursion  7.3+
+//	tongue gap 25 ms   hop RMS dips ~13 dB,              excursion 10.8+
+//	tongue gap 40 ms   hop RMS dips ~23 dB,              excursion 15.9+
+//	soft stroke, 7 dB dip:                 excursion 5.3–6.4
+//	soft stroke, 6 dB dip over 40–60 ms:   excursion 4.6–5.4
+//	                                       (flux peaks at 0.162 — blind)
+//	slur with a 4 dB velocity drop:        excursion 3.1–4.1, never recovers
+//	gapless engine retrigger:              excursion ~4     (flux 0.32+)
+//	vibrato / slide, 3 s:                  excursion  0.3
+//
+// The full-gap rows are caught by flux today (a fresh reed attack is new
+// magnitude everywhere), but only by courtesy of the synth's phase-reset
+// attack; the soft-stroke rows are the documented gap (DECISIONS D8) and
+// nothing but the dip path sees them — at the wind tuning (windOnsetDipDB
+// 5) strokes of 7 dB and deeper fire at every phase, and the 6 dB stroke
+// is the threshold's visible edge (5 of 8 phases). The discriminator is
+// dip AND recover: arming alone also happens on releases and on slurred
+// velocity drops, and those simply never recover, so the candidate times
+// out without firing.
+const (
+	// onsetDipRecoverDB is how close (dB) to the pre-dip reference the
+	// level must climb back for the dip to count as a re-articulation.
+	// 3 dB under the reference admits the next note being tongued a shade
+	// softer; a velocity drop that STAYS down never gets there.
+	onsetDipRecoverDB = 3
+	// defaultOnsetDipRecoverHops is Config.OnsetDipRecoverHops's default:
+	// the hops after arming within which the recovery must land. Measured
+	// recovery times from arming: 3 hops at a 15 ms gap, 4 at 25 ms, 5 at
+	// 40 ms, 7 at 60 ms — and at 60 ms the recovering edge reaches 8.8 dB
+	// in one hop, so the plain level trigger takes over past that. 8
+	// covers the whole tongue-gap regime with one hop to spare, and stays
+	// short enough that a decrescendo-then-crescendo phrase (hundreds of
+	// milliseconds) cannot connect its two halves into a phantom onset.
+	defaultOnsetDipRecoverHops = 8
+	// onsetDipRefractorySeconds is the dip trigger's own refractory.
+	// Longer than the level trigger's (a dip-and-recover cycle spans
+	// several hops and must not fire twice), shorter than the flux
+	// trigger's: sixteenth-note tonguing at 140 bpm re-articulates every
+	// 107 ms, and the dip path exists precisely for repeated notes.
+	onsetDipRefractorySeconds = 0.10
+	// onsetDipFloorMult keeps the dip path from arming near silence: the
+	// smoothed reference must be at least this far (12 dB) above the noise
+	// floor, or the "dip" is just the floor's own wobble. Attacks out of
+	// silence belong to the level trigger.
+	onsetDipFloorMult = 4.0
+)
+
 // strumSkipHops is how many hops after the onset hop are dropped before
 // chroma accumulation starts. With Config.StrumWindowHops it sets the
 // Strum's latency: the span ends (strumSkipHops + StrumWindowHops) hops
@@ -188,6 +247,14 @@ type Detector struct {
 	prevHop     float64 // previous hop's RMS, for the rising-edge test
 	lastOnset   int64   // center stamp of the last onset
 
+	// Dip-recovery onset state; all zero unless Config.OnsetDipDB.
+	dipRatio        float64 // linear form of Config.OnsetDipDB; 0 = path off
+	dipRecoverRatio float64 // linear form of -onsetDipRecoverDB
+	dipRefractory   int64   // dip-trigger refractory period in samples
+	dipArmed        bool    // a dip candidate is open
+	dipRef          float64 // pre-dip smoothed level the recovery is judged against
+	dipHops         int     // hops since the candidate armed
+
 	// Spectral-flux onset state; only used when the spectrum is computed
 	// (needSpectrum), which is every ungated hop on the built-in path.
 	needSpectrum bool
@@ -237,6 +304,11 @@ func NewDetector(cfg Config) *Detector {
 		candLag:        make([]float64, 0, 64),
 		candVal:        make([]float64, 0, 64),
 		lastOnset:      math.MinInt64 / 2,
+	}
+	if cfg.OnsetDipDB > 0 {
+		d.dipRatio = math.Pow(10, cfg.OnsetDipDB/20)
+		d.dipRecoverRatio = math.Pow(10, -onsetDipRecoverDB/20.0)
+		d.dipRefractory = int64(onsetDipRefractorySeconds * float64(cfg.SampleRate))
 	}
 	d.tauMin = int(float64(cfg.SampleRate) / cfg.MaxHz)
 	if d.tauMin < 2 {
@@ -559,7 +631,7 @@ func (d *Detector) analyzeWindow() Frame {
 		flux = d.spectralFlux()
 	}
 
-	// Onset, two independent triggers sharing one refractory period:
+	// Onset, three independent triggers sharing one refractory stamp:
 	//
 	//   level — the hop's RMS jumps by onsetJumpDB over the smoothed
 	//   level (never compared against less than the noise floor, so
@@ -569,7 +641,12 @@ func (d *Detector) analyzeWindow() Frame {
 	//   flux — a large fraction of the hop's magnitude is NEW since the
 	//   previous hop. This catches the case the level trigger cannot see
 	//   at all: a chord change at constant loudness, where the smoothed
-	//   level was already raised by the chord that is still ringing.
+	//   level was already raised by the chord that is still sounding.
+	//
+	//   dip — the level DIPPED below the smoothed reference and climbed
+	//   back within the recovery window: a wind re-articulation, which
+	//   raises neither of the other two (Config.OnsetDipDB, and the
+	//   onsetDip* tunables' measured table). Off unless configured.
 	ref := d.smoothedHop
 	if ref < d.noiseFloor {
 		ref = d.noiseFloor
@@ -579,9 +656,47 @@ func (d *Detector) analyzeWindow() Frame {
 	fluxOnset := flux > onsetFluxThreshold && flux > onsetFluxRatio*d.smoothedFlux &&
 		hopRMS > d.noiseFloor*onsetFluxFloorMult &&
 		center-d.lastOnset >= d.fluxRefractory
-	if levelOnset || fluxOnset {
+	dipOnset := false
+	if d.dipRatio > 0 {
+		if d.dipArmed {
+			d.dipHops++
+			switch {
+			case hopRMS >= d.dipRef*d.dipRecoverRatio && hopRMS > d.prevHop &&
+				center-d.lastOnset >= d.dipRefractory:
+				// Recovered to within onsetDipRecoverDB of the pre-dip
+				// reference, on a rising edge: the new note is speaking.
+				// Fired HERE rather than at the dip's bottom, so the
+				// stamp lands at the re-articulated note's start — the
+				// moment scoring should align against — exactly as the
+				// other triggers stamp the hop that showed the attack.
+				dipOnset = true
+			case d.dipHops >= d.cfg.OnsetDipRecoverHops:
+				// Never recovered: a release, a rest, or a slurred
+				// velocity drop — not a tongue stroke. (A gap longer
+				// than the window can still re-arm below, against the
+				// decayed reference, and past ~60 ms the recovering
+				// edge is steep enough for the level trigger anyway.)
+				d.dipArmed = false
+			}
+		}
+		if !d.dipArmed && !dipOnset && hopRMS*d.dipRatio < d.smoothedHop &&
+			d.smoothedHop >= d.noiseFloor*onsetDipFloorMult {
+			// The hop fell OnsetDipDB below the smoothed level while that
+			// level was well above the floor: a re-articulation candidate.
+			// The smoothed level still lags the dip here (smoothing is
+			// slower than a tongue stroke), so it is the honest pre-dip
+			// reference for the recovery test.
+			d.dipArmed = true
+			d.dipRef = d.smoothedHop
+			d.dipHops = 0
+		}
+	}
+	if levelOnset || fluxOnset || dipOnset {
 		frame.Onset = true
 		d.lastOnset = center
+		// Whatever fired explains any dip in progress; leaving the
+		// candidate armed would let the same stroke fire twice.
+		d.dipArmed = false
 		if d.chroma != nil {
 			d.beginStrum(center)
 		}
