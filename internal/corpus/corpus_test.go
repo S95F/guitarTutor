@@ -12,6 +12,37 @@ func TestDirLayout(t *testing.T) {
 	if got != want {
 		t.Errorf("Dir = %q, want %q", got, want)
 	}
+	// Nested categories are spelled with forward slashes; Dir must yield
+	// the platform's own separators (filepath.Join, never string concat),
+	// so wind/tones resolves on Windows too.
+	got = Dir("../..", WindTones)
+	want = filepath.Join("../..", "testdata", "real", "wind", "tones")
+	if got != want {
+		t.Errorf("Dir(WindTones) = %q, want %q", got, want)
+	}
+}
+
+// TestFilesNestedCategory: a category with a path separator lists exactly
+// like a flat one — the wind corpus is reached through the same two calls
+// every guitar test uses.
+func TestFilesNestedCategory(t *testing.T) {
+	root := t.TempDir()
+	dir := Dir(root, WindTones)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"c5.wav", "g#4-scoop.flac", "notes.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := Files(root, WindTones, ".wav", ".flac")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d files, want 2: %v", len(got), got)
+	}
 }
 
 func TestFilesFiltersByExtension(t *testing.T) {

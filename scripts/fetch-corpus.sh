@@ -11,6 +11,8 @@
 #   ./scripts/fetch-corpus.sh guitarset  # ~1.4 GB
 #   ./scripts/fetch-corpus.sh techs      # ~1.3 GB
 #   ./scripts/fetch-corpus.sh egfx       # ~431 MB
+#   ./scripts/fetch-corpus.sh wind       # nothing to download — scaffolds
+#                                        # the record-your-own wind layout
 #   ./scripts/fetch-corpus.sh list       # show what each target fetches
 set -euo pipefail
 
@@ -34,6 +36,11 @@ targets:
               chords, per-string MIDI truth (~1.3 GB). CC BY 4.0.
   egfx        EGFxSet clean tones: every fret, every string (~431 MB).
               CC BY 4.0.
+  wind        The wind corpus is record-your-own — no dataset we could
+              point at covers a mic'd sax with the app's own playback
+              bleeding in. Creates testdata/real/wind/{tones,
+              articulation,rooms} and prints the naming contract, so the
+              first take lands where internal/pitch's corpus test looks.
   list        Print the URLs each target would fetch and exit.
 
 Everything lands in testdata/real/ and is gitignored.
@@ -114,6 +121,26 @@ target_egfx() {
   echo "egfxset: $dest/annotated/egfxset (CC BY 4.0, cite it)"
 }
 
+target_wind() {
+  # Nothing is fetched: the wind categories exist for recordings only a
+  # developer's own room can produce (docs/TESTDATA.md "What to record"),
+  # so the target's whole job is to put the directories where
+  # internal/corpus looks and to restate the naming contract at the
+  # moment someone is about to save a file.
+  mkdir -p "$dest/wind/tones" "$dest/wind/articulation" "$dest/wind/rooms"
+  cat <<EOF
+wind: created (record your own — mono 48 kHz WAV, one file per case)
+  $dest/wind/tones          chromatic long tones (one per note) + one altissimo note
+  $dest/wind/articulation   tongued same-pitch repeats at two tempi, a slurred scale, a scoop
+  $dest/wind/rooms          takes with the app's own playback audible from speakers
+
+Name each file for its CONCERT (sounding) pitch — note name or MIDI key,
+then free description after "-": c5.wav, c5-mf-vibrato.wav,
+72-altissimo.wav. A sax player reads written pitch, so convert first:
+written D5 on a soprano sax = concert C5 = key 72.
+EOF
+}
+
 target_list() {
   cat <<'EOF'
 scores:
@@ -126,6 +153,8 @@ techs:
   https://zenodo.org/records/14963133 P1_techniques.zip, P1_chords.zip
 egfx:
   https://zenodo.org/records/7044411  Clean.zip
+wind:
+  (no URLs — record your own; creates testdata/real/wind/{tones,articulation,rooms})
 EOF
 }
 
@@ -136,6 +165,7 @@ for t in "$@"; do
     guitarset) target_guitarset ;;
     techs)     target_techs ;;
     egfx)      target_egfx ;;
+    wind)      target_wind ;;
     list)      target_list ;;
     -h|--help) usage ;;
     *) echo "unknown target: $t" >&2; usage; exit 2 ;;

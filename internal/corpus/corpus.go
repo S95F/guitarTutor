@@ -1,5 +1,6 @@
 // Package corpus locates the real-instrument test corpus: recorded guitar
-// audio, and score files exported by Guitar Pro and MuseScore themselves.
+// and wind audio, and score files exported by Guitar Pro and MuseScore
+// themselves.
 //
 // Everything musicTutor's audio and importer code is validated against
 // today is SYNTHESIZED — Karplus-Strong plucks for pitch, chroma and
@@ -45,13 +46,33 @@ const (
 	// exported by MuseScore, to validate the clean-room importers
 	// against what the real applications actually emit.
 	Scores Category = "scores"
+
+	// The wind categories nest under wind/ — every wind detection number
+	// today is synthesis-validated (the reed voice), and these are where
+	// the first real recordings land. Categories are written with forward
+	// slashes; Dir converts to the platform's separators.
+
+	// WindTones holds single sustained wind notes — one file per note,
+	// chromatic across the range — for pitch accuracy and octave-error
+	// tests, the wind counterpart of Notes.
+	WindTones Category = "wind/tones"
+	// WindArticulation holds tongued same-pitch repeats, slurred
+	// passages and scoops — the onset-gate and hysteresis hard cases,
+	// played with air instead of a pick.
+	WindArticulation Category = "wind/articulation"
+	// WindRooms holds takes recorded over a microphone with the app's
+	// own playback audible from speakers — the mic-bleed failure mode a
+	// DI'd guitar can never show.
+	WindRooms Category = "wind/rooms"
 )
 
 // Dir returns the absolute path of a corpus category, given the path from
 // the calling package back to the repository root (usually "../.." for an
-// internal package). It does not check existence.
+// internal package). It does not check existence. Categories may nest
+// ("wind/tones"), always spelled with forward slashes; FromSlash keeps
+// the result native on Windows.
 func Dir(repoRoot string, c Category) string {
-	return filepath.Join(repoRoot, filepath.FromSlash(Root), string(c))
+	return filepath.Join(repoRoot, filepath.FromSlash(Root), filepath.FromSlash(string(c)))
 }
 
 // Files lists the corpus files in a category with any of the given
