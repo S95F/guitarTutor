@@ -311,6 +311,13 @@ func (sd *xmlStaffDetails) tuning() (score.Tuning, bool, string) {
 		if !ok {
 			return nil, false, fmt.Sprintf("staff-tuning line %d has unrecognized tuning-step %q", t.Line, t.Step)
 		}
+		// An open string outside MIDI is not a tuning the model, the
+		// synth, or the text format can hold — internal/gpimport rejects
+		// the same shape — so the staff is refused wholesale like the
+		// malformed shapes above and the part keeps its current tuning.
+		if key < 0 || key > 127 {
+			return nil, false, fmt.Sprintf("staff-tuning line %d is MIDI key %d, outside 0-127", t.Line, key)
+		}
 		out[n-t.Line] = key // string s = n-L+1, index s-1 = n-L
 	}
 	return out, true, ""
@@ -338,23 +345,28 @@ type xmlNote struct {
 
 // tie reports the note's sound ties: stop (it continues an earlier note)
 // and start (a later note continues it). A mid-chain note carries both.
-// num is the tie's number attribute (0 when absent), which distinguishes
-// simultaneous tie chains that would otherwise be indistinguishable.
-func (n *xmlNote) tie() (stop, start bool, num int) {
+// stopNum and startNum are each side's own number attribute (0 when
+// absent), which distinguishes simultaneous tie chains. They are kept
+// apart because a chain can be renumbered mid-note — tie stop number=1
+// plus tie start number=2 — and sharing one number would register the
+// continuing chain under the stop's number, so the next stop never finds
+// it and degrades to a fresh attack.
+func (n *xmlNote) tie() (stop, start bool, stopNum, startNum int) {
 	for _, t := range n.Ties {
 		switch t.Type {
 		case "stop":
 			stop = true
+			if stopNum == 0 && t.Number > 0 {
+				stopNum = t.Number
+			}
 		case "start":
 			start = true
-		default:
-			continue
-		}
-		if num == 0 && t.Number > 0 {
-			num = t.Number
+			if startNum == 0 && t.Number > 0 {
+				startNum = t.Number
+			}
 		}
 	}
-	return stop, start, num
+	return stop, start, stopNum, startNum
 }
 
 // slurs returns the numbers of the slur arcs stopping and starting on this

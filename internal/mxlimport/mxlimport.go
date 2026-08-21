@@ -73,6 +73,7 @@ import (
 	"strings"
 
 	"github.com/S95F/musicTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score/textfmt"
 )
 
 // DefaultProgram is the General MIDI program assumed for parts with no
@@ -246,7 +247,14 @@ func rootName(data []byte) string {
 
 // run drives the import of a parsed document.
 func (im *importer) run(doc *xmlScorePartwise) (*score.Score, []string, error) {
-	s := &score.Score{Title: doc.title()}
+	// A title holding a line break or the "//" comment marker would import
+	// a piece the .gtab writer refuses to save; clean it like every other
+	// unrepresentable detail — degrade, and say so.
+	title, changed := textfmt.CleanLabel(doc.title())
+	if changed {
+		im.warnf("title %q holds text a saved .gtab cannot (a line break or \"//\"); imported as %q", doc.title(), title)
+	}
+	s := &score.Score{Title: title}
 	decls := map[string]*xmlScorePart{}
 	for i := range doc.PartList.ScoreParts {
 		sp := &doc.PartList.ScoreParts[i]

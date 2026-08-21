@@ -298,8 +298,12 @@ func TestFormatRefusesWhatItCannotWrite(t *testing.T) {
 		bar.AddBeat(score.Whole,
 			score.Note{String: 3, Fret: 0},
 			score.Note{String: 3, Fret: 2})
+		// score.Validate now rejects a duplicate string too (Format runs it
+		// first), so the refusal names the repeated string a beat earlier
+		// than the writer's own "played twice" guard. Either way Format
+		// refuses; assert on the string number, which both messages carry.
 		_, err := Format(sc)
-		if err == nil || !strings.Contains(err.Error(), "played twice") {
+		if err == nil || !strings.Contains(err.Error(), "string 3") {
 			t.Fatalf("got %v, want an error naming the repeated string", err)
 		}
 	})
@@ -444,5 +448,70 @@ func TestWriteFileOverwrites(t *testing.T) {
 	}
 	if len(got.Tracks) != 1 {
 		t.Errorf("got %d tracks, want 1: the overwrite left the previous piece behind", len(got.Tracks))
+	}
+}
+
+// TestFormatRefusesWindWrittenBelowC0: a beat token's pitch name is read
+// by tokScan.pitch, whose octave is unsigned — "C-1" parses in \tuning
+// but never in a beat. Every registry instrument's lowest written note
+// sits far above C0, so only a hand-built instrument reaches the floor;
+// it must be refused, not written as a file that cannot reopen.
+func TestFormatRefusesWindWrittenBelowC0(t *testing.T) {
+	low := &score.WindInstrument{Name: "subcontra test", LowSounding: 0, Span: 12, Transpose: 0, Program: 73}
+	sc := &score.Score{
+		Title:  "T",
+		Tempos: score.TempoMap{{Tick: 0, USPerQuarter: score.USPerQuarter(120)}},
+		Meters: score.MeterMap{{Tick: 0, Num: 4, Den: 4}},
+	}
+	tr := &score.Track{Wind: low, Program: low.Program}
+	sc.Tracks = append(sc.Tracks, tr)
+	bar := tr.AppendBar(4, 4)
+	bar.AddBeat(score.Whole, score.Note{String: 1, Fret: 0}) // written key 0: "C-1"
+	if err := sc.Validate(); err != nil {
+		t.Fatalf("the low-instrument piece should be model-valid: %v", err)
+	}
+	_, err := Format(sc)
+	if err == nil || !strings.Contains(err.Error(), "written pitch") {
+		t.Fatalf("got %v, want a refusal naming the written pitch", err)
+	}
+	// The boundary itself is writable: written C0 (key 12) round-trips...
+	// on an instrument the parser knows. This pins only the floor check.
+	tr.Wind = &score.WindInstrument{Name: "flute", LowSounding: 12, Span: 36, Transpose: 0, Program: 73}
+	src, err := Format(sc)
+	if err != nil {
+		t.Fatalf("written C0: %v, want it accepted", err)
+	}
+	if !strings.Contains(string(src), "C0") {
+		t.Errorf("output lacks the C0 spelling:\n%s", src)
+	}
+}
+
+// TestCleanLabel: the importer-facing label scrub matches exactly what
+// Format refuses — line breaks and the "//" comment marker — and trims
+// like the parser's restOfLine would on reload.
+func TestCleanLabel(t *testing.T) {
+	for _, tc := range []struct {
+		in, want string
+		changed  bool
+	}{
+		{"Song", "Song", false},
+		{"  Song  ", "Song", false}, // trim alone is not a change worth a warning
+		{"AC//DC", "AC/ /DC", true},
+		{"a///b", "a/ / /b", true},
+		{"line\r\nbreak", "line  break", true},
+		{"\n", "", true},
+		{"a / b", "a / b", false},
+	} {
+		got, changed := CleanLabel(tc.in)
+		if got != tc.want || changed != tc.changed {
+			t.Errorf("CleanLabel(%q) = %q, %v; want %q, %v", tc.in, got, changed, tc.want, tc.changed)
+		}
+	}
+	// Whatever comes out must be text Format accepts and Parse hands back.
+	for _, in := range []string{"AC//DC", "x//", "//x", "///", "a\rb//c\n"} {
+		got, _ := CleanLabel(in)
+		if strings.Contains(got, "//") || strings.ContainsAny(got, "\r\n") {
+			t.Errorf("CleanLabel(%q) = %q still holds refused text", in, got)
+		}
 	}
 }

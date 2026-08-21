@@ -163,6 +163,25 @@ func (s *Score) Validate() error {
 				if tr.Wind != nil && len(beat.Notes) > 1 {
 					return fmt.Errorf("track %d bar %d: %d notes in one beat; a %s plays one note at a time", ti, bi, len(beat.Notes), tr.Wind.Name)
 				}
+				// One string sounds once per beat. The editor enforces this
+				// as it types (SetFret replaces a note already on the
+				// string), the parser rejects "string N played twice", and
+				// textfmt.Format refuses to write such a beat — so a model
+				// that let it stand would be one every other layer already
+				// treats as impossible: score.Events keys its tie
+				// bookkeeping by string, and two notes on one string in one
+				// beat give it two answers.
+				var seen uint64 // bitset of strings seen; strings are 1..64 in practice
+				for _, n := range beat.Notes {
+					if n.String < 1 || n.String > 64 {
+						continue // out-of-range strings are caught below
+					}
+					bit := uint64(1) << uint(n.String-1)
+					if seen&bit != 0 {
+						return fmt.Errorf("track %d bar %d: string %d sounds twice in one beat", ti, bi, n.String)
+					}
+					seen |= bit
+				}
 				for _, n := range beat.Notes {
 					if tr.Wind != nil {
 						if n.String != 1 {

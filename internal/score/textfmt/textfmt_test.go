@@ -562,3 +562,151 @@ func TestNoBars(t *testing.T) {
 		})
 	}
 }
+
+// TestPendingDirectiveConflictRejected: the parser holds ONE pending
+// \tempo and one pending \time. Two of a kind at the same anchor are
+// last-wins (the map would replace a same-tick entry anyway), but when a
+// \track switch moves the anchor the two apply at different piece ticks —
+// keeping only the second silently erased the first from the piece (the
+// track-A-end \tempo 140 below simply vanished). That is now a loud,
+// positioned error.
+func TestPendingDirectiveConflictRejected(t *testing.T) {
+	for _, tc := range []struct {
+		name, src, want string
+	}{
+		{
+			name: "tempo across track switch",
+			src:  "0.6.1 |\n\\tempo 140\n\\track B\n\\tempo 100\n0.6.1 | 0.6.1 |",
+			want: `\tempo`,
+		},
+		{
+			name: "time across track switch",
+			src:  "0.6.1 |\n\\time 3/4\n\\track B\n\\time 4/4\n0.6.1 | 0.6.1 |",
+			want: `\time`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse([]byte(tc.src), "test")
+			if err == nil {
+				t.Fatal("conflicting pending directives parsed, want an error")
+			}
+			var pe *ParseError
+			if !errors.As(err, &pe) {
+				t.Fatalf("error type %T, want *ParseError (%v)", err, err)
+			}
+			if !strings.Contains(pe.Msg, "discard") || !strings.Contains(pe.Msg, tc.want) {
+				t.Errorf("error = %v, want it to name the discarded %s", pe, tc.want)
+			}
+		})
+	}
+
+	// Same anchor, no track switch: the second replaces the first, which
+	// is what the map would do with two same-tick entries anyway.
+	s := mustParse(t, "0.6.1 |\n\\tempo 140\n\\tempo 100\n0.6.1 |")
+	want := score.TempoMap{
+		{Tick: 0, USPerQuarter: score.USPerQuarter(120)},
+		{Tick: 3840, USPerQuarter: score.USPerQuarter(100)},
+	}
+	if len(s.Tempos) != len(want) {
+		t.Fatalf("tempo map = %v, want %v", s.Tempos, want)
+	}
+	for i, w := range want {
+		if s.Tempos[i] != w {
+			t.Errorf("tempo[%d] = %v, want %v", i, s.Tempos[i], w)
+		}
+	}
+}
+
+// TestEndAnchoredDirectiveRejected: a \tempo or \time whose anchor is the
+// very END of the piece changes nothing audible, and Format refuses to
+// write the entry (no bar starts there) — so accepting it parsed a piece
+// that could never be saved. Both spellings of the trap — flushed through
+// a shorter second track, and still pending at end of input — are now
+// loud, positioned errors.
+func TestEndAnchoredDirectiveRejected(t *testing.T) {
+	for _, tc := range []struct {
+		name, src, want string
+	}{
+		{
+			name: "tempo flushed by a track that ends at its anchor",
+			src:  "0.6.1 |\n\\tempo 140\n\\track B\n0.6.1 |",
+			want: `\tempo`,
+		},
+		{
+			name: "tempo still pending at end of input",
+			src:  "0.6.1 |\n\\tempo 140",
+			want: `\tempo`,
+		},
+		{
+			name: "time still pending at end of input",
+			src:  "0.6.1 |\n\\time 3/4",
+			want: `\time`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse([]byte(tc.src), "test")
+			if err == nil {
+				t.Fatal("end-anchored directive parsed, want an error")
+			}
+			var pe *ParseError
+			if !errors.As(err, &pe) {
+				t.Fatalf("error type %T, want *ParseError (%v)", err, err)
+			}
+			if !strings.Contains(pe.Msg, "end of the piece") || !strings.Contains(pe.Msg, tc.want) {
+				t.Errorf("error = %v, want it to name the end-anchored %s", pe, tc.want)
+			}
+			if pe.Line != 2 {
+				t.Errorf("error at line %d, want the directive's line 2", pe.Line)
+			}
+		})
+	}
+
+	// The flush itself is the fix's other half: a directive left pending
+	// at end of input whose anchor sits MID-piece (another track goes on
+	// past it) used to be dropped silently — authored text ignored in
+	// playback. It now lands at its anchor like any flushed directive.
+	s := mustParse(t, "0.6.1 | 0.6.1 |\n\\track B\n0.6.1 |\n\\tempo 90")
+	want := score.Tempo{Tick: 3840, USPerQuarter: score.USPerQuarter(90)}
+	found := false
+	for _, e := range s.Tempos {
+		if e == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("tempo map = %v, want the trailing \\tempo applied at its tick-3840 anchor", s.Tempos)
+	}
+}
+
+// TestBareCarriageReturnEndsLine: the scanner broke tokens and beats on a
+// bare "\r" everywhere EXCEPT restOfLine and args — so a classic-Mac file
+// (lines terminated by "\r" alone) ran its whole directive line into the
+// title, and a lone "\r" inside a \track line survived into Track.Name,
+// text Format refuses: a piece that parsed and could never be saved.
+func TestBareCarriageReturnEndsLine(t *testing.T) {
+	// A classic-Mac piece parses like its "\n" twin.
+	s := mustParse(t, "\\title Mac Piece\r\\tempo 100\r\\track Lead\r0.6.1 |\r")
+	if s.Title != "Mac Piece" {
+		t.Errorf("Title = %q, want the title line ended at the bare CR", s.Title)
+	}
+	if got := s.Tracks[0].Name; got != "Lead" {
+		t.Errorf("Name = %q, want %q", got, "Lead")
+	}
+	if got := s.Tempos[0].USPerQuarter; got != score.USPerQuarter(100) {
+		t.Errorf("tempo = %d, want 100 BPM applied", got)
+	}
+
+	// Whatever restOfLine now hands back can always be written again.
+	for _, src := range []string{
+		"\\title A\rB\n0.6.1 |",
+		"\\track A\r0.6.1 |\n",
+	} {
+		s, err := Parse([]byte(src), "test")
+		if err != nil {
+			continue // the CR-split remainder may well be a parse error
+		}
+		if _, err := Format(s); err != nil {
+			t.Errorf("Parse accepted %q but Format refused: %v", src, err)
+		}
+	}
+}

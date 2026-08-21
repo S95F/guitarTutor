@@ -15,10 +15,11 @@ package textfmt
 //   - a tempo change that does not land on a barline (SMF places them
 //     wherever it likes);
 //   - two notes on one string in the same beat;
-//   - a wind note whose WRITTEN pitch passes MIDI 127 — the sounding
-//     pitch fits, but a transposing instrument reads above what it
-//     sounds, and no note name reaches that high. (The importers drop
-//     such notes with a warning, so only a hand-built score can hold one.)
+//   - a wind note whose WRITTEN pitch leaves C0-G9 (MIDI 12-127) — a
+//     transposing instrument reads above what it sounds, and no note name
+//     a beat token can spell reaches past G9 or below C0. (The importers
+//     drop notes past 127 with a warning, and no registry instrument
+//     writes below C0, so only a hand-built score can hold either.)
 //   - a meter \time cannot spell — a numerator past 64, or a denominator
 //     that is not one of 1 2 4 8 16 32;
 //   - a title or track name holding a line break or "//", which would
@@ -369,8 +370,14 @@ func (w *writer) beat(bt *score.Beat) (string, error) {
 func (w *writer) noteToken(n score.Note) (string, error) {
 	if wind := w.tr.Wind; wind != nil {
 		written := wind.Written(w.tr.Pitch(n))
-		if written < 0 || written > 127 {
-			return "", fmt.Errorf("gtab: %s: the note's written pitch is MIDI key %d, which no note name can hold", w.ctx, written)
+		// The floor is C0 (key 12), not 0: a beat token's pitch is read by
+		// tokScan.pitch, whose octave is unsigned, so "C-1" — a spelling
+		// \tuning's parser accepts — would come back unreadable. No
+		// registry instrument writes below C0 (the lowest written note of
+		// any of them is key 58), so only a hand-built instrument can get
+		// here — refused rather than written as a file that cannot reopen.
+		if written < 12 || written > 127 {
+			return "", fmt.Errorf("gtab: %s: the note's written pitch is MIDI key %d, which a beat's note name cannot hold (C0-G9)", w.ctx, written)
 		}
 		s := pitchName(written)
 		if n.Tied {
@@ -519,6 +526,23 @@ func bpmString(usPerQuarter int64) (string, error) {
 	// float64 exactly, and the value came from one. Reported rather than
 	// silently approximated all the same.
 	return "", fmt.Errorf("gtab: tempo of %d microseconds per quarter cannot be written as a BPM that reads back exactly", usPerQuarter)
+}
+
+// CleanLabel rewrites arbitrary text — an imported title or track name —
+// into something \title and \track can hold: line breaks become spaces
+// and the "//" comment marker is broken with a space, the two shapes
+// Format refuses (see header and track). Surrounding whitespace is also
+// trimmed, silently, because the parser's restOfLine would hand exactly
+// the trimmed text back on reload. changed reports whether a refused
+// shape had to give, so an importer can warn; importers run their titles
+// and names through here so an imported piece can always be saved.
+func CleanLabel(s string) (string, bool) {
+	cleaned := strings.NewReplacer("\r", " ", "\n", " ").Replace(s)
+	for strings.Contains(cleaned, "//") {
+		cleaned = strings.ReplaceAll(cleaned, "//", "/ /")
+	}
+	changed := cleaned != s
+	return strings.TrimSpace(cleaned), changed
 }
 
 // sameTuning reports whether two tunings are identical, so the default

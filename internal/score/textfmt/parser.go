@@ -58,6 +58,12 @@ type parser struct {
 	pendingTempoTick int64    // piece tick where the pending \tempo takes effect
 	pendingMeter     *[2]int  // \time awaiting the next bar, as {num, den}
 	pendingMeterTick int64    // piece tick where the pending \time takes effect
+
+	// Source position of the last \tempo / \time directive per anchor
+	// tick, so the end-of-piece check in run can point at the directive
+	// that produced an unwritable entry rather than at end of input.
+	tempoDirPos map[int64]pos
+	meterDirPos map[int64]pos
 }
 
 // errAt builds a ParseError at position at.
@@ -108,13 +114,53 @@ func (p *parser) run() error {
 	if !p.sawBar {
 		return p.errAt(p.sc.pos(), "piece has no bars")
 	}
+	// A directive still pending at end of input takes effect at its anchor
+	// like any other — beginBar just never came around to flushing it.
+	// Dropping it instead would silently ignore authored text (a \tempo
+	// between two tracks' bars would vanish from playback).
+	if p.pendingMeter != nil {
+		p.score.Meters = insertMeter(p.score.Meters, score.Meter{Tick: p.pendingMeterTick, Num: p.pendingMeter[0], Den: p.pendingMeter[1]})
+		p.pendingMeter = nil
+	}
+	if p.pendingTempo != nil {
+		p.score.Tempos = insertTempo(p.score.Tempos, score.Tempo{Tick: p.pendingTempoTick, USPerQuarter: score.USPerQuarter(*p.pendingTempo)})
+		p.pendingTempo = nil
+	}
 	if err := p.checkMeterAlignment(); err != nil {
 		return err
+	}
+	// An entry anchored at the very END of the piece changes nothing a
+	// listener can hear (nothing sounds after it), and Format refuses to
+	// write it — no bar starts there, and directives only exist before
+	// bars — so accepting it would hand back a piece that can never be
+	// saved. Any entry short of the end sits on a bar start of whichever
+	// track reaches past it (all tracks share the meter map's barlines,
+	// which checkMeterAlignment just enforced), so this is the one gap.
+	end := p.score.End()
+	for _, e := range p.score.Tempos {
+		if e.Tick == end {
+			return p.errAt(p.dirPos(p.tempoDirPos, end), `this \tempo takes effect at the very end of the piece, where it changes nothing and cannot be saved; delete it or add the bars it applies to`)
+		}
+	}
+	for _, m := range p.score.Meters {
+		if m.Tick == end {
+			return p.errAt(p.dirPos(p.meterDirPos, end), `this \time takes effect at the very end of the piece, where it changes nothing and cannot be saved; delete it or add the bars it applies to`)
+		}
 	}
 	if err := p.score.Validate(); err != nil {
 		return p.errAt(p.sc.pos(), "internal: parsed score fails validation: %v", err)
 	}
 	return nil
+}
+
+// dirPos looks up the source position recorded for the directive anchored
+// at tick, falling back to the scanner's position (end of input) for the
+// entries no directive produced.
+func (p *parser) dirPos(m map[int64]pos, tick int64) pos {
+	if at, ok := m[tick]; ok {
+		return at
+	}
+	return p.sc.pos()
 }
 
 // ensureTrack returns the current track, materializing the default
@@ -534,8 +580,21 @@ func (p *parser) directive() error {
 		if perr != nil || !(bpm >= 1 && bpm <= 1000) {
 			return p.errAt(arg.pos, "invalid tempo %q (want BPM in 1-1000)", arg.text)
 		}
+		// A pending \tempo holds one directive. Two in a row at the SAME
+		// anchor are last-wins — the map replaces same-tick entries anyway,
+		// so nothing is lost — but when a \track switch moved the anchor
+		// the two apply at different piece ticks, and keeping only the
+		// second would silently erase the first from the piece.
+		tick := p.anchorTick()
+		if p.pendingTempo != nil && p.pendingTempoTick != tick {
+			return p.errAt(tp, `this \tempo would silently discard the \tempo written before the last \track, which takes effect at a different point in the piece; keep one, or move this one to where it should apply`)
+		}
 		p.pendingTempo = &bpm
-		p.pendingTempoTick = p.anchorTick()
+		p.pendingTempoTick = tick
+		if p.tempoDirPos == nil {
+			p.tempoDirPos = map[int64]pos{}
+		}
+		p.tempoDirPos[tick] = tp
 		return nil
 
 	case "time":
@@ -550,8 +609,18 @@ func (p *parser) directive() error {
 		if !ok {
 			return p.errAt(arg.pos, "invalid time signature %q (want n/d with d one of 1 2 4 8 16 32)", arg.text)
 		}
+		// Same pending-slot rule as \tempo above: replacing a \time that
+		// anchors at a different piece tick would silently lose it.
+		tick := p.anchorTick()
+		if p.pendingMeter != nil && p.pendingMeterTick != tick {
+			return p.errAt(tp, `this \time would silently discard the \time written before the last \track, which takes effect at a different point in the piece; keep one, or move this one to where it should apply`)
+		}
 		p.pendingMeter = &[2]int{num, den}
-		p.pendingMeterTick = p.anchorTick()
+		p.pendingMeterTick = tick
+		if p.meterDirPos == nil {
+			p.meterDirPos = map[int64]pos{}
+		}
+		p.meterDirPos[tick] = tp
 		return nil
 
 	case "track":

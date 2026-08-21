@@ -88,10 +88,13 @@ func (s *scanner) skipSpace() {
 	}
 }
 
-// skipInline advances past spaces and tabs without crossing a newline.
+// skipInline advances past spaces and tabs without crossing a line end.
+// A bare "\r" counts as a line end here, not inline space: classic Mac
+// files terminate lines with "\r" alone, and consuming it inline would
+// run a directive's argument list into the next line.
 func (s *scanner) skipInline() {
 	for !s.eof() {
-		if c := s.peek(); c == ' ' || c == '\t' || c == '\r' {
+		if c := s.peek(); c == ' ' || c == '\t' {
 			s.next()
 			continue
 		}
@@ -117,12 +120,13 @@ func (s *scanner) word() (string, pos) {
 }
 
 // args consumes the remaining whitespace-separated arguments on the
-// current line, stopping at a newline, a comment, or end of input.
+// current line, stopping at a line end ("\n" or a bare "\r"), a comment,
+// or end of input.
 func (s *scanner) args() []argument {
 	var out []argument
 	for {
 		s.skipInline()
-		if s.eof() || s.peek() == '\n' || s.atComment() {
+		if s.eof() || s.peek() == '\n' || s.peek() == '\r' || s.atComment() {
 			return out
 		}
 		p := s.pos()
@@ -139,10 +143,14 @@ func (s *scanner) args() []argument {
 }
 
 // restOfLine consumes to the end of the current line (or the start of a
-// comment) and returns the text with surrounding whitespace trimmed.
+// comment) and returns the text with surrounding whitespace trimmed. A
+// bare "\r" ends the line like "\n" does: it did in every other position
+// (word and args break on it), and letting one through here put a
+// carriage return INSIDE a title or track name — text Format refuses,
+// so the piece parsed and could never be saved.
 func (s *scanner) restOfLine() string {
 	start := s.i
-	for !s.eof() && s.peek() != '\n' && !s.atComment() {
+	for !s.eof() && s.peek() != '\n' && s.peek() != '\r' && !s.atComment() {
 		s.next()
 	}
 	return strings.TrimSpace(s.src[start:s.i])

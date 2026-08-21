@@ -8,6 +8,7 @@ import (
 
 	"github.com/S95F/musicTutor/internal/fretting"
 	"github.com/S95F/musicTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score/textfmt"
 )
 
 // overLong reports whether v file ticks would rescale past MaxTicks
@@ -51,6 +52,20 @@ type openTie struct {
 	num  int // <tie number>, 0 when absent
 	note *rawNote
 }
+
+// maxCapoFret is the highest capo fret accepted; real capos live in the
+// first handful of frets, so 12 is already generous. The bound matches
+// internal/gpimport's, and matters beyond plausibility: Track.Capo is
+// written to .gtab by \capo, which refuses anything past the format's
+// fret limit, so an unbounded capo imports a piece that can never save.
+const maxCapoFret = 12
+
+// maxImportFret is the highest fret an authored fingering may claim: 30
+// is the text format's fret ceiling (textfmt.MaxFret) and gpimport's
+// bound, and internal/fretting never infers past 24 — so a bigger
+// authored fret would import a note the .gtab writer must refuse, a
+// piece that plays but can never be saved.
+const maxImportFret = 30
 
 // maxOpenTies bounds how many unresolved tie starts are tracked at once.
 // Ties resolve by scanning that list, so leaving it unbounded would turn a
@@ -96,15 +111,16 @@ func resolveTie(open []openTie, key, str, num int, start int64) int {
 
 // usableFingering returns a note's authored <technical> string and fret.
 // authored reports whether the file stated one at all; usable reports
-// whether it can be honored — string and fret in range for the tuning AND
-// the pitch they derive inside MIDI 0-127, since Validate rejects the
-// score otherwise, so an absurd authored fret falls back to inference.
+// whether it can be honored — string in range for the tuning, fret within
+// the fret range the text format can write back (maxImportFret), AND the
+// pitch they derive inside MIDI 0-127, since Validate rejects the score
+// otherwise — so an absurd authored fret falls back to inference.
 func usableFingering(e *xmlNote, tuning score.Tuning, capo int) (str, fret int, authored, usable bool) {
 	s, f, ok := e.fingering()
 	if !ok {
 		return 0, 0, false, false
 	}
-	if s < 1 || s > len(tuning) || f < 0 {
+	if s < 1 || s > len(tuning) || f < 0 || f > maxImportFret {
 		return 0, 0, true, false
 	}
 	if k := tuning[s-1] + capo + f; k < 0 || k > 127 {
@@ -141,7 +157,13 @@ type partData struct {
 func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []int) (*partData, error) {
 	pd := &partData{index: pi, id: xp.ID, program: DefaultProgram, tuning: score.StandardTuning}
 	if decl != nil {
-		pd.name = decl.PartName
+		// A part name \track cannot hold (a line break, the "//" comment
+		// marker) would make the imported piece refuse to save.
+		name, changed := textfmt.CleanLabel(decl.PartName)
+		if changed {
+			im.warnf("part %d (%s): the part name holds text a saved .gtab cannot (a line break or \"//\"); imported as %q", pi+1, xp.ID, name)
+		}
+		pd.name = name
 		if p := decl.midiProgram(); p >= 0 {
 			pd.program = p
 			pd.hasProgram = true
@@ -272,8 +294,17 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 					} else if why != "" {
 						im.warnf("%s: %s; keeping the current tuning", label, why)
 					}
-					if sd.Capo != nil && *sd.Capo >= 0 {
-						pd.capo = *sd.Capo
+					if sd.Capo != nil {
+						if c := *sd.Capo; c >= 0 && c <= maxCapoFret {
+							pd.capo = c
+						} else {
+							// A wrong capo shifts every pitch on the track,
+							// so clamping nonsense to "no capo" is the
+							// least-wrong recovery — the same one gpimport
+							// applies: the authored frets stay intact.
+							im.warnf("%s: capo fret %d outside 0-%d; using no capo", label, c, maxCapoFret)
+							pd.capo = 0
+						}
 					}
 				}
 
@@ -350,6 +381,19 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 					continue
 				}
 				if e.Rest != nil {
+					// A slur endpoint authored on a rest still moves the
+					// arc state: dropping a stop here would leave the arc
+					// open and every later note in the part would import
+					// slurred. The rest covers no onset of its own, so
+					// slurInto is untouched — the next real onset re-reads
+					// the state as usual.
+					restStops, restStarts := e.slurs()
+					for _, num := range restStops {
+						delete(slurs, num)
+					}
+					for _, num := range restStarts {
+						slurs[num] = true
+					}
 					continue
 				}
 				if e.Pitch == nil {
@@ -414,14 +458,16 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 						badFing++
 					}
 				}
-				stop, tieStart, tieNum := e.tie()
+				stop, tieStart, stopNum, startNum := e.tie()
 				if stop {
-					if i := resolveTie(open, key, str, tieNum, start); i >= 0 {
+					if i := resolveTie(open, key, str, stopNum, start); i >= 0 {
 						open[i].note.end = end
 						if tieStart {
 							// The chain continues: the next link matches
-							// against this note's identity, not the first's.
-							open[i].str, open[i].num = str, tieNum
+							// against this note's identity — including the
+							// START side's number, which may differ from
+							// the stop's when the chain is renumbered.
+							open[i].str, open[i].num = str, startNum
 						} else {
 							open = append(open[:i], open[i+1:]...)
 						}
@@ -441,7 +487,7 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 					if len(open) >= maxOpenTies {
 						untracked++
 					} else {
-						open = append(open, openTie{key: key, str: str, num: tieNum, note: n})
+						open = append(open, openTie{key: key, str: str, num: startNum, note: n})
 					}
 				}
 			}

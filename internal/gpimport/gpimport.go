@@ -77,6 +77,7 @@ import (
 	"strings"
 
 	"github.com/S95F/musicTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score/textfmt"
 )
 
 // DefaultProgram is the General MIDI program assigned to imported
@@ -488,7 +489,14 @@ func (im *importer) run() (*score.Score, []string, error) {
 	if len(im.doc.MasterBars) == 0 {
 		return nil, im.warns, fmt.Errorf("no bars in file")
 	}
-	s := &score.Score{Title: im.doc.Score.Title}
+	// A title holding a line break or the "//" comment marker would import
+	// a piece the .gtab writer refuses to save; clean it like every other
+	// unrepresentable detail — degrade, and say so.
+	title, changed := textfmt.CleanLabel(im.doc.Score.Title)
+	if changed {
+		im.warnf("title %q holds text a saved .gtab cannot (a line break or \"//\"); imported as %q", im.doc.Score.Title, title)
+	}
+	s := &score.Score{Title: title}
 	meters, err := im.layoutBars()
 	if err != nil {
 		return nil, im.warns, err
@@ -772,7 +780,13 @@ type trackConv struct {
 // warning matches the track number in the file.
 func (im *importer) buildTrack(orig int, gt *gpTrack, role score.TrackRole) *score.Track {
 	tc := &trackConv{wind: im.classifyWind(orig, gt)}
-	tr := &score.Track{Name: gt.Name, Role: role}
+	// Like the title above: a name \track cannot hold would make the
+	// imported piece refuse to save.
+	name, changed := textfmt.CleanLabel(gt.Name)
+	if changed {
+		im.warnf("%s: the track name holds text a saved .gtab cannot (a line break or \"//\"); imported as %q", trackLabel(gt, orig), name)
+	}
+	tr := &score.Track{Name: name, Role: role}
 	if tc.wind != nil {
 		// One representation per family (Validate rejects a mix): a wind
 		// track carries its instrument and no strings, no capo. The
@@ -1248,6 +1262,12 @@ func (im *importer) beatNotes(orig, mi int, gbt *gpBeat, tc *trackConv) []score.
 	}
 	nStrings := len(tc.tuning)
 	var out []score.Note
+	// A string sounds once per beat: the same note id listed twice, or two
+	// note ids claiming one string, would import two attacks on one string
+	// at one tick — a beat score.Events mis-merges, textfmt.Format refuses
+	// to write, and no hand can play. Later duplicates are skipped with a
+	// warning; internal/mxlimport collapses the same shape.
+	seen := map[int]bool{}
 	for _, nid := range im.ids(gbt.Notes, fmt.Sprintf("beat %d <Notes>", gbt.ID)) {
 		gn := im.notes[nid]
 		if gn == nil {
@@ -1295,6 +1315,12 @@ func (im *importer) beatNotes(orig, mi int, gbt *gpBeat, tc *trackConv) []score.
 				orig+1, mi+1, str, *fret, k)
 			continue
 		}
+		if seen[str] {
+			im.warnf("track %d bar %d: beat %d sounds string %d twice; the duplicate note is skipped",
+				orig+1, mi+1, gbt.ID, str)
+			continue
+		}
+		seen[str] = true
 		out = append(out, score.Note{
 			String: str,
 			Fret:   *fret,

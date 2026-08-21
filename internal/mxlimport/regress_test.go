@@ -724,12 +724,21 @@ func TestNoRepeatMarkupIsSilent(t *testing.T) {
 // validation"); it must instead be dropped with a warning, like every
 // other unplayable note, and the sane notes must survive.
 func TestInferredFingeringPastMIDIRangeDropped(t *testing.T) {
+	// Round 2 note: the original vehicle was <capo>40</capo>, which the
+	// importer now clamps to "no capo" — so the extreme here is a LEGAL
+	// one-string tuning at G9 (127) under a +1 octave transposition. The
+	// heuristic happily frets the written G9 twelve frets up (sounding
+	// 139), and without the ceiling that one note fails the final
+	// Validate and kills the whole import.
 	m := `<attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time>` +
-		`<staff-details><capo>40</capo></staff-details></attributes>` +
-		// C6 (84): playable at string 6 fret 4 under the absurd capo.
-		`<note><pitch><step>C</step><octave>6</octave></pitch><duration>960</duration><voice>1</voice></note>` +
-		// G#9 (128): fret 24 on string 1 under capo 40 — sounds past MIDI 127.
-		`<note><pitch><step>G</step><alter>1</alter><octave>9</octave></pitch><duration>960</duration><voice>1</voice></note>`
+		`<transpose><diatonic>0</diatonic><chromatic>0</chromatic><octave-change>1</octave-change></transpose>` +
+		`<staff-details><staff-lines>1</staff-lines>` +
+		`<staff-tuning line="1"><tuning-step>G</tuning-step><tuning-octave>9</tuning-octave></staff-tuning>` +
+		`</staff-details></attributes>` +
+		// Written G8 (115) sounds 127: fret 0, the one playable pitch.
+		`<note><pitch><step>G</step><octave>8</octave></pitch><duration>960</duration><voice>1</voice></note>` +
+		// Written G9 (127) sounds 139: fret 12 on the G9 string — past MIDI 127.
+		`<note><pitch><step>G</step><octave>9</octave></pitch><duration>960</duration><voice>1</voice></note>`
 	s, warns, err := Import(wrap(m))
 	if err != nil {
 		t.Fatalf("Import: %v", err)
@@ -741,38 +750,48 @@ func TestInferredFingeringPastMIDIRangeDropped(t *testing.T) {
 		t.Errorf("warnings = %v, want exactly one about the out-of-MIDI note", warns)
 	}
 	evs := s.Events()
-	if len(evs) != 1 || evs[0].Key != 84 {
-		t.Fatalf("events = %+v, want only the playable C6 (key 84)", evs)
+	if len(evs) != 1 || evs[0].Key != 127 {
+		t.Fatalf("events = %+v, want only the playable sounding-127 note", evs)
 	}
 }
 
-// TestNegativeTuningPitchDropped: a <staff-tuning> with a negative octave
-// installs a below-zero open-string pitch, and a note fretted from it
-// derives a negative MIDI key. Before the fix Validate rejected the score
-// and the import failed; the unwritable note must be dropped with a
-// warning while a note whose derived pitch lands back inside 0-127 stays.
-func TestNegativeTuningPitchDropped(t *testing.T) {
-	m := `<attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time>` +
-		`<staff-details><staff-lines>1</staff-lines>` +
-		`<staff-tuning line="1"><tuning-step>C</tuning-step><tuning-octave>-3</tuning-octave></staff-tuning>` +
-		`</staff-details></attributes>` +
-		// C-2 (key -12): fret 12 on the -24 string — sounds below MIDI 0.
-		`<note><pitch><step>C</step><octave>-2</octave></pitch><duration>960</duration><voice>1</voice></note>` +
-		// C-1 (key 0): fret 24 — the one pitch this tuning can still write.
-		`<note><pitch><step>C</step><octave>-1</octave></pitch><duration>960</duration><voice>1</voice></note>`
-	s, warns, err := Import(wrap(m))
-	if err != nil {
-		t.Fatalf("Import: %v", err)
-	}
-	if err := s.Validate(); err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-	if len(findWarn(warns, "outside 0-127")) != 1 {
-		t.Errorf("warnings = %v, want exactly one about the out-of-MIDI note", warns)
-	}
-	evs := s.Events()
-	if len(evs) != 1 || evs[0].Key != 0 {
-		t.Fatalf("events = %+v, want only the key-0 note", evs)
+// TestStaffTuningOutsideMIDIFallsBack: a <staff-tuning> whose open string
+// sits outside MIDI 0-127 (a negative octave, or octave 9 past G9) used
+// to be installed verbatim into Track.Tuning — round 1 made the notes
+// derived from it drop, but the stored tuning itself stayed nonsense for
+// the UI and synth to use, and \tuning refuses to write it, so the piece
+// could never save. The staff is now rejected wholesale like gpimport's
+// parseTuning does, warned, and the current (standard) tuning kept.
+func TestStaffTuningOutsideMIDIFallsBack(t *testing.T) {
+	for _, tc := range []struct {
+		name, step string
+		octave     string
+	}{
+		{name: "below MIDI 0", step: "C", octave: "-3"},  // key -24
+		{name: "above MIDI 127", step: "B", octave: "9"}, // key 131
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := `<attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time>` +
+				`<staff-details><staff-lines>1</staff-lines>` +
+				`<staff-tuning line="1"><tuning-step>` + tc.step + `</tuning-step><tuning-octave>` + tc.octave + `</tuning-octave></staff-tuning>` +
+				`</staff-details></attributes>` +
+				note("E", 2, 1920, -1, 0, "")
+			s, warns, err := Import(wrap(m))
+			if err != nil {
+				t.Fatalf("Import: %v", err)
+			}
+			if len(findWarn(warns, "outside 0-127")) != 1 || len(findWarn(warns, "keeping the current tuning")) != 1 {
+				t.Errorf("warnings = %v, want the staff tuning rejected and the current tuning kept", warns)
+			}
+			tr := s.Tracks[0]
+			if !tr.Tuning.Equal(score.StandardTuning) {
+				t.Fatalf("Tuning = %v, want the standard fallback", tr.Tuning)
+			}
+			evs := s.Events()
+			if len(evs) != 1 || evs[0].Key != 40 {
+				t.Fatalf("events = %+v, want the E2 fingered on the fallback tuning", evs)
+			}
+		})
 	}
 }
 

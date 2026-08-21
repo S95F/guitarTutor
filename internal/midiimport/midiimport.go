@@ -50,6 +50,7 @@ import (
 
 	"github.com/S95F/musicTutor/internal/fretting"
 	"github.com/S95F/musicTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score/textfmt"
 )
 
 // Grid is the quantization grid in score ticks: a straight 1/32 note.
@@ -98,6 +99,17 @@ func Import(data []byte) (*score.Score, []string, error) {
 	if len(data) >= 14 && bytes.HasPrefix(data, smfHeaderMagic) && data[12]&0x80 != 0 {
 		return nil, nil, fmt.Errorf("SMPTE time format is not supported")
 	}
+	// gomidi reads a meta/sysex event's declared length and allocates it
+	// (make([]byte, ln)) before it has the bytes — and it does not bound
+	// that length by the track chunk or the file (its own reader comment
+	// says so). A five-byte varlen claiming ~4 GB of event data in a
+	// 200-byte file therefore drives a multi-gigabyte allocation, an
+	// out-of-memory the recover() below cannot catch (a runtime throw, not
+	// a panic). Reject a declared data length larger than the whole file
+	// up front — no real event field can be — before a byte reaches gomidi.
+	if err := checkSMFEventLengths(data); err != nil {
+		return nil, nil, err
+	}
 	sm, err := readSMF(data)
 	if err != nil {
 		return nil, nil, err
@@ -108,6 +120,120 @@ func Import(data []byte) (*score.Score, []string, error) {
 	}
 	im := &importer{filePPQ: int64(mt.Resolution())}
 	return im.run(sm)
+}
+
+// checkSMFEventLengths walks a Standard MIDI File's structure just far
+// enough to bound every variable-length event-data field (sysex 0xF0/0xF7
+// and meta 0xFF), rejecting any whose declared length exceeds the whole
+// file — the shape that makes gomidi allocate gigabytes from a tiny file.
+//
+// It is deliberately conservative: the ONLY thing it rejects is a
+// declared length larger than the entire input, which no genuine field
+// can ever be, so a walk that loses sync on a truly malformed file cannot
+// false-reject a valid one — a bogus "length" would have to exceed the
+// file to trip the check. Anything it cannot confidently parse, it stops
+// and accepts, leaving gomidi to report the real error as it does today.
+// Non-SMF bytes (no MThd) are passed straight through.
+func checkSMFEventLengths(data []byte) error {
+	if !bytes.HasPrefix(data, smfHeaderMagic) || len(data) < 14 {
+		return nil
+	}
+	n := len(data)
+	// varlen reads a MIDI variable-length quantity at pos, advancing it.
+	// ok is false at end of input. The value saturates at n+1: this
+	// function only ever compares it against n, so a field whose length
+	// runs past the file is caught even when the true value would overflow.
+	varlen := func(pos *int) (v int, ok bool) {
+		for i := 0; ; i++ {
+			if *pos >= n {
+				return 0, false
+			}
+			b := data[*pos]
+			*pos++
+			if v <= n {
+				v = v<<7 | int(b&0x7f)
+				if v > n {
+					v = n + 1
+				}
+			}
+			if b&0x80 == 0 {
+				return v, true
+			}
+			if i >= 4 { // a real SMF varlen is at most four bytes
+				return v, true
+			}
+		}
+	}
+
+	pos := 8 + int(be32(data[4:8])) // past MThd: 4 magic + 4 length + body
+	for pos+8 <= n {
+		typ := data[pos : pos+4]
+		clen := int(be32(data[pos+4 : pos+8]))
+		pos += 8
+		if !bytes.Equal(typ, []byte("MTrk")) {
+			pos += clen // skip a non-track chunk wholesale
+			continue
+		}
+		chunkEnd := pos + clen
+		if chunkEnd > n || chunkEnd < pos {
+			chunkEnd = n
+		}
+		var status byte
+		for pos < chunkEnd {
+			if _, ok := varlen(&pos); !ok { // delta time
+				return nil
+			}
+			if pos >= chunkEnd {
+				break
+			}
+			b := data[pos]
+			if b&0x80 != 0 {
+				status = b
+				pos++
+			} else if status == 0 {
+				return nil // data byte with no running status: give up
+			}
+			switch {
+			case status == 0xFF: // meta: type byte, then a varlen data block
+				if pos >= chunkEnd {
+					return nil
+				}
+				pos++ // meta type
+				l, ok := varlen(&pos)
+				if !ok {
+					return nil
+				}
+				if l > n {
+					return fmt.Errorf("reading SMF: malformed file (meta event declares %d bytes, larger than the %d-byte file)", l, n)
+				}
+				pos += l
+			case status == 0xF0 || status == 0xF7: // sysex: a varlen data block
+				l, ok := varlen(&pos)
+				if !ok {
+					return nil
+				}
+				if l > n {
+					return fmt.Errorf("reading SMF: malformed file (sysex event declares %d bytes, larger than the %d-byte file)", l, n)
+				}
+				pos += l
+			case status >= 0x80 && status <= 0xEF: // channel voice message
+				if status < 0xC0 || status >= 0xE0 {
+					pos += 2 // two data bytes
+				} else {
+					pos++ // program change / channel pressure: one data byte
+				}
+			default:
+				return nil // system-common/realtime in an SMF track: give up
+			}
+		}
+		pos = chunkEnd
+	}
+	return nil
+}
+
+// be32 reads a big-endian uint32 (SMF's chunk-length and header encoding).
+func be32(b []byte) uint32 {
+	return uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
 }
 
 // readSMF parses the file bytes, converting any panic inside the SMF
@@ -342,7 +468,14 @@ func (im *importer) readTrack(ti int, tr smf.Track) *fileTrack {
 			}
 		case msg.GetMetaTrackName(&text):
 			if ft.name == "" {
-				ft.name = text
+				// SMF text is arbitrary bytes. A name holding a line break
+				// or the "//" comment marker would flow into \title or
+				// \track and make the imported piece refuse to save.
+				name, changed := textfmt.CleanLabel(text)
+				if changed {
+					im.warnf("track %d: the track name %q holds text a saved .gtab cannot (a line break or \"//\"); imported as %q", ti, text, name)
+				}
+				ft.name = name
 			}
 		}
 	}

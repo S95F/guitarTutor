@@ -265,3 +265,32 @@ func TestEventsChordAndOrder(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateRejectsDuplicateStringInBeat: one string sounds once per
+// beat. The editor enforces it as it types, the .gtab parser rejects it,
+// and textfmt.Format refuses to write it — but Validate used to accept it,
+// leaving a model state every other layer treats as impossible: Events
+// keys its tie bookkeeping by string, so two notes on one string in one
+// beat give it two answers. Validate now closes that gap.
+func TestValidateRejectsDuplicateStringInBeat(t *testing.T) {
+	s := &Score{
+		Tempos: TempoMap{{Tick: 0, USPerQuarter: USPerQuarter(120)}},
+		Meters: MeterMap{{Tick: 0, Num: 4, Den: 4}},
+	}
+	tr := &Track{Tuning: StandardTuning}
+	s.Tracks = []*Track{tr}
+	tr.AppendBar(4, 4).AddBeat(Whole,
+		Note{String: 3, Fret: 0},
+		Note{String: 3, Fret: 2})
+	if err := s.Validate(); err == nil {
+		t.Fatal("Validate accepted two notes on one string in a beat")
+	}
+
+	// A chord that spreads across distinct strings is still fine.
+	s.Tracks[0].Bars[0].Beats[0].Notes = []Note{
+		{String: 3, Fret: 0}, {String: 2, Fret: 2}, {String: 1, Fret: 3},
+	}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate rejected a legitimate three-string chord: %v", err)
+	}
+}
