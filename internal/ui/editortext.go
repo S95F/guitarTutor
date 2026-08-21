@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"image/color"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -637,7 +638,7 @@ func (e *Editor) drawTextPane(screen *ebiten.Image) {
 	for i := 0; i < vis && p.top+i < len(p.lines); i++ {
 		ln := p.top + i
 		y := r.y + gtPadY + float64(i)*gtLineH
-		drawTextRightMono(screen, itoa(ln+1), r.x+gtPadX+gtGutter-8, y, colGtGutter)
+		drawTextRightMono(screen, strconv.Itoa(ln+1), r.x+gtPadX+gtGutter-8, y, colGtGutter)
 		line := string(p.lines[ln])
 		col := colNote
 		if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "//") {
@@ -657,7 +658,7 @@ func (e *Editor) drawTextPane(screen *ebiten.Image) {
 	// "did I break it" is always on screen.
 	y := r.y + r.h + 4
 	if p.ok {
-		drawText(screen, "looks good — "+itoa(p.bars)+" bars, "+itoa(p.notes)+" notes", uiPadX, y, colGtOK)
+		drawText(screen, "looks good — "+strconv.Itoa(p.bars)+" bars, "+strconv.Itoa(p.notes)+" notes", uiPadX, y, colGtOK)
 		return
 	}
 	drawText(screen, truncateW(p.status, screenW-2*uiPadX), uiPadX, y, colMiss)
@@ -666,29 +667,6 @@ func (e *Editor) drawTextPane(screen *ebiten.Image) {
 // drawTextRightMono draws mono text ending at x — the line-number gutter.
 func drawTextRightMono(dst *ebiten.Image, s string, x, y float64, col color.RGBA) {
 	drawTextMono(dst, s, x-textWMono(s), y, col)
-}
-
-// itoa is strconv.Itoa under a shorter name, for the drawing code.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
 }
 
 // textBindings is the control table while the text view is showing.

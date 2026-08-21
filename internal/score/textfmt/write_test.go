@@ -176,7 +176,7 @@ func TestFormatDurations(t *testing.T) {
 			}
 			tr := &score.Track{
 				Tuning:  append(score.Tuning(nil), score.StandardTuning...),
-				Program: defaultProgram,
+				Program: DefaultProgram,
 			}
 			sc.Tracks = append(sc.Tracks, tr)
 			bar := tr.AppendBar(num, den)
@@ -265,7 +265,7 @@ func TestFormatRefusesWhatItCannotWrite(t *testing.T) {
 			Tempos: score.TempoMap{{Tick: 0, USPerQuarter: score.USPerQuarter(120)}},
 			Meters: score.MeterMap{{Tick: 0, Num: 4, Den: 4}},
 		}
-		tr := &score.Track{Tuning: append(score.Tuning(nil), score.StandardTuning...), Program: defaultProgram}
+		tr := &score.Track{Tuning: append(score.Tuning(nil), score.StandardTuning...), Program: DefaultProgram}
 		sc.Tracks = append(sc.Tracks, tr)
 		return sc, tr
 	}
@@ -337,7 +337,7 @@ func TestFormatRefusesUnspellableMeter(t *testing.T) {
 			Tempos: score.TempoMap{{Tick: 0, USPerQuarter: score.USPerQuarter(120)}},
 			Meters: score.MeterMap{{Tick: 0, Num: num, Den: den}},
 		}
-		tr := &score.Track{Tuning: append(score.Tuning(nil), score.StandardTuning...), Program: defaultProgram}
+		tr := &score.Track{Tuning: append(score.Tuning(nil), score.StandardTuning...), Program: DefaultProgram}
 		sc.Tracks = append(sc.Tracks, tr)
 		bar := tr.AppendBar(num, den)
 		for filled := int64(0); filled < bar.Len(); filled += beat {
@@ -373,7 +373,7 @@ func TestFormatNamesLaterTracks(t *testing.T) {
 		Meters: score.MeterMap{{Tick: 0, Num: 4, Den: 4}},
 	}
 	for i := 0; i < 2; i++ {
-		tr := &score.Track{Tuning: append(score.Tuning(nil), score.StandardTuning...), Program: defaultProgram}
+		tr := &score.Track{Tuning: append(score.Tuning(nil), score.StandardTuning...), Program: DefaultProgram}
 		bar := tr.AppendBar(4, 4)
 		bar.AddBeat(score.Whole, score.Note{String: 6, Fret: i})
 		sc.Tracks = append(sc.Tracks, tr)

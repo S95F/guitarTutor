@@ -200,7 +200,7 @@ func (w *writer) track(i int, tr *score.Track) error {
 		// A wind track's pitch reference is its instrument; Validate has
 		// already refused one carrying a tuning or a capo.
 		fmt.Fprintf(&w.b, "\\instrument %s\n", tr.Wind.Name)
-	} else if !sameTuning(tr.Tuning, score.StandardTuning) {
+	} else if !tr.Tuning.Equal(score.StandardTuning) {
 		// The file lists open strings low to high; the model stores the
 		// highest-pitched string first.
 		names := make([]string, len(tr.Tuning))
@@ -213,15 +213,15 @@ func (w *writer) track(i int, tr *score.Track) error {
 		fmt.Fprintf(&w.b, "\\tuning %s\n", strings.Join(names, " "))
 	}
 	if tr.Capo != 0 {
-		if tr.Capo < 0 || tr.Capo > maxFret {
-			return fmt.Errorf("gtab: track %d: capo %d is outside 0-%d", i+1, tr.Capo, maxFret)
+		if tr.Capo < 0 || tr.Capo > MaxFret {
+			return fmt.Errorf("gtab: track %d: capo %d is outside 0-%d", i+1, tr.Capo, MaxFret)
 		}
 		fmt.Fprintf(&w.b, "\\capo %d\n", tr.Capo)
 	}
 	// The program a track's instrument implies is the one worth leaving
 	// out: for a fretted track the format's steel-string default, for a
 	// wind track the instrument's own.
-	trackDefaultProgram := defaultProgram
+	trackDefaultProgram := DefaultProgram
 	if tr.Wind != nil {
 		trackDefaultProgram = tr.Wind.Program
 	}
@@ -338,13 +338,10 @@ func (w *writer) beat(bt *score.Beat) (string, error) {
 		}
 	}
 
-	seen := map[int]bool{}
+	// A string played twice in one beat cannot happen here: Format runs
+	// Validate first, which refuses it.
 	parts := make([]string, 0, len(bt.Notes))
 	for _, n := range bt.Notes {
-		if seen[n.String] {
-			return "", fmt.Errorf("gtab: %s: string %d is played twice in one beat, which .gtab cannot write", w.ctx, n.String)
-		}
-		seen[n.String] = true
 		if allTied {
 			n.Tied = false // carried by the chord's own prefix
 		}
@@ -385,8 +382,8 @@ func (w *writer) noteToken(n score.Note) (string, error) {
 		}
 		return s, nil
 	}
-	if n.Fret < 0 || n.Fret > maxFret {
-		return "", fmt.Errorf("gtab: %s: fret %d is outside 0-%d", w.ctx, n.Fret, maxFret)
+	if n.Fret < 0 || n.Fret > MaxFret {
+		return "", fmt.Errorf("gtab: %s: fret %d is outside 0-%d", w.ctx, n.Fret, MaxFret)
 	}
 	s := strconv.Itoa(n.Fret) + "." + strconv.Itoa(n.String)
 	if n.Tied {
@@ -543,20 +540,6 @@ func CleanLabel(s string) (string, bool) {
 	}
 	changed := cleaned != s
 	return strings.TrimSpace(cleaned), changed
-}
-
-// sameTuning reports whether two tunings are identical, so the default
-// can be left out of the file.
-func sameTuning(a, b score.Tuning) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // pitchClassNames spells the twelve pitch classes with sharps. The parser

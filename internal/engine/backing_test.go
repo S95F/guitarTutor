@@ -258,9 +258,6 @@ func TestBackingPastEOFSilent(t *testing.T) {
 // removes it with ClearBackingTrack.
 func TestBackingGainAndClear(t *testing.T) {
 	e, _ := newBackingEngine(t, Options{})
-	if g := e.BackingGain(); g != 1.0 {
-		t.Fatalf("default BackingGain = %v, want 1.0", g)
-	}
 	bl, br := rampBacking(200000)
 	e.SetBackingTrack(bl, br, 0)
 	e.SetBackingGain(0.5)
@@ -383,9 +380,6 @@ func TestBackingNonFiniteGainRefused(t *testing.T) {
 		bl, br := rampBacking(200000)
 		e.SetBackingTrack(bl, br, 0)
 		e.SetBackingGain(g)
-		if got := e.BackingGain(); got != 0 {
-			t.Fatalf("SetBackingGain(%v) stored %v, want 0", g, got)
-		}
 		e.Play()
 		l, r := renderCollect(e, 2000, 480)
 		for k := range l {

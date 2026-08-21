@@ -728,7 +728,7 @@ func (im *importer) finish(pd *partData) {
 
 // finishWind places a wind part's notes on the instrument's single
 // chromatic lane: every note gets str 1 and fret key−LowSounding. The
-// lane is arithmetic, not a heuristic, so fretAssign never runs and
+// lane is arithmetic, not a heuristic, so fretting.AssignWith never runs and
 // nothing is marked Inferred. Any authored <technical> fingering was
 // already discounted during parsing (a wind part has no strings to check
 // it against).
@@ -868,7 +868,7 @@ func (im *importer) assignFingerings(pd *partData, label string, groups [][]*raw
 			beats[i][j] = n.key
 		}
 	}
-	positions, unplayable := fretAssign(beats, fixed, pd.tuning, pd.capo)
+	positions, unplayable := fretting.AssignWith(beats, fixed, pd.tuning, pd.capo)
 	for i, g := range groups {
 		for j, n := range g {
 			p := positions[i][j]

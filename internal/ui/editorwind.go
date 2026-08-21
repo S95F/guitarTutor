@@ -270,6 +270,10 @@ func pickerChoices() []string {
 	return append(out, score.WindNames()...)
 }
 
+// edPickerChoices is pickerChoices computed once: the registry is static,
+// so there is no reason to rebuild the list every frame.
+var edPickerChoices = pickerChoices()
+
 // pickerWind maps a choice index to its wind instrument; nil is guitar.
 func pickerWind(i int) *score.WindInstrument {
 	if i <= 0 {
@@ -293,7 +297,7 @@ func (e *Editor) openInstrumentPicker(p pickPurpose) {
 // declines — which for a new piece means the guitar default, and for a
 // new track means no track.
 func (e *Editor) updatePicker() {
-	n := len(pickerChoices())
+	n := len(edPickerChoices)
 	switch {
 	case inpututil.IsKeyJustPressed(ebiten.KeyUp):
 		e.picker.sel = (e.picker.sel + n - 1) % n
@@ -335,7 +339,7 @@ func (e *Editor) cancelPick() { e.picker = nil }
 
 // edPickerRect sizes the card to its rows.
 func edPickerRect() rect {
-	h := 78.0 + float64(len(pickerChoices()))*edPickRowH + 16
+	h := 78.0 + float64(len(edPickerChoices))*edPickRowH + 16
 	return rect{screenW/2 - 220, screenH/2 - h/2, 440, h}
 }
 
@@ -345,7 +349,7 @@ const edPickRowH = 30.0
 func (e *Editor) pickerSpots(out *int) []hotspot {
 	r := edPickerRect()
 	var spots []hotspot
-	for i := range pickerChoices() {
+	for i := range edPickerChoices {
 		idx := i
 		spots = append(spots, hotspot{
 			r:  rect{r.x + 16, r.y + 66 + float64(i)*edPickRowH, r.w - 32, edPickRowH},
@@ -365,7 +369,7 @@ func (e *Editor) drawPicker(screen *ebiten.Image) {
 	}
 	drawTextScaled(screen, title, centreXScaled(title, r.x, r.w, 1.3), r.y+18, 1.3, colNote)
 
-	for i, name := range pickerChoices() {
+	for i, name := range edPickerChoices {
 		row := rect{r.x + 16, r.y + 66 + float64(i)*edPickRowH, r.w - 32, edPickRowH}
 		fill, edge, ink := colPanel, colPanelEdge, colHUD
 		if i == e.picker.sel {

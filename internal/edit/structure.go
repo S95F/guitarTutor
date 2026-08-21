@@ -13,6 +13,7 @@ package edit
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/S95F/musicTutor/internal/score"
 	"github.com/S95F/musicTutor/internal/score/textfmt"
@@ -203,13 +204,10 @@ func (d *Doc) SetCapo(fret int) error {
 	}
 	return d.mutate(func() error {
 		tr := d.Track()
-		was := tr.Capo
 		tr.Capo = fret
-		if err := checkPitches(tr); err != nil {
-			tr.Capo = was
-			return err
-		}
-		return nil
+		// A refusal needs no restore: mutate discards the whole mutated
+		// score on error.
+		return checkPitches(tr)
 	})
 }
 
@@ -254,13 +252,10 @@ func (d *Doc) SetTuning(tuning score.Tuning) error {
 	}
 	return d.mutate(func() error {
 		tr := d.Track()
-		was := tr.Tuning
 		tr.Tuning = append(score.Tuning(nil), tuning...)
-		if err := checkPitches(tr); err != nil {
-			tr.Tuning = was
-			return err
-		}
-		return nil
+		// A refusal needs no restore: mutate discards the whole mutated
+		// score on error.
+		return checkPitches(tr)
 	})
 }
 
@@ -285,7 +280,7 @@ func (d *Doc) AddTrack(name string, wind *score.WindInstrument) error {
 		for bi, ref := range d.sc.Tracks[0].Bars {
 			bar := tr.AppendBar(ref.Num, ref.Den)
 			// A meter no rests can fill (a model-valid 1/5, say) refuses
-			// the whole track rather than panicking in fillBar.
+			// the whole track.
 			if err := refit(bar, -1); err != nil {
 				return fmt.Errorf("bar %d of the new track: %w", bi+1, err)
 			}
@@ -405,22 +400,8 @@ func checkPitches(tr *score.Track) error {
 }
 
 // hasLineBreak reports whether text would break a one-line directive.
-func hasLineBreak(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' || s[i] == '\r' {
-			return true
-		}
-	}
-	return false
-}
+func hasLineBreak(s string) bool { return strings.ContainsAny(s, "\r\n") }
 
 // hasComment reports whether text holds "//", which would start a comment
 // in the file and silently truncate the directive that carries it.
-func hasComment(s string) bool {
-	for i := 0; i+1 < len(s); i++ {
-		if s[i] == '/' && s[i+1] == '/' {
-			return true
-		}
-	}
-	return false
-}
+func hasComment(s string) bool { return strings.Contains(s, "//") }

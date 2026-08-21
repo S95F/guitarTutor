@@ -107,13 +107,6 @@ func (e *Engine) SetBackingGain(g float64) {
 	e.backGain = g
 }
 
-// BackingGain returns the backing track's mix gain.
-func (e *Engine) BackingGain() float64 {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.backGain
-}
-
 // mixBacking adds the backing track into left/right for a run of segment
 // frames starting at segFrame. The file position of frame f is
 // backBase + f*scale (see buildSegment for the anchor); samples between

@@ -614,7 +614,7 @@ func TestBytesPerFrameMatchesTheStreamFormat(t *testing.T) {
 	}
 	// playerBufferBytes is built from the same unit, so the read-ahead it
 	// asks for has to come back out as the duration it was written as.
-	if got := framesToDuration(playerBufferBytes() / bytesPerFrame); got != playerReadAhead {
+	if got := framesToDuration(playerBufferBytes / bytesPerFrame); got != playerReadAhead {
 		t.Errorf("the configured read-ahead reads back as %v, want %v", got, playerReadAhead)
 	}
 }

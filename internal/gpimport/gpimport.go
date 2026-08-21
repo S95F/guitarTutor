@@ -224,7 +224,6 @@ func readGPIF(data []byte) (*gpif, error) {
 // permissiveness the format's evolution requires.
 type gpif struct {
 	XMLName     xml.Name      `xml:"GPIF"`
-	GPRevision  string        `xml:"GPRevision"`
 	Score       gpScoreInfo   `xml:"Score"`
 	MasterTrack gpMasterTrack `xml:"MasterTrack"`
 	Tracks      []gpTrack     `xml:"Tracks>Track"`

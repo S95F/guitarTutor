@@ -4,12 +4,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/S95F/musicTutor/internal/fretting"
 	"github.com/S95F/musicTutor/internal/score"
 )
-
-// fretAssign is internal/fretting's assignment, indirected for tests.
-var fretAssign = fretting.AssignWith
 
 // A barSpec is one bar of the shared bar structure.
 type barSpec struct {

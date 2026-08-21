@@ -109,8 +109,10 @@ func New(opts NewOptions) *Doc {
 	}
 	sc.Tracks = append(sc.Tracks, tr)
 	for i := 0; i < opts.Bars; i++ {
-		bar := tr.AppendBar(opts.Num, opts.Den)
-		fillBar(bar)
+		// refit lays the rests that make the bar exactly full. It cannot
+		// refuse here: every meter validated above is a whole number of
+		// 32nd notes.
+		refit(tr.AppendBar(opts.Num, opts.Den), -1)
 	}
 	d := &Doc{sc: sc, dur: score.Quarter}
 	// The low string, where riffs start; a wind part has one lane.
@@ -473,16 +475,6 @@ func beatsText(ticks int64, bar *score.Bar) string {
 	}
 	v := float64(ticks) / float64(beat)
 	return strconv.FormatFloat(v, 'g', 3, 64)
-}
-
-// fillBar makes an empty bar a bar of rests.
-func fillBar(bar *score.Bar) {
-	bar.Beats = bar.Beats[:0]
-	if err := refit(bar, -1); err != nil {
-		// Unreachable: an empty bar's remainder is its own length, and
-		// every meter the format allows is a whole number of 32nd notes.
-		panic("edit: cannot fill an empty bar: " + err.Error())
-	}
 }
 
 // retick recomputes every bar's and beat's start tick from the durations

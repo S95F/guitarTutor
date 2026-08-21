@@ -38,9 +38,8 @@ import (
 const EnvConfigDir = "MUSICTUTOR_CONFIG_DIR"
 
 // CurrentVersion is the config schema version this build reads and
-// writes. Load migrates any file from firstVersion..CurrentVersion up to
-// it, so a Config in memory is always at the current schema; Save stamps
-// it into the file.
+// writes. Load migrates any older file up to it, so a Config in memory is
+// always at the current schema; Save stamps it into the file.
 //
 // Version history:
 //
@@ -49,12 +48,6 @@ const EnvConfigDir = "MUSICTUTOR_CONFIG_DIR"
 //	3 — adds the audio/visual sync trim.
 //	4 — adds the written-pieces list and the start hint's hidden flag.
 const CurrentVersion = 4
-
-// firstVersion is the oldest schema this build can migrate forward. It is
-// also what a file carrying no version at all is treated as: Save has
-// always stamped one, so an unstamped file is hand-written, and the
-// original shape is the only thing it can mean.
-const firstVersion = 1
 
 // ErrNewerVersion reports a config file written by a newer build of
 // musicTutor than the one reading it. Load refuses such a file (it
@@ -271,29 +264,13 @@ func (c *Config) rehomePaths() {
 }
 
 // migrate brings a config parsed off disk up to CurrentVersion in place.
-// Each step upgrades one version, so the chain still works for someone
-// skipping several releases.
-//
-// The 1 -> 2 step adds recents, count-in, the last browse directory and
-// the window size, and the 2 -> 3 step adds the sync trim; every one of
-// those is documented as "zero means the default", so neither migration
-// has a field to rewrite, only the version to advance. The steps are
-// spelled out anyway, because one of them will eventually not be so lucky
-// and this is where it goes.
+// Every version so far (see the history on CurrentVersion) only added
+// fields whose zero value is the documented default, so no step has a
+// field to rewrite — the version simply advances. An unstamped file (or
+// a nonsense stamp) is the original shape and advances the same way. The
+// first version that is not so lucky grows its rewriting step here.
 func (c *Config) migrate() {
-	if c.Version < firstVersion {
-		// No stamp (or a nonsense one): treat it as the original shape.
-		c.Version = firstVersion
-	}
-	if c.Version < 2 {
-		c.Version = 2
-	}
-	if c.Version < 3 {
-		c.Version = 3
-	}
-	if c.Version < 4 {
-		c.Version = 4
-	}
+	c.Version = CurrentVersion
 	// Repair rather than trust: the file may have been hand-edited, or
 	// written by a build with a different cap.
 	c.Recents = sanitizeRecents(c.Recents)

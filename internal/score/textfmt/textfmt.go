@@ -58,7 +58,7 @@ func Parse(src []byte, name string) (*score.Score, error) {
 		name: name,
 		score: &score.Score{
 			Title:  name,
-			Tempos: score.TempoMap{{Tick: 0, USPerQuarter: score.USPerQuarter(defaultBPM)}},
+			Tempos: score.TempoMap{{Tick: 0, USPerQuarter: score.USPerQuarter(DefaultBPM)}},
 			Meters: score.MeterMap{{Tick: 0, Num: 4, Den: 4}},
 		},
 		sticky: score.Quarter,

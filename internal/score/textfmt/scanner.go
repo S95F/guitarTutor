@@ -46,14 +46,6 @@ func (s *scanner) peek() byte {
 	return s.src[s.i]
 }
 
-// peekAt returns the byte n past the cursor, or 0 past end of input.
-func (s *scanner) peekAt(n int) byte {
-	if s.i+n >= len(s.src) {
-		return 0
-	}
-	return s.src[s.i+n]
-}
-
 // next consumes and returns one rune, updating the line and column.
 func (s *scanner) next() rune {
 	r, size := utf8.DecodeRuneInString(s.src[s.i:])
@@ -69,7 +61,7 @@ func (s *scanner) next() rune {
 
 // atComment reports whether the cursor is at a "//" comment.
 func (s *scanner) atComment() bool {
-	return s.peek() == '/' && s.peekAt(1) == '/'
+	return s.peek() == '/' && s.i+1 < len(s.src) && s.src[s.i+1] == '/'
 }
 
 // skipSpace advances past whitespace (including newlines) and comments.

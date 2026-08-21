@@ -73,11 +73,7 @@ const playerReadAhead = 100 * time.Millisecond
 
 // playerBufferBytes is playerReadAhead as oto's SetBufferSize wants it:
 // bytes of interleaved stereo float32 at the project sample rate.
-func playerBufferBytes() int {
-	const bytesPerFrame = 2 * 4 // stereo, float32
-	n := int(int64(playerReadAhead) * sampleRate / int64(time.Second))
-	return n * bytesPerFrame
-}
+const playerBufferBytes = int(int64(playerReadAhead)*sampleRate/int64(time.Second)) * bytesPerFrame
 
 var version = "0.1.0-dev"
 
@@ -464,7 +460,7 @@ func runPlay(args []string) error {
 	}
 	<-ready
 	player := ctx.NewPlayer(eng)
-	player.SetBufferSize(playerBufferBytes())
+	player.SetBufferSize(playerBufferBytes)
 	player.Play()
 	defer player.Close()
 

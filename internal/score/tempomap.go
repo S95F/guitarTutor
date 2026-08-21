@@ -166,8 +166,9 @@ func (s *Score) Validate() error {
 				// One string sounds once per beat. The editor enforces this
 				// as it types (SetFret replaces a note already on the
 				// string), the parser rejects "string N played twice", and
-				// textfmt.Format refuses to write such a beat — so a model
-				// that let it stand would be one every other layer already
+				// textfmt.Format refuses such a beat through this very
+				// check (it validates first) — so a model that let it
+				// stand would be one every other layer already
 				// treats as impossible: score.Events keys its tie
 				// bookkeeping by string, and two notes on one string in one
 				// beat give it two answers.

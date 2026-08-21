@@ -765,7 +765,7 @@ func (o *shellOpener) Open(path string) (ui.Screen, []string, error) {
 			return nil, warns, err
 		}
 		o.player = ctx.NewPlayer(eng)
-		o.player.SetBufferSize(playerBufferBytes())
+		o.player.SetBufferSize(playerBufferBytes)
 		o.player.Play()
 	}
 	o.watchOutputLatency(app)

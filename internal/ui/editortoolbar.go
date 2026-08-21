@@ -395,7 +395,7 @@ func (e *Editor) layoutToolbar() edToolbarLayout {
 	// "add a track" has no keyboard binding, so a piece with enough tracks
 	// in it could not gain another one at all.
 	tracks, fixed := e.pieceButtons(), []edButton(nil)
-	for len(tracks) > 0 && tracks[len(tracks)-1].id != "" {
+	for len(tracks) > 0 {
 		last := tracks[len(tracks)-1]
 		if strings.HasPrefix(last.id, "track") {
 			break

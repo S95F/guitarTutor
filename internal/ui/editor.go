@@ -318,10 +318,7 @@ func (e *Editor) Update() error {
 	if e.text != nil {
 		return e.updateText()
 	}
-	if err := e.updateGrid(); err != nil {
-		return err
-	}
-	return nil
+	return e.updateGrid()
 }
 
 // Draw paints the frame.
@@ -735,8 +732,9 @@ func (e *Editor) drawBar(screen *ebiten.Image, tr *score.Track, box edBarBox, st
 				float32(bx-4), float32(strTop+float64(nStr-1)*edStringGap+8), 1, colEdCaret, false)
 			y := cellY()
 			if len(bt.Notes) > 0 {
-				y = noteY(bt.Notes[0])
-				if ladder == nil {
+				if ladder != nil {
+					y = noteY(bt.Notes[0])
+				} else {
 					y = strTop + float64(cur.Str-1)*edStringGap
 				}
 			}
@@ -966,10 +964,8 @@ func (e *Editor) barMarking(index int, bar *score.Bar) (meter, tempo string) {
 		meter = fmt.Sprintf("%d/%d", bar.Num, bar.Den)
 	}
 	for _, t := range sc.Tempos {
-		if t.Tick == bar.Start && (index > 0 || len(sc.Tempos) > 0) {
-			if index == 0 || t.Tick != 0 {
-				tempo = fmt.Sprintf("= %.0f", 60e6/float64(t.USPerQuarter))
-			}
+		if t.Tick == bar.Start && (index == 0 || t.Tick != 0) {
+			tempo = fmt.Sprintf("= %.0f", 60e6/float64(t.USPerQuarter))
 		}
 	}
 	return meter, tempo

@@ -25,14 +25,6 @@ const (
 	DefaultProgram = 25
 )
 
-// Unexported aliases, so the parser and writer below read as they did
-// before these limits acquired a second audience.
-const (
-	maxFret        = MaxFret
-	defaultBPM     = DefaultBPM
-	defaultProgram = DefaultProgram
-)
-
 // A parser holds the state of one Parse call: the scanner, the score
 // being built, the current track and open bar, and the pending mid-piece
 // directives that take effect at the next bar.
@@ -179,7 +171,7 @@ func (p *parser) newTrack(name string) *score.Track {
 	tr := &score.Track{
 		Name:    name,
 		Tuning:  append(score.Tuning(nil), score.StandardTuning...),
-		Program: defaultProgram,
+		Program: DefaultProgram,
 	}
 	p.score.Tracks = append(p.score.Tracks, tr)
 	p.progSet, p.tuningSet, p.capoSet = false, false, false
@@ -402,8 +394,8 @@ func (p *parser) noteCore(t *tokScan, tied bool) (score.Note, error) {
 	if !ok {
 		return score.Note{}, p.errAt(fp, "malformed beat %q: expected a fret number", t.tok)
 	}
-	if fret > maxFret {
-		return score.Note{}, p.errAt(fp, "fret %d out of range (0-%d)", fret, maxFret)
+	if fret > MaxFret {
+		return score.Note{}, p.errAt(fp, "fret %d out of range (0-%d)", fret, MaxFret)
 	}
 	if t.peek() != '.' {
 		return score.Note{}, p.errAt(t.pos(), "malformed beat %q: expected \".\" after the fret", t.tok)
@@ -699,8 +691,8 @@ func (p *parser) directive() error {
 			return err
 		}
 		fret, perr := strconv.Atoi(arg.text)
-		if perr != nil || fret < 0 || fret > maxFret {
-			return p.errAt(arg.pos, "invalid capo %q (want 0-%d)", arg.text, maxFret)
+		if perr != nil || fret < 0 || fret > MaxFret {
+			return p.errAt(arg.pos, "invalid capo %q (want 0-%d)", arg.text, MaxFret)
 		}
 		p.track.Capo = fret
 		return nil

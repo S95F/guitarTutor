@@ -1083,6 +1083,10 @@ func (s *Scorer) WaitConfirmed(evs []score.NoteEvent, notes []pitch.Note) {
 				best, bestAbs = i, abs
 			}
 		}
+		slideIdx := -1
+		if ev.Tech&score.TechSlide != 0 {
+			slideIdx = slideConfirmer(notes, ev.Key, s.cfg.CentsTolerance)
+		}
 		v, cents := VerdictClose, 0.0
 		switch {
 		case best >= 0:
@@ -1090,14 +1094,14 @@ func (s *Scorer) WaitConfirmed(evs []score.NoteEvent, notes []pitch.Note) {
 				v = VerdictHit
 			}
 			cents = notes[best].Cents
-		case ev.Tech&score.TechSlide != 0 && slideConfirmer(notes, ev.Key, s.cfg.CentsTolerance) >= 0:
+		case slideIdx >= 0:
 			// A slide destination is never attacked, so the confirming
 			// detection carries the ORIGIN key and the key search above
 			// cannot find it — the note was played correctly and scored a
 			// MISS, at a wait point the player had just satisfied. Grade
 			// it off the trajectory the way matchSlides does: settling at
 			// the key is a Hit, merely sweeping through it is a Close.
-			n := &notes[slideConfirmer(notes, ev.Key, s.cfg.CentsTolerance)]
+			n := &notes[slideIdx]
 			if err := n.EndCents - float64(ev.Key-n.Key)*100; math.Abs(err) <= s.cfg.CentsTolerance {
 				v, cents = VerdictHit, err
 			}
