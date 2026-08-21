@@ -178,6 +178,28 @@ func TestWindEditorStatusNamesBothPitches(t *testing.T) {
 	}
 }
 
+// TestWindHelpDoesNotTeachBAsBend: on a wind track the letter B types the
+// note B (TestWindEditorSlurAndMarks pins the key itself), so the help
+// table must not list b among the technique keys — a row teaching "b
+// bend" would rewrite the note's pitch for anyone who followed it. The
+// bend mark's one control is its toolbar button, which carries no key.
+func TestWindHelpDoesNotTeachBAsBend(t *testing.T) {
+	e := newTestWindEditor(t)
+	for _, row := range e.editorBindings() {
+		if row.Group != "notes" || strings.HasPrefix(row.Keys, "A-G") {
+			continue
+		}
+		for _, k := range strings.Split(row.Keys, "/") {
+			if strings.TrimSpace(k) == "b" {
+				t.Errorf("the wind help row %q (%q) advertises b, which types the note B", row.Keys, row.Desc)
+			}
+		}
+	}
+	if b := editorButton(t, e, "bend"); b.key != "" {
+		t.Errorf("the wind bend button advertises key %q; B types the note B", b.key)
+	}
+}
+
 // TestWindHelpTableFitsItsCard: the wind table is measured through the
 // same layout the overlay draws with, like every other table.
 func TestWindHelpTableFitsItsCard(t *testing.T) {

@@ -198,7 +198,7 @@ func (e *Editor) windBindings() []helpBinding {
 		{Group: "notes", Keys: "↑ / ↓", Hint: "↑↓ pitch", Desc: "Move the note by a semitone; with shift, by an octave"},
 		{Group: "notes", Keys: "del / R", Hint: "R rest", Desc: "Clear the note, or make the whole beat a rest"},
 		{Group: "notes", Keys: "`", Hint: "` tie", Desc: "Tie the note: hold it, do not tongue it again"},
-		{Group: "notes", Keys: "l / s / b / v", Hint: "l slur", Desc: "Slur (no fresh tongue), slide, bend, vibrato"},
+		{Group: "notes", Keys: "l / s / v", Hint: "l slur", Desc: "Slur (no fresh tongue), slide, vibrato — B types the note, so the bend mark is its toolbar button"},
 
 		{Group: "rhythm", Keys: "[ / ]", Hint: "[ ] note length", Desc: "Longer / shorter note, for this beat and the ones you type next — or click one in the toolbar"},
 		{Group: "rhythm", Keys: ". / T", Desc: "Dot the note value, or make it a triplet"},
