@@ -74,6 +74,9 @@ const MaxTicks = 100_000_000
 // even a legal extent into an absurd number of specs.
 const maxBars = 100_000
 
+// smfHeaderMagic starts every Standard MIDI File's MThd chunk.
+var smfHeaderMagic = []byte("MThd")
+
 // Import parses a Standard MIDI File into a Score, returning
 // human-readable warnings for everything the import changed or dropped.
 // One score track is produced per (file track, MIDI channel) pair holding
@@ -85,9 +88,19 @@ const maxBars = 100_000
 // part is a standard-tuning guitar track with fingerings inferred by
 // internal/fretting. The result always passes Validate.
 func Import(data []byte) (*score.Score, []string, error) {
-	sm, err := smf.ReadFrom(bytes.NewReader(data))
+	// The SMPTE check below on the parsed TimeFormat never gets to run
+	// for a real SMPTE file: gomidi's ReadFrom panics first, on an
+	// unchecked MetricTicks assertion in its tempo-time bookkeeping
+	// (calculateAbsTimes). Check the header's raw division word — the
+	// SMPTE formats set its high bit — before handing the bytes to the
+	// library, so a one-bit corruption cannot crash the app. Offset 12
+	// is the division word in a standard 6-byte MThd chunk.
+	if len(data) >= 14 && bytes.HasPrefix(data, smfHeaderMagic) && data[12]&0x80 != 0 {
+		return nil, nil, fmt.Errorf("SMPTE time format is not supported")
+	}
+	sm, err := readSMF(data)
 	if err != nil {
-		return nil, nil, fmt.Errorf("reading SMF: %w", err)
+		return nil, nil, err
 	}
 	mt, ok := sm.TimeFormat.(smf.MetricTicks)
 	if !ok {
@@ -95,6 +108,22 @@ func Import(data []byte) (*score.Score, []string, error) {
 	}
 	im := &importer{filePPQ: int64(mt.Resolution())}
 	return im.run(sm)
+}
+
+// readSMF parses the file bytes, converting any panic inside the SMF
+// library into an error: gomidi trusts parts of a hostile header that it
+// should not, and a malformed import must fail, never crash.
+func readSMF(data []byte) (sm *smf.SMF, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			sm, err = nil, fmt.Errorf("reading SMF: malformed file (%v)", r)
+		}
+	}()
+	sm, err = smf.ReadFrom(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("reading SMF: %w", err)
+	}
+	return sm, nil
 }
 
 // ImportFile reads path and imports it via Import.

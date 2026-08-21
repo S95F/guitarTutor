@@ -715,3 +715,78 @@ func TestNoRepeatMarkupIsSilent(t *testing.T) {
 		t.Errorf("warnings = %v, want none", warns)
 	}
 }
+
+// TestInferredFingeringPastMIDIRangeDropped: fretting places by pitch
+// arithmetic with no MIDI ceiling of its own, so an extreme (but
+// well-formed) capo can hand an inferred note a fingering sounding past
+// MIDI 127. Validate rejects such a score outright, so before the fix one
+// hostile note failed the whole import ("imported score failed
+// validation"); it must instead be dropped with a warning, like every
+// other unplayable note, and the sane notes must survive.
+func TestInferredFingeringPastMIDIRangeDropped(t *testing.T) {
+	m := `<attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time>` +
+		`<staff-details><capo>40</capo></staff-details></attributes>` +
+		// C6 (84): playable at string 6 fret 4 under the absurd capo.
+		`<note><pitch><step>C</step><octave>6</octave></pitch><duration>960</duration><voice>1</voice></note>` +
+		// G#9 (128): fret 24 on string 1 under capo 40 — sounds past MIDI 127.
+		`<note><pitch><step>G</step><alter>1</alter><octave>9</octave></pitch><duration>960</duration><voice>1</voice></note>`
+	s, warns, err := Import(wrap(m))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if len(findWarn(warns, "outside 0-127")) != 1 {
+		t.Errorf("warnings = %v, want exactly one about the out-of-MIDI note", warns)
+	}
+	evs := s.Events()
+	if len(evs) != 1 || evs[0].Key != 84 {
+		t.Fatalf("events = %+v, want only the playable C6 (key 84)", evs)
+	}
+}
+
+// TestNegativeTuningPitchDropped: a <staff-tuning> with a negative octave
+// installs a below-zero open-string pitch, and a note fretted from it
+// derives a negative MIDI key. Before the fix Validate rejected the score
+// and the import failed; the unwritable note must be dropped with a
+// warning while a note whose derived pitch lands back inside 0-127 stays.
+func TestNegativeTuningPitchDropped(t *testing.T) {
+	m := `<attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time>` +
+		`<staff-details><staff-lines>1</staff-lines>` +
+		`<staff-tuning line="1"><tuning-step>C</tuning-step><tuning-octave>-3</tuning-octave></staff-tuning>` +
+		`</staff-details></attributes>` +
+		// C-2 (key -12): fret 12 on the -24 string — sounds below MIDI 0.
+		`<note><pitch><step>C</step><octave>-2</octave></pitch><duration>960</duration><voice>1</voice></note>` +
+		// C-1 (key 0): fret 24 — the one pitch this tuning can still write.
+		`<note><pitch><step>C</step><octave>-1</octave></pitch><duration>960</duration><voice>1</voice></note>`
+	s, warns, err := Import(wrap(m))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if len(findWarn(warns, "outside 0-127")) != 1 {
+		t.Errorf("warnings = %v, want exactly one about the out-of-MIDI note", warns)
+	}
+	evs := s.Events()
+	if len(evs) != 1 || evs[0].Key != 0 {
+		t.Fatalf("events = %+v, want only the key-0 note", evs)
+	}
+}
+
+// TestOverflowingMeterNumeratorRejected: a <beats> value large enough
+// that numerator*beat-ticks wraps int64 used to slide the measure start
+// to a negative tick and slip past the MaxTicks extent check — the import
+// "succeeded" with a track of zero bars and zero events and no
+// explanation. It must error like any other measure past the score
+// limit (TestHostileMeterScoreTooLong is the non-overflowing cousin).
+func TestOverflowingMeterNumeratorRejected(t *testing.T) {
+	m1 := `<attributes><divisions>480</divisions><time><beats>18014398509481984</beats><beat-type>4</beat-type></time></attributes>`
+	m2 := `<note><pitch><step>E</step><octave>2</octave></pitch><duration>1920</duration><voice>1</voice></note>`
+	_, _, err := Import(wrap(m1, m2))
+	if err == nil || !strings.Contains(err.Error(), "score too long") {
+		t.Fatalf("err = %v, want a score-too-long error", err)
+	}
+}

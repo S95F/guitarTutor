@@ -1519,3 +1519,45 @@ func TestImportWindBandMixed(t *testing.T) {
 		t.Errorf("sax notes = %+v, want its own lane note (fret 12 = Ab4)", notes)
 	}
 }
+
+// TestBadTuningWarnsOnce: a Tuning property that fails to parse must warn
+// about the bad tuning and assume standard — and must NOT also claim the
+// track had "no tuning property", which would be false.
+func TestBadTuningWarnsOnce(t *testing.T) {
+	doc := gpifDocTracks("0",
+		`<Track id="0"><Name>G</Name>
+      <Staves><Staff><Properties>
+        <Property name="Tuning"><Pitches>40 45 bogus 55 59 64</Pitches></Property>
+      </Properties></Staff></Staves>
+    </Track>`,
+		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`,
+		`<Bar id="0"><Voices>0</Voices></Bar>`,
+		`<Voice id="0"><Beats>0</Beats></Voice>`,
+		`<Beat id="0"><Rhythm ref="0" /><Notes>0</Notes></Beat>`,
+		noteXML(0, 0, 0, ""),
+		`<Rhythm id="0"><NoteValue>Whole</NoteValue></Rhythm>`,
+	)
+	s, warns, err := importDoc(t, doc)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if countWarnings(warns, "bad tuning") != 1 {
+		t.Errorf("warnings = %v, want exactly one bad-tuning warning", warns)
+	}
+	if hasWarning(warns, "no tuning property") {
+		t.Errorf("warnings = %v; the track HAS a tuning property (a bad one), so the no-tuning warning lies", warns)
+	}
+	// The recovery itself is unchanged: standard tuning, and the note
+	// (GP string 0 = lowest = string 6) derives low E.
+	tr := s.Tracks[0]
+	if !tr.Tuning.Equal(score.StandardTuning) {
+		t.Errorf("Tuning = %v, want standard", tr.Tuning)
+	}
+	evs := s.Events()
+	if len(evs) != 1 || evs[0].Key != 40 || evs[0].String != 6 {
+		t.Fatalf("events = %+v, want one low-E note on string 6", evs)
+	}
+}

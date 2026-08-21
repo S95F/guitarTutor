@@ -1000,6 +1000,7 @@ func (im *importer) trackSetup(orig int, gt *gpTrack) (score.Tuning, int) {
 		props = append(append([]gpProperty{}, gt.Staves[0].Properties...), gt.Properties...)
 	}
 	var tuning score.Tuning
+	badTuning := false
 	capo := 0
 	for _, p := range props {
 		switch p.Name {
@@ -1010,6 +1011,7 @@ func (im *importer) trackSetup(orig int, gt *gpTrack) (score.Tuning, int) {
 			tn, err := parseTuning(p.Pitches)
 			if err != nil {
 				im.warnf("track %d (%s): bad tuning %q (%v); assuming standard", orig+1, gt.Name, p.Pitches, err)
+				badTuning = true
 				continue
 			}
 			tuning = tn
@@ -1020,7 +1022,11 @@ func (im *importer) trackSetup(orig int, gt *gpTrack) (score.Tuning, int) {
 		}
 	}
 	if tuning == nil {
-		im.warnf("track %d (%s): no tuning property; assuming standard EADGBE", orig+1, gt.Name)
+		// A bad tuning already warned "assuming standard" above; saying
+		// "no tuning property" on top of it would be false.
+		if !badTuning {
+			im.warnf("track %d (%s): no tuning property; assuming standard EADGBE", orig+1, gt.Name)
+		}
 		tuning = append(score.Tuning{}, score.StandardTuning...)
 	}
 	if capo < 0 || capo > maxCapoFret {

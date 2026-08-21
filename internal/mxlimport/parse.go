@@ -450,7 +450,17 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 		if num <= 0 || den <= 0 || (4*score.PPQ)%int64(den) != 0 {
 			return nil, fmt.Errorf("unsupported time signature %d/%d", num, den)
 		}
-		barTicks := int64(num) * (4 * score.PPQ / int64(den))
+		beatTicks := 4 * score.PPQ / int64(den)
+		// A numerator so large that num*beatTicks wraps int64 would slide
+		// the measure start to a nonsense (even negative) tick and slip
+		// past the MaxTicks extent check with a quietly empty score. Any
+		// measure longer than the whole permitted score already errors
+		// there, so reject it here, before the multiplication, with the
+		// same answer.
+		if int64(num) > MaxTicks/beatTicks {
+			return nil, fmt.Errorf("score too long: one %d/%d measure alone exceeds the %d-tick limit", num, den, int64(MaxTicks))
+		}
+		barTicks := int64(num) * beatTicks
 		// A pickup (implicit) measure holds fewer beats than the time
 		// signature and ENDS on the barline rather than starting on it.
 		// The score model has no short bar — Bar.Len() is fixed by the
@@ -818,6 +828,18 @@ func (im *importer) assignFingerings(pd *partData, label string, groups [][]*raw
 			p := positions[i][j]
 			if p.String < 1 {
 				continue // unplayable; reported below and filtered out
+			}
+			// The heuristic places by pitch arithmetic (open+capo+fret ==
+			// key) with no MIDI ceiling of its own, so an extreme tuning or
+			// capo can hand back a fingering whose derived pitch falls
+			// outside 0-127 — which Validate would reject, killing the whole
+			// import over one unwritable note. Drop the note instead, the
+			// same recovery the authored-fingering path (usableFingering)
+			// and the wind lane already apply.
+			if k := pd.tuning[p.String-1] + pd.capo + p.Fret; k < 0 || k > 127 {
+				im.warnf("%s: dropped note (key %d) at tick %d: string %d fret %d sounds MIDI key %d, outside 0-127",
+					label, n.key, n.start, p.String, p.Fret, k)
+				continue
 			}
 			n.str, n.fret = p.String, p.Fret
 			n.inferred = true

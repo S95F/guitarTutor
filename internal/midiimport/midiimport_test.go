@@ -795,3 +795,29 @@ func TestUserTrackIsNotAnEmptyChannel(t *testing.T) {
 			user.Name, len(s.Tracks), warns)
 	}
 }
+
+// TestImportSMPTERejectedNotPanic: an SMF whose header division word has
+// the SMPTE bit set must be rejected with the SMPTE error. Before the
+// header pre-check, gomidi's ReadFrom PANICKED on such files (unchecked
+// MetricTicks assertion in its tempo bookkeeping) before Import's own
+// TimeFormat check could run — a single corrupted bit in the division
+// field of a real file crashed the importer. The tempo meta event below
+// reproduces that exact panic shape.
+func TestImportSMPTERejectedNotPanic(t *testing.T) {
+	smpte := []byte{
+		'M', 'T', 'h', 'd', 0, 0, 0, 6,
+		0, 0, // format 0
+		0, 1, // one track
+		0xE7, 0x28, // SMPTE -25 fps, 40 subframes
+		'M', 'T', 'r', 'k', 0, 0, 0, 0x0B,
+		0x00, 0xFF, 0x51, 0x03, 0x07, 0xA1, 0x20, // tempo 500000us
+		0x00, 0xFF, 0x2F, 0x00, // end of track
+	}
+	s, _, err := Import(smpte)
+	if err == nil || !strings.Contains(err.Error(), "SMPTE") {
+		t.Fatalf("err = %v, want the SMPTE-not-supported error", err)
+	}
+	if s != nil {
+		t.Fatalf("score = %v, want nil on error", s)
+	}
+}
