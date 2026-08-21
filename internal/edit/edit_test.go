@@ -141,6 +141,45 @@ func TestClearNoteLeavesARest(t *testing.T) {
 	saveable(t, d)
 }
 
+// TestClearNoteOnEmptyStringIsNotAnEdit: deleting where there is nothing
+// to delete must change nothing — including the dirty flag and the
+// history. It used to go through mutate anyway, so a stray backspace on an
+// empty beat marked the piece unsaved, burned an undo slot per key repeat
+// of a held delete (about fifteen a second), and threw away the redo
+// stack.
+func TestClearNoteOnEmptyStringIsNotAnEdit(t *testing.T) {
+	d := New(NewOptions{})
+	if err := d.ClearNote(); err != nil {
+		t.Fatalf("ClearNote on an empty beat: %v", err)
+	}
+	if d.Dirty() {
+		t.Error("clearing nothing marked the piece dirty")
+	}
+	if d.CanUndo() {
+		t.Error("clearing nothing pushed an undo snapshot")
+	}
+
+	// And it must not eat the redo stack: type, undo, then a no-op clear —
+	// the redo has to survive.
+	if err := d.SetFret(3); err != nil {
+		t.Fatal(err)
+	}
+	if !d.Undo() {
+		t.Fatal("nothing to undo after SetFret")
+	}
+	if err := d.ClearNote(); err != nil {
+		t.Fatal(err)
+	}
+	if !d.Redo() {
+		t.Error("a no-op clear threw away the redo stack")
+	}
+	if n, ok := d.NoteAt(6); !ok || n.Fret != 3 {
+		t.Errorf("redo after the no-op clear gave %+v ok=%v, want fret 3 back", n, ok)
+	}
+	barFull(t, d)
+	saveable(t, d)
+}
+
 func TestSetDurationEatsThePadding(t *testing.T) {
 	d := New(NewOptions{}) // 4/4, so 3840 ticks a bar
 	if err := d.SetFret(0); err != nil {
@@ -526,9 +565,21 @@ func TestWindPitchOps(t *testing.T) {
 		t.Error("NudgePitch below the horn's lowest note was not refused")
 	}
 
-	// Both verbs refuse a written pitch past what a note name can hold.
+	// Both verbs refuse a written pitch past what a note name can hold —
+	// and G9 (127) IS the top, so it is accepted and the refusal one step
+	// higher has to blame G#9, not the very note that works.
+	if err := d.SetWindPitch(127); err != nil {
+		t.Fatalf("SetWindPitch(127): %v — G9 is the top note name, not past it", err)
+	}
 	if err := d.SetWindPitch(128); err == nil {
 		t.Error("SetWindPitch(128) was not refused")
+	} else {
+		if !strings.Contains(err.Error(), "G#9") {
+			t.Errorf("the refusal %q does not name G#9, the note that was asked for", err)
+		}
+		if !strings.Contains(err.Error(), "G9") {
+			t.Errorf("the refusal %q does not name G9, the actual top", err)
+		}
 	}
 	if err := d.SetWindPitch(58); err != nil {
 		t.Fatalf("SetWindPitch at the horn's bottom: %v", err)

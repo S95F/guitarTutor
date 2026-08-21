@@ -675,7 +675,7 @@ func (s *Settings) activate() {
 		s.adjust(+1)
 	case srCountIn:
 		s.notice = ""
-		if s.countIn >= maxCountIn {
+		if s.countIn >= MaxCountIn {
 			s.setCountIn(0)
 		} else {
 			s.setCountIn(s.countIn + 1)
@@ -730,15 +730,23 @@ func (s *Settings) commitDevices() {
 	s.refreshMissing()
 }
 
-const maxCountIn = 8
+// MaxCountIn bounds the count-in the settings row offers, in beats: two
+// bars of 4/4.
+//
+// It is stated here rather than taken from internal/appconfig because this
+// package deliberately does not know what the config file looks like — it
+// works against the Prefs facade and nothing else. The storage layer
+// enforces the same bound on what it loads, and a test in cmd/musictutor,
+// which is the one place that sees both, asserts the two numbers agree.
+const MaxCountIn = 8
 
 // clampCountIn holds a count-in inside the supported 0..8 beats.
 func clampCountIn(n int) int {
 	if n < 0 {
 		return 0
 	}
-	if n > maxCountIn {
-		return maxCountIn
+	if n > MaxCountIn {
+		return MaxCountIn
 	}
 	return n
 }
@@ -1697,7 +1705,7 @@ func (s *Settings) items() []settingsItem {
 	b.reserveNote(settingsSfNoteLines, sfNote, sfCol)
 
 	b.section("PRACTICE")
-	b.addRow("count-in beats", fmt.Sprintf("%d  (0-%d)", s.countIn, maxCountIn), colHUD,
+	b.addRow("count-in beats", fmt.Sprintf("%d  (0-%d)", s.countIn, MaxCountIn), colHUD,
 		settingsButton{label: "-", act: func(s *Settings) { s.adjustRow(srCountIn, -1) }},
 		settingsButton{label: "+", act: func(s *Settings) { s.adjustRow(srCountIn, +1) }})
 	if s.hasSyncTrim() {

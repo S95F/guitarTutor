@@ -212,6 +212,32 @@ func TestLoadRepairsRecentsFromDisk(t *testing.T) {
 	}
 }
 
+// TestLoadClampsHandEditedCountIn: the count-in is repaired into its
+// supported range like every other hand-editable number. It used to load
+// raw, so a hand-written 999 showed as 8 in settings (the row clamps its
+// display) while the engine was built with 999 click beats — two minutes
+// of metronome before every play, with the screen claiming otherwise.
+func TestLoadClampsHandEditedCountIn(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(EnvConfigDir, dir)
+	writeConfigFile(t, dir, fmt.Sprintf(`{"version": %d, "countInBeats": 999}`, CurrentVersion))
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.CountInBeats != MaxCountInBeats {
+		t.Errorf("CountInBeats = %d, want the cap %d", got.CountInBeats, MaxCountInBeats)
+	}
+
+	writeConfigFile(t, dir, fmt.Sprintf(`{"version": %d, "countInBeats": -3}`, CurrentVersion))
+	if got, err = Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.CountInBeats != 0 {
+		t.Errorf("a negative count-in loaded as %d, want 0", got.CountInBeats)
+	}
+}
+
 func TestLoadRefusesNewerVersion(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv(EnvConfigDir, dir)

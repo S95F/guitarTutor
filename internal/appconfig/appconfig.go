@@ -144,6 +144,16 @@ type Config struct {
 // stops correcting an error and starts being one.
 const MaxSyncTrimMS = 250
 
+// MaxCountInBeats bounds the stored count-in: two bars of 4/4, the most
+// the settings row offers. The engine takes the stored number verbatim at
+// construction, so a hand-edited file past this cap played hundreds of
+// click beats before every piece while the settings screen — which clamps
+// its display — claimed 8. The UI states the same bound for its row
+// (internal/ui's MaxCountIn) without knowing the config file exists; a
+// test in cmd/musictutor, the one place that sees both, asserts the two
+// numbers agree.
+const MaxCountInBeats = 8
+
 // Path returns the config file path: $MUSICTUTOR_CONFIG_DIR/config.json
 // when the override is set, else os.UserConfigDir()/musictutor/config.json
 // — after adopting a guitartutor-era directory if one is still there.
@@ -290,6 +300,9 @@ func (c *Config) migrate() {
 	c.Created = sanitizeCreated(c.Created)
 	if c.CountInBeats < 0 {
 		c.CountInBeats = 0
+	}
+	if c.CountInBeats > MaxCountInBeats {
+		c.CountInBeats = MaxCountInBeats
 	}
 	if c.WindowWidth < 0 {
 		c.WindowWidth = 0

@@ -268,6 +268,17 @@ func (e *Editor) report(err error) bool {
 	return false
 }
 
+// ShowError posts a refusal onto the editor's status line, in the same
+// colour and for the same hold as the editor's own (see report). It
+// exists for the actions the integrator performs on the editor's behalf —
+// opening the saved piece for practice, say — which can fail with
+// something the user needs to read: stderr is invisible to the windowed
+// user, and a key that visibly does nothing reads as a dead key. The
+// mirror of Browser.ShowError, one screen over.
+func (e *Editor) ShowError(msg string) {
+	e.msg, e.msgErr, e.msgUntil = msg, true, e.frame+edMsgFrames
+}
+
 // message is the status line still worth showing, and whether it is a
 // refusal.
 func (e *Editor) message() (string, bool) {
@@ -1038,6 +1049,11 @@ func (e *Editor) clickGrid(px, py float64) bool {
 		return false
 	}
 	systems := e.layoutSystems()
+	// The wheel moves e.scroll during Update and only Draw clamps it, so a
+	// flick and a click in the same frame would otherwise map the click
+	// through a scroll the user has never seen drawn — past the ends, the
+	// system index fell out of range and the click went dead.
+	e.clampScroll(systems)
 	h := e.systemHeight()
 	si := int((py - edGridTop + e.scroll) / h)
 	if si < 0 || si >= len(systems) {

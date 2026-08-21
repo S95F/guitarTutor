@@ -94,7 +94,16 @@ func (e *Editor) openEntry(kind edEntryKind) {
 			kind: kind, prompt: "piece title", hint: "shown in the header and saved with the piece",
 			buf: e.doc.Score().Title, max: 80,
 			allow: func(r rune) bool { return r >= 32 && r != 127 },
-			apply: func(e *Editor, s string) error { return e.doc.SetTitle(strings.TrimSpace(s)) },
+			apply: func(e *Editor, s string) error {
+				// The title entry is never seeded (typing appends, see
+				// below), so the enter-straight-away case is caught here:
+				// an unchanged title is not an edit and must not mark the
+				// piece dirty.
+				if s = strings.TrimSpace(s); s == e.doc.Score().Title {
+					return nil
+				}
+				return e.doc.SetTitle(s)
+			},
 		}
 	case edEntryCapo:
 		e.entry = &edEntry{
@@ -175,6 +184,15 @@ func (e *Editor) updateEntry() {
 // not work — losing a half-typed value to a typo is its own small cruelty.
 func (e *Editor) commitEntry() {
 	en := e.entry
+	if en.seeded {
+		// Nothing was typed: the buf is still the value already in force,
+		// and openEntry promises that enter straight away changes nothing.
+		// Applying it anyway marked the piece dirty for an edit nobody
+		// made — and the tempo entry applied its ROUNDED display over the
+		// exact value underneath, turning an imported 120.3 BPM into 120.
+		e.entry = nil
+		return
+	}
 	if strings.TrimSpace(en.buf) == "" && en.kind != edEntryTitle {
 		e.entry = nil
 		return

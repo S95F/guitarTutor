@@ -556,6 +556,19 @@ func TestSyncTrimBoundsAgree(t *testing.T) {
 	}
 }
 
+// TestCountInBoundsAgree pins the count-in cap the same way: the settings
+// row offers 0..ui.MaxCountIn and the config clamps what it loads to
+// appconfig.MaxCountInBeats, each side ignorant of the other by design.
+// If they drift, a stored count-in either shows wrong in settings or —
+// the bug this pins against — reaches engine construction unclamped, and
+// a hand-edited 999 plays two minutes of clicks before every piece.
+func TestCountInBoundsAgree(t *testing.T) {
+	if ui.MaxCountIn != appconfig.MaxCountInBeats {
+		t.Errorf("the settings row offers 0-%d beats and the config stores 0-%d",
+			ui.MaxCountIn, appconfig.MaxCountInBeats)
+	}
+}
+
 // TestShellPrefsSyncTrimRoundTrips checks the optional Prefs extension the
 // settings row probes for: without it the row does not appear at all.
 func TestShellPrefsSyncTrimRoundTrips(t *testing.T) {
@@ -699,6 +712,39 @@ func TestEditPieceUneditableImportStaysOnTheBrowser(t *testing.T) {
 	}
 	if got := sh.Depth(); got != 1 {
 		t.Fatalf("editPiece on an uneditable import left the shell %d deep, want 1 (no dead editor)", got)
+	}
+}
+
+// TestPractiseFromEditorFailureStaysOnTheEditor pins the editor's half of
+// the shell-failure routing: shift+P on a piece the shell cannot open must
+// leave the editor exactly where it is, with the refusal on the editor's
+// own status line rather than only on stderr (Editor.ShowError, whose
+// rendering internal/ui pins; this package cannot read the line back, so
+// the stack staying put is the observable half — the same split as the
+// browser routing test above).
+func TestPractiseFromEditorFailureStaysOnTheEditor(t *testing.T) {
+	t.Setenv(appconfig.EnvConfigDir, t.TempDir())
+	prefs := &shellPrefs{}
+	o := &shellOpener{prefs: prefs}
+	sh, browser := ui.NewBrowserShell(ui.Services{Opener: o, Prefs: prefs, Library: pieceLibrary{}})
+	o.shell, o.browser = sh, browser
+	t.Cleanup(o.CloseCurrent)
+
+	ed := ui.NewEditor(sh)
+	o.installEditor(ed)
+	if err := sh.Update(); err != nil {
+		t.Fatalf("draining the shell: %v", err)
+	}
+	if got := sh.Depth(); got != 2 {
+		t.Fatalf("installEditor left the shell %d deep, want 2 (browser + editor)", got)
+	}
+
+	o.practiseFromEditor(ed, filepath.Join(t.TempDir(), "gone.gtab"))
+	if err := sh.Update(); err != nil {
+		t.Fatalf("draining the shell: %v", err)
+	}
+	if got := sh.Depth(); got != 2 {
+		t.Errorf("a failed practice open changed the stack to %d deep, want the editor untouched at 2", got)
 	}
 }
 

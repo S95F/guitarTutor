@@ -1361,8 +1361,8 @@ func TestSettingsCountInClamps(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		s.adjust(+1)
 	}
-	if s.countIn != maxCountIn || p.countIn != maxCountIn {
-		t.Errorf("count-in after 20 rights = %d (prefs %d), want %d", s.countIn, p.countIn, maxCountIn)
+	if s.countIn != MaxCountIn || p.countIn != MaxCountIn {
+		t.Errorf("count-in after 20 rights = %d (prefs %d), want %d", s.countIn, p.countIn, MaxCountIn)
 	}
 	for i := 0; i < 20; i++ {
 		s.adjust(-1)
@@ -1377,7 +1377,7 @@ func TestSettingsCountInClamps(t *testing.T) {
 		t.Errorf("adjusting at the clamp saved again (saves = %d, was %d)", p.saves, saves)
 	}
 	// Enter steps up and wraps at the top.
-	for i := 1; i <= maxCountIn; i++ {
+	for i := 1; i <= MaxCountIn; i++ {
 		s.activate()
 		if s.countIn != i {
 			t.Fatalf("count-in after %d enters = %d, want %d", i, s.countIn, i)
@@ -1385,13 +1385,13 @@ func TestSettingsCountInClamps(t *testing.T) {
 	}
 	s.activate()
 	if s.countIn != 0 {
-		t.Errorf("enter at %d beats = %d, want a wrap to 0", maxCountIn, s.countIn)
+		t.Errorf("enter at %d beats = %d, want a wrap to 0", MaxCountIn, s.countIn)
 	}
 	// An out-of-range stored value is clamped when the screen opens.
 	p.countIn = 99
 	sh := NewShell(Services{Prefs: p}, settingsStubScreen{})
-	if got := NewSettings(sh).countIn; got != maxCountIn {
-		t.Errorf("stored 99 opened as %d, want %d", got, maxCountIn)
+	if got := NewSettings(sh).countIn; got != MaxCountIn {
+		t.Errorf("stored 99 opened as %d, want %d", got, MaxCountIn)
 	}
 }
 

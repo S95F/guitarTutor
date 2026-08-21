@@ -64,8 +64,10 @@ func (d *Doc) SetWindPitch(written int) error {
 	}
 	if written > 127 {
 		// The sounding pitch would fit MIDI, but the written one has no
-		// note name, so the piece could never be saved.
-		return fmt.Errorf("%s is past the top of what a note name can hold", noteName(127))
+		// note name, so the piece could never be saved. The message names
+		// the note that was ASKED for: G9 (127) is the top and is accepted,
+		// so a refusal claiming G9 was past it blamed the wrong note.
+		return fmt.Errorf("%s is past %s, the top of what a note name can hold", noteName(written), noteName(127))
 	}
 	n := w.NoteFor(w.Sounding(written))
 	return d.mutate(func() error {
@@ -145,6 +147,13 @@ func noteName(key int) string {
 // the last note of a trailing beat lets it merge back into the padding.
 func (d *Doc) ClearNote() error {
 	str := d.cur.Str
+	if _, ok := d.NoteAt(str); !ok {
+		// Nothing on the string: nothing to do, and NOT an edit. Running
+		// the no-op through mutate marked the piece dirty, pushed an undo
+		// snapshot per key repeat of a held delete, and cleared the redo
+		// stack — all for a change that never happened.
+		return nil
+	}
 	return d.mutate(func() error {
 		bt := d.Beat()
 		for i := range bt.Notes {

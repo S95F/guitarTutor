@@ -344,6 +344,25 @@ func TestEditorSaveWithNoDialogSaysSo(t *testing.T) {
 	}
 }
 
+// TestEditorShowErrorLandsOnTheStatusLine: the integrator's refusals — a
+// saved piece the shell cannot open for practice, say — render exactly
+// like the editor's own: the error colour, and the same hold before they
+// expire. Before ShowError existed, that failure went only to stderr and
+// shift+P read as a dead key.
+func TestEditorShowErrorLandsOnTheStatusLine(t *testing.T) {
+	e := newTestEditor()
+	e.ShowError("cannot practise piece.gtab: no audio")
+	msg, isErr := e.message()
+	if msg != "cannot practise piece.gtab: no audio" || !isErr {
+		t.Errorf("message() = %q (error=%v), want the shown error", msg, isErr)
+	}
+	// Held like the editor's own refusals, then gone.
+	e.frame += edMsgFrames
+	if msg, _ := e.message(); msg != "" {
+		t.Errorf("the message still reads %q after its hold expired", msg)
+	}
+}
+
 func TestEditorTextViewRoundTrips(t *testing.T) {
 	e := newTestEditor()
 	press(t, e, ebiten.KeyDigit7)
@@ -490,6 +509,25 @@ func TestEditorClickPutsTheCursorWhereYouClicked(t *testing.T) {
 	}
 }
 
+// TestEditorClickMapsThroughTheClampedScroll: the wheel adjusts e.scroll
+// in Update, but only Draw clamps it — so a wheel flick and a click in the
+// same frame reached clickGrid with a scroll the user has never seen
+// drawn. Past the end of the piece the system index fell out of range and
+// the click went dead; the click now clamps the scroll it maps through,
+// the same clamp the next Draw would apply.
+func TestEditorClickMapsThroughTheClampedScroll(t *testing.T) {
+	e := newTestEditor()
+	// What a wheel flick leaves behind mid-frame: a scroll past any bound.
+	e.scroll = 1e9
+	strTop := edGridTop + edSysPadTop
+	if !e.clickGrid(edGridX+10, strTop+2*edStringGap) {
+		t.Fatal("a click on the first system went dead: it mapped through the unclamped scroll")
+	}
+	if c := e.doc.Cursor(); c.Bar != 0 || c.Str != 3 {
+		t.Errorf("the click landed on bar %d string %d, want bar 0 string 3", c.Bar, c.Str)
+	}
+}
+
 func TestEditorClickOutsideTheStaffIsIgnored(t *testing.T) {
 	e := newTestEditor()
 	before := e.doc.Cursor()
@@ -607,7 +645,7 @@ func TestEditorMeterEntry(t *testing.T) {
 	if e.entry.buf != "4/4" {
 		t.Errorf("the entry is seeded with %q, want the meter in force (4/4)", e.entry.buf)
 	}
-	e.entry.buf = "7/8"
+	e.entry.feed([]rune("7/8"))
 	e.commitEntry()
 	if e.entry != nil {
 		t.Fatalf("the entry stayed open: %v", e.msg)
@@ -617,10 +655,43 @@ func TestEditorMeterEntry(t *testing.T) {
 	}
 }
 
+// TestEditorEntryEnterOnTheSeedChangesNothing: openEntry promises that
+// "pressing enter straight away changes nothing" — the prompt opens
+// seeded with the value already in force. It used to apply the seed
+// anyway: shift+T then enter marked a just-saved piece dirty (the leave
+// prompt then asked about changes nobody made), and the tempo entry
+// applied its ROUNDED display over the exact value underneath — shift+B
+// then enter on an imported 120.3 BPM silently made it 120.
+func TestEditorEntryEnterOnTheSeedChangesNothing(t *testing.T) {
+	e := newTestEditor()
+	if err := e.doc.SetTempo(120.3); err != nil {
+		t.Fatal(err)
+	}
+	e.doc.MarkSaved()
+
+	e.openEntry(edEntryTempo)
+	e.commitEntry()
+	if e.entry != nil {
+		t.Fatal("enter on the seeded tempo did not close the entry")
+	}
+	if got := e.doc.TempoAtCursor(); got < 120.29 || got > 120.31 {
+		t.Errorf("enter on the seeded tempo changed it to %g, want 120.3 untouched", got)
+	}
+
+	e.openEntry(edEntryTitle)
+	e.commitEntry()
+	if e.entry != nil {
+		t.Fatal("enter on the seeded title did not close the entry")
+	}
+	if e.doc.Dirty() {
+		t.Error("enter on seeded entries marked the piece dirty; nothing was edited")
+	}
+}
+
 func TestEditorEntryKeepsBadInput(t *testing.T) {
 	e := newTestEditor()
 	e.openEntry(edEntryTempo)
-	e.entry.buf = "0"
+	e.entry.feed([]rune("0"))
 	e.commitEntry()
 	if e.entry == nil {
 		t.Fatal("a refused tempo closed the entry and threw away what was typed")
@@ -1385,7 +1456,7 @@ func TestEditorCapoChipShowsAndSetsTheCapo(t *testing.T) {
 		}
 	}
 	e.openEntry(edEntryCapo)
-	e.entry.buf = "2"
+	e.entry.feed([]rune("2"))
 	e.commitEntry()
 	if e.entry != nil {
 		t.Fatalf("the entry stayed open: %v", e.msg)
@@ -1401,7 +1472,7 @@ func TestEditorCapoChipShowsAndSetsTheCapo(t *testing.T) {
 func TestEditorCapoEntryKeepsBadInput(t *testing.T) {
 	e := newTestEditor()
 	e.openEntry(edEntryCapo)
-	e.entry.buf = "99"
+	e.entry.feed([]rune("99"))
 	e.commitEntry()
 	if e.entry == nil {
 		t.Fatal("a refused capo closed the entry and threw away what was typed")

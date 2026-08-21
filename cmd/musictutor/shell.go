@@ -172,12 +172,21 @@ func (o *shellOpener) installEditor(ed *ui.Editor) {
 	// Practising what has just been written pushes the practice screen ON
 	// TOP of the editor, so Escape comes back to the editing rather than
 	// to the start screen: write, hear it, fix it, hear it again.
-	ed.SetPractice(func(p string) {
-		if _, err := o.shell.OpenPiece(p); err != nil {
-			fmt.Fprintln(os.Stderr, "musictutor: cannot practise that piece:", err)
-		}
-	})
+	ed.SetPractice(func(p string) { o.practiseFromEditor(ed, p) })
 	o.shell.Show(ed)
+}
+
+// practiseFromEditor opens a saved piece for practice on the editor's
+// behalf — the action behind its shift+P and its play button. A refusal
+// lands on the editor's own status line, where the press came from: the
+// editor half of the routing showEditor gives the start screen, and
+// without it the press visibly did nothing while the reason went to a
+// stderr no windowed user can see.
+func (o *shellOpener) practiseFromEditor(ed *ui.Editor, path string) {
+	if _, err := o.shell.OpenPiece(path); err != nil {
+		fmt.Fprintln(os.Stderr, "musictutor: cannot practise that piece:", err)
+		ed.ShowError(fmt.Sprintf("cannot practise %s: %v", filepath.Base(path), err))
+	}
 }
 
 // suggestSavePath puts the editor's suggested file name inside the
