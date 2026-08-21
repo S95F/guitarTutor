@@ -1045,3 +1045,477 @@ func TestPitchedInstrumentsAreNotPercussion(t *testing.T) {
 		})
 	}
 }
+
+// countWarnings counts the warnings containing substr, for the cases
+// where "exactly one aggregate warning" is itself the contract.
+func countWarnings(warns []string, substr string) int {
+	n := 0
+	for _, w := range warns {
+		if strings.Contains(w, substr) {
+			n++
+		}
+	}
+	return n
+}
+
+// pitchPropXML emits one GP7+ pitch property (ConcertPitch or
+// TransposedPitch): a spelled step, an accidental ("", "#", "b", "x",
+// "bb"), and a scientific octave (C4 = MIDI 60).
+func pitchPropXML(name, step, accidental string, octave int) string {
+	return `<Property name="` + name + `"><Pitch><Step>` + step + `</Step>` +
+		`<Accidental>` + accidental + `</Accidental>` +
+		`<Octave>` + itoa(octave) + `</Octave></Pitch></Property>`
+}
+
+// windNoteXML emits a GP7+ non-fretted note: pitch properties only,
+// no String/Fret.
+func windNoteXML(id int, props, extra string) string {
+	return `<Note id="` + itoa(id) + `"><Properties>` + props + `</Properties>` + extra + `</Note>`
+}
+
+// windTrackXML emits a <Track> with no Tuning property — the shape GP
+// gives a non-fretted staff; extra carries GeneralMidi or other markers.
+func windTrackXML(id int, name, extra string) string {
+	return `<Track id="` + itoa(id) + `"><Name>` + name + `</Name>` + extra +
+		`<Staves><Staff><Properties></Properties></Staff></Staves></Track>`
+}
+
+// TestImportWindSopranoSax: a track with no Tuning property, a
+// GeneralMidi program of 64, and ConcertPitch/TransposedPitch notes (the
+// soprano sax's +2 written delta) imports as the soprano sax — no
+// strings, no capo, every note on lane 1 at Fret = key − LowSounding,
+// nothing Inferred, and no warnings. Key 92 sits above the standard Span
+// (56+32 = 88) and its lane fret (36) above maxImportFret: altissimo is
+// real and the fretboard cap must not apply to a wind lane. Bar 2 is two
+// tied halves that score.Events merges back into one event.
+func TestImportWindSopranoSax(t *testing.T) {
+	doc := gpifDocTracks("0",
+		windTrackXML(0, "Sax", `<GeneralMidi><Program>64</Program></GeneralMidi>`),
+		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`+
+			`<MasterBar><Time>4/4</Time><Bars>1</Bars></MasterBar>`,
+		`<Bar id="0"><Voices>0 -1 -1 -1</Voices></Bar>`+
+			`<Bar id="1"><Voices>1 -1 -1 -1</Voices></Bar>`,
+		`<Voice id="0"><Beats>0 1 2 3</Beats></Voice><Voice id="1"><Beats>4 5</Beats></Voice>`,
+		`<Beat id="0"><Rhythm ref="0" /><Notes>0</Notes></Beat>`+
+			`<Beat id="1"><Rhythm ref="0" /><Notes>1</Notes></Beat>`+
+			`<Beat id="2"><Rhythm ref="0" /><Notes>2</Notes></Beat>`+
+			`<Beat id="3"><Rhythm ref="0" /><Notes>3</Notes></Beat>`+
+			`<Beat id="4"><Rhythm ref="1" /><Notes>4</Notes></Beat>`+
+			`<Beat id="5"><Rhythm ref="1" /><Notes>5</Notes></Beat>`,
+		// G#3 (56), Ab4 (68), Cbb5 (70, exercising "bb"), G#6 (92,
+		// altissimo), then the tied Ab4 pair; every written pitch is the
+		// concert pitch plus 2.
+		windNoteXML(0, pitchPropXML("ConcertPitch", "G", "#", 3)+pitchPropXML("TransposedPitch", "A", "#", 3), "")+
+			windNoteXML(1, pitchPropXML("ConcertPitch", "A", "b", 4)+pitchPropXML("TransposedPitch", "B", "b", 4), "")+
+			windNoteXML(2, pitchPropXML("ConcertPitch", "C", "bb", 5)+pitchPropXML("TransposedPitch", "C", "", 5), "")+
+			windNoteXML(3, pitchPropXML("ConcertPitch", "G", "#", 6)+pitchPropXML("TransposedPitch", "A", "#", 6), "")+
+			windNoteXML(4, pitchPropXML("ConcertPitch", "A", "b", 4)+pitchPropXML("TransposedPitch", "B", "b", 4),
+				`<Tie origin="true" destination="false" />`)+
+			windNoteXML(5, pitchPropXML("ConcertPitch", "A", "b", 4)+pitchPropXML("TransposedPitch", "B", "b", 4),
+				`<Tie origin="false" destination="true" />`),
+		`<Rhythm id="0"><NoteValue>Quarter</NoteValue></Rhythm>`+
+			`<Rhythm id="1"><NoteValue>Half</NoteValue></Rhythm>`,
+	)
+	s, warns, err := importDoc(t, doc)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if len(warns) != 0 {
+		t.Errorf("warnings = %v, want none", warns)
+	}
+	if len(s.Tracks) != 1 {
+		t.Fatalf("got %d tracks, want 1", len(s.Tracks))
+	}
+	tr := s.Tracks[0]
+	if tr.Wind == nil || tr.Wind.Name != "soprano sax" {
+		t.Fatalf("Wind = %v, want the soprano sax", tr.Wind)
+	}
+	if tr.Tuning != nil || tr.Capo != 0 {
+		t.Errorf("Tuning = %v Capo = %d, want no strings and no capo on a wind track", tr.Tuning, tr.Capo)
+	}
+	if tr.Name != "Sax" || tr.Program != 64 || tr.Role != score.RoleUser {
+		t.Errorf("track = %q program %d role %d, want Sax program 64 role %d", tr.Name, tr.Program, tr.Role, score.RoleUser)
+	}
+	evs := s.Events()
+	want := []struct {
+		start, end int64
+		key        int
+	}{
+		{0, 960, 56}, {960, 1920, 68}, {1920, 2880, 70}, {2880, 3840, 92},
+		{3840, 7680, 68}, // the tied halves, merged back by Events
+	}
+	if len(evs) != len(want) {
+		t.Fatalf("got %d events %+v, want %d", len(evs), evs, len(want))
+	}
+	for i, wv := range want {
+		ev := evs[i]
+		if ev.Start != wv.start || ev.End != wv.end || ev.Key != wv.key {
+			t.Errorf("event %d = (%d,%d,key %d), want (%d,%d,key %d)",
+				i, ev.Start, ev.End, ev.Key, wv.start, wv.end, wv.key)
+		}
+		if ev.String != 1 || ev.Fret != wv.key-56 {
+			t.Errorf("event %d = string %d fret %d, want the lane (string 1 fret %d)",
+				i, ev.String, ev.Fret, wv.key-56)
+		}
+	}
+	for _, bar := range tr.Bars {
+		for _, beat := range bar.Beats {
+			for _, n := range beat.Notes {
+				if n.Inferred {
+					t.Fatalf("note at tick %d is marked Inferred; a wind lane is arithmetic, not a guess", beat.Start)
+				}
+			}
+		}
+	}
+}
+
+// TestImportWindDeltaResolvesClarinet: with no GeneralMidi program the
+// transposition delta plus the note range must pick the instrument, and
+// only when they pick exactly one. Delta +2 alone fits the soprano sax,
+// the clarinet, and the trumpet; a note at D3 (50) sits below the sax
+// (56) and the trumpet (52), leaving the clarinet as the single match.
+func TestImportWindDeltaResolvesClarinet(t *testing.T) {
+	doc := gpifDocTracks("0",
+		windTrackXML(0, "Horn", ""),
+		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`,
+		`<Bar id="0"><Voices>0 -1 -1 -1</Voices></Bar>`,
+		`<Voice id="0"><Beats>0 1</Beats></Voice>`,
+		`<Beat id="0"><Rhythm ref="0" /><Notes>0</Notes></Beat>`+
+			`<Beat id="1"><Rhythm ref="0" /><Notes>1</Notes></Beat>`,
+		windNoteXML(0, pitchPropXML("ConcertPitch", "D", "", 3)+pitchPropXML("TransposedPitch", "E", "", 3), "")+
+			windNoteXML(1, pitchPropXML("ConcertPitch", "D", "", 4)+pitchPropXML("TransposedPitch", "E", "", 4), ""),
+		`<Rhythm id="0"><NoteValue>Half</NoteValue></Rhythm>`,
+	)
+	s, warns, err := importDoc(t, doc)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if len(warns) != 0 {
+		t.Errorf("warnings = %v, want none", warns)
+	}
+	tr := s.Tracks[0]
+	if tr.Wind == nil || tr.Wind.Name != "clarinet" {
+		t.Fatalf("Wind = %v, want the clarinet (the only +2 instrument reaching D3)", tr.Wind)
+	}
+	if tr.Program != 71 {
+		t.Errorf("Program = %d, want the clarinet's 71 (the file declared none)", tr.Program)
+	}
+	evs := s.Events()
+	if len(evs) != 2 || evs[0].Key != 50 || evs[0].Fret != 0 || evs[1].Key != 62 || evs[1].Fret != 12 {
+		t.Fatalf("events = %+v, want D3 on fret 0 and D4 on fret 12", evs)
+	}
+}
+
+// TestImportWindChordKeepsHighest: a beat listing three notes cannot all
+// sound on a monophonic instrument; the highest sounding note survives —
+// melody on top — with one aggregate warning, not one per dropped note.
+// The top note is spelled Fx4 (double sharp), exercising "x".
+func TestImportWindChordKeepsHighest(t *testing.T) {
+	doc := gpifDocTracks("0",
+		windTrackXML(0, "Sax", `<GeneralMidi><Program>64</Program></GeneralMidi>`),
+		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`,
+		`<Bar id="0"><Voices>0 -1 -1 -1</Voices></Bar>`,
+		`<Voice id="0"><Beats>0</Beats></Voice>`,
+		`<Beat id="0"><Rhythm ref="0" /><Notes>0 1 2</Notes></Beat>`,
+		windNoteXML(0, pitchPropXML("ConcertPitch", "C", "", 4), "")+
+			windNoteXML(1, pitchPropXML("ConcertPitch", "E", "", 4), "")+
+			windNoteXML(2, pitchPropXML("ConcertPitch", "F", "x", 4), ""),
+		`<Rhythm id="0"><NoteValue>Whole</NoteValue></Rhythm>`,
+	)
+	s, warns, err := importDoc(t, doc)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	evs := s.Events()
+	if len(evs) != 1 || evs[0].Key != 67 || evs[0].String != 1 || evs[0].Fret != 11 {
+		t.Fatalf("events = %+v, want only the chord's highest note (key 67) on the lane", evs)
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0], "kept only the highest note of 1 chord(s); a soprano sax plays one note at a time") {
+		t.Errorf("warnings = %v, want exactly the aggregate chord warning", warns)
+	}
+}
+
+// TestImportWindRangeDrops: below the instrument a note is dropped, never
+// octave-rewritten; above, the ceiling is the WRITTEN pitch — G9 (127)
+// sounds fine but a soprano sax player would read 129, which has no MIDI
+// note name, so the text format could never save it. Each drop warns and
+// the surviving note imports intact.
+func TestImportWindRangeDrops(t *testing.T) {
+	doc := gpifDocTracks("0",
+		windTrackXML(0, "Sax", `<GeneralMidi><Program>64</Program></GeneralMidi>`),
+		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`,
+		`<Bar id="0"><Voices>0 -1 -1 -1</Voices></Bar>`,
+		`<Voice id="0"><Beats>0 1 2</Beats></Voice>`,
+		`<Beat id="0"><Rhythm ref="0" /><Notes>0</Notes></Beat>`+
+			`<Beat id="1"><Rhythm ref="0" /><Notes>1</Notes></Beat>`+
+			`<Beat id="2"><Rhythm ref="1" /><Notes>2</Notes></Beat>`,
+		windNoteXML(0, pitchPropXML("ConcertPitch", "D", "", 3), "")+ // 50, below 56
+			windNoteXML(1, pitchPropXML("ConcertPitch", "G", "", 9), "")+ // 127, written 129
+			windNoteXML(2, pitchPropXML("ConcertPitch", "A", "b", 4), ""), // 68, fine
+		`<Rhythm id="0"><NoteValue>Quarter</NoteValue></Rhythm>`+
+			`<Rhythm id="1"><NoteValue>Half</NoteValue></Rhythm>`,
+	)
+	s, warns, err := importDoc(t, doc)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !hasWarning(warns, "dropped note (key 50): below the soprano sax's lowest note (key 56)") {
+		t.Errorf("warnings = %v, want the below-range drop naming key 50 and the floor", warns)
+	}
+	if !hasWarning(warns, "dropped note (key 127): its written pitch on a soprano sax is past MIDI 127") {
+		t.Errorf("warnings = %v, want the written-ceiling drop naming key 127", warns)
+	}
+	if len(warns) != 2 {
+		t.Errorf("warnings = %v, want exactly the two range drops", warns)
+	}
+	evs := s.Events()
+	if len(evs) != 1 || evs[0].Key != 68 || evs[0].Start != 1920 || evs[0].End != 3840 {
+		t.Fatalf("events = %+v, want only the surviving Ab4 half note", evs)
+	}
+}
+
+// TestImportWindTransposeMismatchWarns: the chosen instrument comes from
+// the declared program; a TransposedPitch that contradicts its
+// transposition is reported once per track and the concert pitch wins —
+// the model stores sounding pitch, and the written pitch is only
+// evidence.
+func TestImportWindTransposeMismatchWarns(t *testing.T) {
+	doc := gpifDocTracks("0",
+		windTrackXML(0, "Sax", `<GeneralMidi><Program>64</Program></GeneralMidi>`),
+		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`,
+		`<Bar id="0"><Voices>0 -1 -1 -1</Voices></Bar>`,
+		`<Voice id="0"><Beats>0</Beats></Voice>`,
+		`<Beat id="0"><Rhythm ref="0" /><Notes>0</Notes></Beat>`,
+		// Ab4 concert (68) but C5 written (72): a +4 delta on a +2 horn.
+		windNoteXML(0, pitchPropXML("ConcertPitch", "A", "b", 4)+pitchPropXML("TransposedPitch", "C", "", 5), ""),
+		`<Rhythm id="0"><NoteValue>Whole</NoteValue></Rhythm>`,
+	)
+	s, warns, err := importDoc(t, doc)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	evs := s.Events()
+	if len(evs) != 1 || evs[0].Key != 68 {
+		t.Fatalf("events = %+v, want the concert Ab4 kept", evs)
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0],
+		"the written pitch on 1 note(s) disagrees with the soprano sax's transposition; the concert pitch wins") {
+		t.Errorf("warnings = %v, want exactly the one transposition cross-check warning", warns)
+	}
+}
+
+// TestImportTuningAndPitchStaysFretted: a Tuning property is a fretted
+// track's signature, and destroying a tab is worse than importing
+// nothing — pitch properties on its notes must never flip the track to
+// wind, whether they ride alongside the authored fingering or stand
+// alone.
+func TestImportTuningAndPitchStaysFretted(t *testing.T) {
+	frame := func(notes string) string {
+		return gpifDoc(
+			`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`,
+			`<Bar id="0"><Voices>0 -1 -1 -1</Voices></Bar>`,
+			`<Voice id="0"><Beats>0</Beats></Voice>`,
+			`<Beat id="0"><Rhythm ref="0" /><Notes>0</Notes></Beat>`,
+			notes,
+			`<Rhythm id="0"><NoteValue>Whole</NoteValue></Rhythm>`,
+		)
+	}
+	t.Run("pitch alongside authored fingering", func(t *testing.T) {
+		// Low E string fret 5 sounds A2 (45); the pitch properties
+		// restate it and are redundant — the import stays clean.
+		doc := frame(`<Note id="0"><Properties>` +
+			`<Property name="String"><String>0</String></Property>` +
+			`<Property name="Fret"><Fret>5</Fret></Property>` +
+			pitchPropXML("ConcertPitch", "A", "", 2) +
+			pitchPropXML("TransposedPitch", "A", "", 2) +
+			`</Properties></Note>`)
+		s, warns, err := importDoc(t, doc)
+		if err != nil {
+			t.Fatalf("Import: %v", err)
+		}
+		if len(warns) != 0 {
+			t.Errorf("warnings = %v, want none", warns)
+		}
+		tr := s.Tracks[0]
+		if tr.Wind != nil {
+			t.Fatalf("Wind = %v, want a fretted track — a Tuning property must veto wind classification", tr.Wind)
+		}
+		if len(tr.Tuning) != len(score.StandardTuning) {
+			t.Fatalf("tuning has %d strings, want %d", len(tr.Tuning), len(score.StandardTuning))
+		}
+		evs := s.Events()
+		if len(evs) != 1 || evs[0].Key != 45 || evs[0].String != 6 || evs[0].Fret != 5 {
+			t.Fatalf("events = %+v, want the authored string 6 fret 5 (key 45)", evs)
+		}
+	})
+	t.Run("pitch only", func(t *testing.T) {
+		doc := frame(windNoteXML(0, pitchPropXML("ConcertPitch", "A", "", 2)+pitchPropXML("TransposedPitch", "A", "", 2), ""))
+		s, warns, err := importDoc(t, doc)
+		if err != nil {
+			t.Fatalf("Import: %v", err)
+		}
+		if s.Tracks[0].Wind != nil {
+			t.Fatalf("Wind = %v, want a fretted track", s.Tracks[0].Wind)
+		}
+		if len(s.Events()) != 0 {
+			t.Fatalf("events = %+v, want none (the fingerless note skips)", s.Events())
+		}
+		if !hasWarning(warns, "no String/Fret properties; skipped") {
+			t.Errorf("warnings = %v, want today's per-note skip", warns)
+		}
+		if hasWarning(warns, "guess") {
+			t.Errorf("warnings = %v, want no wind-classification warning — the Tuning property settled it", warns)
+		}
+		if hasWarning(warns, "is not supported") {
+			t.Errorf("warnings = %v, pitch properties are recognized and must not be reported unknown", warns)
+		}
+	})
+}
+
+// TestImportWindAmbiguousSkipped: a wind candidate whose instrument
+// cannot be pinned to exactly one registry entry keeps today's behavior
+// — the notes skip with per-note warnings and the standard-tuning
+// fallback stands — plus exactly one aggregate warning naming the
+// evidence that was missing. Guessing is never on the table.
+func TestImportWindAmbiguousSkipped(t *testing.T) {
+	buildDoc := func(trackExtra string, noteProps []string) string {
+		rhythm := `<Rhythm id="0"><NoteValue>Whole</NoteValue></Rhythm>`
+		var beats, notes, beatIDs string
+		for i, p := range noteProps {
+			if i > 0 {
+				beatIDs += " "
+			}
+			beatIDs += itoa(i)
+			beats += `<Beat id="` + itoa(i) + `"><Rhythm ref="0" /><Notes>` + itoa(i) + `</Notes></Beat>`
+			notes += windNoteXML(i, p, "")
+		}
+		if len(noteProps) == 2 {
+			rhythm = `<Rhythm id="0"><NoteValue>Half</NoteValue></Rhythm>`
+		}
+		return gpifDocTracks("0",
+			windTrackXML(0, "Horn", trackExtra),
+			`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`,
+			`<Bar id="0"><Voices>0 -1 -1 -1</Voices></Bar>`,
+			`<Voice id="0"><Beats>`+beatIDs+`</Beats></Voice>`,
+			beats, notes, rhythm)
+	}
+	c4 := pitchPropXML("ConcertPitch", "C", "", 4)
+	tests := []struct {
+		name       string
+		trackExtra string
+		noteProps  []string
+		reason     string
+	}{
+		{"no transposed pitch", "", []string{c4},
+			"no note carries a transposed pitch to reveal the transposition"},
+		{"inconsistent transposition", "", []string{
+			c4 + pitchPropXML("TransposedPitch", "D", "", 4),
+			pitchPropXML("ConcertPitch", "D", "", 4) + pitchPropXML("TransposedPitch", "F", "", 4)},
+			"written-minus-concert transposition is inconsistent"},
+		{"transposition matches nothing", "", []string{
+			c4 + pitchPropXML("TransposedPitch", "F", "", 4)},
+			"no wind instrument this app knows matches the notes' transposition (+5 semitones written) and range"},
+		{"several instruments fit", "", []string{
+			c4 + pitchPropXML("TransposedPitch", "D", "", 4),
+			pitchPropXML("ConcertPitch", "B", "b", 4) + pitchPropXML("TransposedPitch", "C", "", 5)},
+			"the pitch evidence fits more than one wind instrument (soprano sax, clarinet, trumpet)"},
+		{"program is not a wind", `<GeneralMidi><Program>0</Program></GeneralMidi>`, []string{
+			c4 + pitchPropXML("TransposedPitch", "D", "", 4)},
+			"the track's General MIDI program 0 names no wind instrument this app knows"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, warns, err := importDoc(t, buildDoc(tt.trackExtra, tt.noteProps))
+			if err != nil {
+				t.Fatalf("Import: %v", err)
+			}
+			if err := s.Validate(); err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+			tr := s.Tracks[0]
+			if tr.Wind != nil {
+				t.Fatalf("Wind = %v, want no wind classification without conclusive evidence", tr.Wind)
+			}
+			if len(tr.Tuning) != len(score.StandardTuning) {
+				t.Errorf("tuning has %d strings, want the standard fallback", len(tr.Tuning))
+			}
+			if len(s.Events()) != 0 {
+				t.Errorf("events = %+v, want none (the notes skip)", s.Events())
+			}
+			if !hasWarning(warns, tt.reason) {
+				t.Errorf("warnings = %v, want the aggregate reason %q", warns, tt.reason)
+			}
+			if n := countWarnings(warns, "skipped rather than imported as a guess"); n != 1 {
+				t.Errorf("warnings = %v, want exactly one aggregate wind warning, got %d", warns, n)
+			}
+			if !hasWarning(warns, "no String/Fret properties; skipped") {
+				t.Errorf("warnings = %v, want today's per-note skip kept", warns)
+			}
+			if !hasWarning(warns, "assuming standard EADGBE") {
+				t.Errorf("warnings = %v, want today's tuning fallback kept", warns)
+			}
+			if hasWarning(warns, "is not supported") {
+				t.Errorf("warnings = %v, pitch properties are recognized and must not be reported unknown", warns)
+			}
+		})
+	}
+}
+
+// TestImportWindBandMixed: a guitar and a sax in one file keep their own
+// families and their own bars — classification evidence from one track's
+// notes must not leak into the other, and the wind track's bar lookup
+// still runs on the original track index.
+func TestImportWindBandMixed(t *testing.T) {
+	doc := gpifDocTracks("0 1",
+		trackXML(0, "G", "")+windTrackXML(1, "Sax", `<GeneralMidi><Program>64</Program></GeneralMidi>`),
+		`<MasterBar><Time>4/4</Time><Bars>0 1</Bars></MasterBar>`,
+		`<Bar id="0"><Voices>0 -1 -1 -1</Voices></Bar>`+
+			`<Bar id="1"><Voices>1 -1 -1 -1</Voices></Bar>`,
+		`<Voice id="0"><Beats>0</Beats></Voice><Voice id="1"><Beats>1</Beats></Voice>`,
+		`<Beat id="0"><Rhythm ref="0" /><Notes>0</Notes></Beat>`+
+			`<Beat id="1"><Rhythm ref="0" /><Notes>1</Notes></Beat>`,
+		noteXML(0, 0, 5, "")+
+			windNoteXML(1, pitchPropXML("ConcertPitch", "A", "b", 4)+pitchPropXML("TransposedPitch", "B", "b", 4), ""),
+		`<Rhythm id="0"><NoteValue>Whole</NoteValue></Rhythm>`,
+	)
+	s, warns, err := importDoc(t, doc)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if len(warns) != 0 {
+		t.Errorf("warnings = %v, want none", warns)
+	}
+	if len(s.Tracks) != 2 {
+		t.Fatalf("got %d tracks %v, want 2", len(s.Tracks), trackNames(s))
+	}
+	g, sax := s.Tracks[0], s.Tracks[1]
+	if g.Wind != nil || len(g.Tuning) != 6 || g.Role != score.RoleUser {
+		t.Errorf("guitar = wind %v tuning %v role %d, want a fretted RoleUser track", g.Wind, g.Tuning, g.Role)
+	}
+	if sax.Wind == nil || sax.Wind.Name != "soprano sax" || sax.Role != score.RoleBacking {
+		t.Errorf("sax = wind %v role %d, want the soprano sax as RoleBacking", sax.Wind, sax.Role)
+	}
+	notes := g.Bars[0].Beats[0].Notes
+	if len(notes) != 1 || notes[0].String != 6 || notes[0].Fret != 5 {
+		t.Errorf("guitar notes = %+v, want its own string 6 fret 5", notes)
+	}
+	notes = sax.Bars[0].Beats[0].Notes
+	if len(notes) != 1 || notes[0].String != 1 || notes[0].Fret != 12 {
+		t.Errorf("sax notes = %+v, want its own lane note (fret 12 = Ab4)", notes)
+	}
+}

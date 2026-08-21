@@ -27,6 +27,26 @@
 // naming it rather than imported as a bar-long row of rests. Import fails
 // only if that leaves nothing behind.
 //
+// GP7+ spells notes on a non-fretted track with pitch properties —
+// ConcertPitch, the sounding pitch, and TransposedPitch, the written one
+// the player reads — instead of String/Fret. Such a track imports as a
+// monophonic wind part (score.WindInstrument) only on explicit
+// structural evidence, because a fretted track misread as wind would
+// destroy its tab, which is worse than importing nothing: the track must
+// carry no Tuning property anywhere, no note may carry a String or Fret
+// property, and the registry instrument must resolve from the track's
+// GeneralMidi Program (score.WindByProgram) or, when no program is
+// declared, from a consistent written-minus-concert transposition plus a
+// note range that together fit exactly one registry instrument. Anything
+// less — a program the registry does not know as a wind, a missing or
+// inconsistent transposition, zero or several matching instruments —
+// keeps the fretted fallback: the notes are skipped with warnings plus
+// one aggregate warning naming the missing evidence, never a guessed
+// instrument. The model stores the sounding pitch; TransposedPitch is
+// classification evidence and a cross-check only (a disagreement with
+// the chosen instrument's transposition warns once per track, and the
+// concert pitch wins).
+//
 // Clean-room note (docs/DECISIONS.md D3): the reference implementations
 // for this format are MPL/LGPL licensed; nothing here is ported or
 // paraphrased from their source. The importer is written from the
@@ -35,8 +55,11 @@
 //
 // Honesty note: because the test fixture is self-authored, the importer
 // and its fixture embody one shared understanding of the format — files
-// exported by Guitar Pro itself are the untested gap. Real .gp files
-// that fail to import (or import wrongly) are wanted as bug reports; see
+// exported by Guitar Pro itself are the untested gap. Wind import in
+// particular is clean-room from the public gpif documentation and has
+// never been run against a real Guitar Pro wind export; the warning
+// trail remains the evidence channel. Real .gp files that fail to import
+// (or import wrongly) are wanted as bug reports; see
 // testdata/README-gp.txt.
 package gpimport
 
@@ -56,9 +79,11 @@ import (
 	"github.com/S95F/musicTutor/internal/score"
 )
 
-// DefaultProgram is the General MIDI program assigned to imported tracks:
-// 25, steel-string acoustic guitar, matching the text format's default
-// (docs/TEXTFORMAT.md). GPIF sound assignments are not imported yet.
+// DefaultProgram is the General MIDI program assigned to imported
+// fretted tracks: 25, steel-string acoustic guitar, matching the text
+// format's default (docs/TEXTFORMAT.md). A track's <GeneralMidi><Program>
+// is parsed, but only wind tracks consume it — fretted tracks keep the
+// guitar default until sound assignments are imported properly.
 const DefaultProgram = 25
 
 // gpifEntry is the archive path of the musical payload.
@@ -251,10 +276,13 @@ type gpInstrumentSet struct {
 	Type string `xml:"Type"`
 }
 
-// gpGeneralMidi carries a track's General MIDI assignment. The channel is
-// a pointer so an absent element is distinguishable from channel 0.
+// gpGeneralMidi carries a track's General MIDI assignment. Both fields
+// are pointers so an absent element is distinguishable from 0 — channel 0
+// is a real channel, and program 0 (piano) is a real program that must
+// not be confused with "the file said nothing".
 type gpGeneralMidi struct {
 	PrimaryChannel *int `xml:"PrimaryChannel"`
+	Program        *int `xml:"Program"` // 0-based General MIDI program
 }
 
 // drumKitNames are the InstrumentSet names that mean a kit, matched
@@ -311,12 +339,57 @@ type gpStaff struct {
 
 // gpProperty is a name-keyed property; which child element carries the
 // payload depends on the name ("Tuning" uses Pitches, "Fret"/"CapoFret"
-// use Fret, "String" uses String).
+// use Fret, "String" uses String, "ConcertPitch"/"TransposedPitch" use
+// Pitch).
 type gpProperty struct {
-	Name    string `xml:"name,attr"`
-	Pitches string `xml:"Pitches"` // space-separated MIDI notes, low to high
-	Fret    *int   `xml:"Fret"`
-	String  *int   `xml:"String"` // 0 = lowest-pitched string
+	Name    string   `xml:"name,attr"`
+	Pitches string   `xml:"Pitches"` // space-separated MIDI notes, low to high
+	Fret    *int     `xml:"Fret"`
+	String  *int     `xml:"String"` // 0 = lowest-pitched string
+	Pitch   *gpPitch `xml:"Pitch"`
+}
+
+// gpPitch is the spelled pitch a ConcertPitch or TransposedPitch
+// property carries: a note letter, an accidental, and a scientific
+// octave (C4 = MIDI 60). Octave is a pointer so a property missing its
+// octave reads as unparsable rather than as octave 0.
+type gpPitch struct {
+	Step       string `xml:"Step"`
+	Accidental string `xml:"Accidental"`
+	Octave     *int   `xml:"Octave"`
+}
+
+// stepSemitones maps a pitch step letter to its semitone offset within
+// the octave.
+var stepSemitones = map[string]int{"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
+
+// accidentalOffsets maps the gpif accidental spellings to semitone
+// offsets: "x" is a double sharp, "bb" a double flat.
+var accidentalOffsets = map[string]int{"": 0, "#": 1, "b": -1, "x": 2, "bb": -2}
+
+// pitchKey converts a spelled pitch to its MIDI key. The octave bound
+// rejects hostile values before the multiplication can matter; it is
+// deliberately one octave wider than MIDI on each side so a legally
+// spelled note just past the keyboard (Cb-1, B#9) still converts and is
+// then dropped by the range checks with a warning that names its key,
+// instead of vanishing as "unparsable".
+func pitchKey(p *gpPitch) (int, bool) {
+	if p == nil || p.Octave == nil {
+		return 0, false
+	}
+	sem, ok := stepSemitones[strings.TrimSpace(p.Step)]
+	if !ok {
+		return 0, false
+	}
+	acc, ok := accidentalOffsets[strings.TrimSpace(p.Accidental)]
+	if !ok {
+		return 0, false
+	}
+	oct := *p.Octave
+	if oct < -2 || oct > 10 {
+		return 0, false
+	}
+	return (oct+1)*12 + sem + acc, true
 }
 
 type gpMasterBar struct {
@@ -676,27 +749,244 @@ func (im *importer) tempos() score.TempoMap {
 	return deduped
 }
 
-// buildTrack converts one GPIF track: tuning and capo from its (first)
-// staff's properties, then one score bar per master bar.
+// A trackConv is one kept track's conversion context: which family the
+// track resolved to — the wind instrument, or the fretted tuning and
+// capo — plus the per-track counters the wind path reports as one
+// aggregate warning each instead of note by note.
+type trackConv struct {
+	tuning score.Tuning
+	capo   int
+	wind   *score.WindInstrument
+
+	chords     int // beats collapsed to their highest note
+	mismatched int // notes whose written pitch disagrees with wind.Transpose
+}
+
+// buildTrack converts one GPIF track: wind classification first, then —
+// for the fretted majority — tuning and capo from its (first) staff's
+// properties, then one score bar per master bar.
 //
 // orig is the track's position in the document's track order, not its
 // position among the tracks being kept — every bar lookup below is
 // indexed by the original order, and warnings quote it so a number in a
 // warning matches the track number in the file.
 func (im *importer) buildTrack(orig int, gt *gpTrack, role score.TrackRole) *score.Track {
-	tuning, capo := im.trackSetup(orig, gt)
-	tr := &score.Track{
-		Name:    gt.Name,
-		Tuning:  tuning,
-		Capo:    capo,
-		Program: DefaultProgram,
-		Role:    role,
+	tc := &trackConv{wind: im.classifyWind(orig, gt)}
+	tr := &score.Track{Name: gt.Name, Role: role}
+	if tc.wind != nil {
+		// One representation per family (Validate rejects a mix): a wind
+		// track carries its instrument and no strings, no capo. The
+		// file's declared program is kept when present — the file said
+		// something, so it wins — and a track resolved by pitch evidence
+		// alone takes the instrument's own program rather than the
+		// importer's guitar default.
+		tr.Wind = tc.wind
+		tr.Program = tc.wind.Program
+		if p := gt.GeneralMidi.Program; p != nil {
+			tr.Program = *p
+		}
+	} else {
+		tc.tuning, tc.capo = im.trackSetup(orig, gt)
+		tr.Tuning, tr.Capo = tc.tuning, tc.capo
+		tr.Program = DefaultProgram
 	}
 	for mi := range im.doc.MasterBars {
 		bar := tr.AppendBar(im.barNums[mi], im.barDens[mi])
-		im.fillBar(orig, mi, bar, tuning, capo)
+		im.fillBar(orig, mi, bar, tc)
+	}
+	// Only the wind path counts into these; both stay 0 on a fretted track.
+	if tc.chords > 0 {
+		im.warnf("%s: kept only the highest note of %d chord(s); a %s plays one note at a time",
+			trackLabel(gt, orig), tc.chords, tc.wind.Name)
+	}
+	if tc.mismatched > 0 {
+		im.warnf("%s: the written pitch on %d note(s) disagrees with the %s's transposition; the concert pitch wins",
+			trackLabel(gt, orig), tc.mismatched, tc.wind.Name)
 	}
 	return tr
+}
+
+// hasTuningProperty reports whether any staff or track property declares
+// a tuning. Presence alone counts — even one that would fail to parse —
+// because for wind classification the property is a fretted track's
+// signature, and misreading a fretted track as wind destroys its tab.
+func hasTuningProperty(gt *gpTrack) bool {
+	for _, p := range gt.Properties {
+		if p.Name == "Tuning" {
+			return true
+		}
+	}
+	for _, st := range gt.Staves {
+		for _, p := range st.Properties {
+			if p.Name == "Tuning" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// quietIDs parses a space-separated id list without warning about
+// unparsable tokens: it exists for the classification pre-pass, which
+// walks the same references fillBar will walk again — the real pass owns
+// every warning, so this one only reads.
+func quietIDs(list string) []int {
+	var out []int
+	for _, f := range strings.Fields(list) {
+		if v, err := strconv.Atoi(f); err == nil {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// windEvidence is what the classification pre-pass learns from one
+// track's notes.
+type windEvidence struct {
+	concert        int          // notes carrying a parsable ConcertPitch
+	fretted        int          // notes carrying a String or Fret property
+	minKey, maxKey int          // sounding range of the ConcertPitch notes
+	deltas         map[int]bool // TransposedPitch − ConcertPitch, where both parse
+}
+
+// scanWind walks one track's notes collecting wind-classification
+// evidence. The walk mirrors barBeats exactly — same bar slot by
+// original index, same first-voice rule, same grace-beat skip — so every
+// note it reads is a note the import would place, and no note the import
+// skips can sway the classification. It is silent throughout: fillBar
+// re-walks the same references and owns the warnings.
+func (im *importer) scanWind(orig int) windEvidence {
+	ev := windEvidence{deltas: map[int]bool{}}
+	for mi := range im.doc.MasterBars {
+		barIDs := quietIDs(im.doc.MasterBars[mi].Bars)
+		if orig >= len(barIDs) || barIDs[orig] < 0 {
+			continue
+		}
+		gb := im.bars[barIDs[orig]]
+		if gb == nil {
+			continue
+		}
+		first := -1
+		for _, vid := range quietIDs(gb.Voices) {
+			if vid >= 0 {
+				first = vid
+				break
+			}
+		}
+		voice := im.voices[first]
+		if voice == nil {
+			continue
+		}
+		for _, bid := range quietIDs(voice.Beats) {
+			gbt := im.beats[bid]
+			if gbt == nil || strings.TrimSpace(gbt.GraceNotes) != "" {
+				continue
+			}
+			for _, nid := range quietIDs(gbt.Notes) {
+				gn := im.notes[nid]
+				if gn == nil {
+					continue
+				}
+				var concert, transposed *gpPitch
+				for _, p := range gn.Properties {
+					switch p.Name {
+					case "ConcertPitch":
+						concert = p.Pitch
+					case "TransposedPitch":
+						transposed = p.Pitch
+					case "String", "Fret":
+						ev.fretted++
+					}
+				}
+				key, ok := pitchKey(concert)
+				if !ok {
+					continue
+				}
+				if ev.concert == 0 || key < ev.minKey {
+					ev.minKey = key
+				}
+				if ev.concert == 0 || key > ev.maxKey {
+					ev.maxKey = key
+				}
+				ev.concert++
+				if tk, ok := pitchKey(transposed); ok {
+					ev.deltas[tk-key] = true
+				}
+			}
+		}
+	}
+	return ev
+}
+
+// classifyWind decides whether a track imports as a wind part, and as
+// which instrument. Classification is structural and conservative — a
+// fretted track misread as wind loses its authored tab, which is worse
+// than importing nothing — so a track is a wind candidate only when it
+// carries no Tuning property at all, none of its notes carry a String or
+// Fret property, and its notes do carry concert pitch. Names are never
+// consulted: the percussion filter learned that lesson the expensive way
+// (see drumKitNames).
+//
+// A candidate still needs a registry instrument, resolved in order: the
+// track's GeneralMidi Program via score.WindByProgram — an explicitly
+// declared program the registry does not know as a wind is contradictory
+// evidence, not a license to fall through, because the file named some
+// other instrument and importing it under a wind's name would
+// misrepresent it — then, with no program declared, the one consistent
+// written-minus-concert delta combined with the notes fitting the
+// candidate's sounding range (LowSounding up to written MIDI 127; Span
+// caps only what the editor offers, so altissimo does not disqualify).
+// Anything ambiguous or contradictory returns nil with one aggregate
+// warning naming the missing evidence; the notes then take today's
+// skip-with-warnings path rather than a guessed instrument.
+func (im *importer) classifyWind(orig int, gt *gpTrack) *score.WindInstrument {
+	if hasTuningProperty(gt) {
+		return nil
+	}
+	ev := im.scanWind(orig)
+	if ev.concert == 0 || ev.fretted > 0 {
+		return nil
+	}
+	skip := func(reason string) *score.WindInstrument {
+		im.warnf("%s: notes carry concert pitch instead of string/fret (a wind part), but %s; the notes are skipped rather than imported as a guess",
+			trackLabel(gt, orig), reason)
+		return nil
+	}
+	if p := gt.GeneralMidi.Program; p != nil {
+		if w := score.WindByProgram(*p); w != nil {
+			return w
+		}
+		return skip(fmt.Sprintf("the track's General MIDI program %d names no wind instrument this app knows", *p))
+	}
+	if len(ev.deltas) == 0 {
+		return skip("the track declares no General MIDI program and no note carries a transposed pitch to reveal the transposition")
+	}
+	if len(ev.deltas) > 1 {
+		return skip("the track declares no General MIDI program and the notes' written-minus-concert transposition is inconsistent")
+	}
+	var delta int
+	for d := range ev.deltas {
+		delta = d
+	}
+	var matches []*score.WindInstrument
+	for i := range score.WindInstruments {
+		w := &score.WindInstruments[i]
+		if w.Transpose == delta && ev.minKey >= w.LowSounding && ev.maxKey <= 127-w.Transpose {
+			matches = append(matches, w)
+		}
+	}
+	switch len(matches) {
+	case 1:
+		return matches[0]
+	case 0:
+		return skip(fmt.Sprintf("no wind instrument this app knows matches the notes' transposition (%+d semitones written) and range", delta))
+	default:
+		names := make([]string, len(matches))
+		for i, w := range matches {
+			names[i] = w.Name
+		}
+		return skip(fmt.Sprintf("the pitch evidence fits more than one wind instrument (%s)", strings.Join(names, ", ")))
+	}
 }
 
 // trackSetup extracts a track's tuning (GPIF stores open-string pitches
@@ -776,8 +1066,8 @@ type beatData struct {
 // fillBar resolves a track's bar in master bar mi and lays its beats
 // into the score bar, padding underfull bars with a trailing rest and
 // truncating overfull ones, so the bar always exactly fills its meter.
-func (im *importer) fillBar(orig, mi int, bar *score.Bar, tuning score.Tuning, capo int) {
-	beats := im.barBeats(orig, mi, tuning, capo)
+func (im *importer) fillBar(orig, mi int, bar *score.Bar, tc *trackConv) {
+	beats := im.barBeats(orig, mi, tc)
 	barLen := bar.Len()
 	var filled int64
 	over := false
@@ -815,7 +1105,7 @@ func (im *importer) fillBar(orig, mi int, bar *score.Bar, tuning score.Tuning, c
 // subscript here. Indexing by the kept position gives a track the bars of
 // whichever track precedes it by the number of tracks filtered out ahead
 // of it, silently teaching another instrument's part.
-func (im *importer) barBeats(orig, mi int, tuning score.Tuning, capo int) []beatData {
+func (im *importer) barBeats(orig, mi int, tc *trackConv) []beatData {
 	mb := im.doc.MasterBars[mi]
 	barIDs := im.ids(mb.Bars, fmt.Sprintf("master bar %d <Bars>", mi+1))
 	if orig >= len(barIDs) {
@@ -874,7 +1164,7 @@ func (im *importer) barBeats(orig, mi int, tuning score.Tuning, capo int) []beat
 		}
 		out = append(out, beatData{
 			dur:   im.rhythmDur(gbt),
-			notes: im.beatNotes(orig, mi, gbt, tuning, capo),
+			notes: im.beatNotes(orig, mi, gbt, tc),
 		})
 	}
 	return out
@@ -938,14 +1228,19 @@ func (im *importer) rhythmDur(gbt *gpBeat) int64 {
 // highest, so string s becomes nStrings-s. Fingering is authored, so
 // Inferred stays false. A note whose Tie destination flag is set is the
 // continuation of the previous beat's note (score.Events merges them).
+// A wind track resolves through windBeatNotes instead: pitch arithmetic
+// on the instrument's single lane, no strings involved.
 //
 // Out-of-range notes are dropped here, one at a time with a warning,
 // because the package contract says import fails only when the file is
 // structurally unreadable: a single fret-64 note (or a weird-but-legal
 // tuning+fret sum past MIDI 127) must not make the final Validate reject
 // the whole score.
-func (im *importer) beatNotes(orig, mi int, gbt *gpBeat, tuning score.Tuning, capo int) []score.Note {
-	nStrings := len(tuning)
+func (im *importer) beatNotes(orig, mi int, gbt *gpBeat, tc *trackConv) []score.Note {
+	if tc.wind != nil {
+		return im.windBeatNotes(orig, mi, gbt, tc)
+	}
+	nStrings := len(tc.tuning)
 	var out []score.Note
 	for _, nid := range im.ids(gbt.Notes, fmt.Sprintf("beat %d <Notes>", gbt.ID)) {
 		gn := im.notes[nid]
@@ -960,6 +1255,13 @@ func (im *importer) beatNotes(orig, mi int, gbt *gpBeat, tuning score.Tuning, ca
 				gpString = p.String
 			case "Fret":
 				fret = p.Fret
+			case "ConcertPitch", "TransposedPitch":
+				// Recognized, not unknown. On a fretted track the authored
+				// fingering wins and pitch stays derived (tuning+capo+fret),
+				// so the spelled pitch is redundant here; and on a track
+				// that failed wind classification the aggregate warning
+				// from classifyWind has already explained why the pitch
+				// went unused.
 			default:
 				im.unknownProps[p.Name] = true
 			}
@@ -982,7 +1284,7 @@ func (im *importer) beatNotes(orig, mi int, gbt *gpBeat, tuning score.Tuning, ca
 		// but their sum is the sounding pitch, and an odd tuning can push
 		// it past MIDI 127 anyway. Drop the note rather than let Validate
 		// kill the import.
-		if k := tuning[str-1] + capo + *fret; k < 0 || k > 127 {
+		if k := tc.tuning[str-1] + tc.capo + *fret; k < 0 || k > 127 {
 			im.warnf("track %d bar %d: string %d fret %d sounds MIDI key %d, outside 0-127; note skipped",
 				orig+1, mi+1, str, *fret, k)
 			continue
@@ -994,6 +1296,94 @@ func (im *importer) beatNotes(orig, mi int, gbt *gpBeat, tuning score.Tuning, ca
 		})
 	}
 	return out
+}
+
+// windBeatNotes resolves a beat's note ids on a wind track: the
+// ConcertPitch spelling becomes the sounding key, and the key becomes
+// String 1, Fret key−LowSounding — arithmetic, not a heuristic, so
+// nothing is marked Inferred. The maxImportFret cap is a fretboard
+// bound and does not apply to the lane: a flute's high notes sit far
+// past fret 30 and are legitimate.
+//
+// Range first, chords second, mirroring internal/mxlimport: a chord
+// whose top note is outside the instrument falls back to its highest
+// playable note rather than losing the whole beat to the unplayable one.
+// Below the instrument's lowest note a key is dropped, never
+// octave-rewritten — the file's pitch is authoritative. The ceiling is
+// the WRITTEN pitch: a transposing instrument reads above what it
+// sounds, and a sounding key past 127−Transpose has no written note
+// name, so the text format could never save the piece. Span is not a
+// ceiling — altissimo imports as written.
+//
+// The instrument is monophonic, so a beat listing several notes keeps
+// only its highest sounding one — melody on top, the convention
+// arrangers write by — counted into one aggregate warning per track.
+// The written pitch, when present, is only cross-checked against the
+// instrument's transposition; disagreements are counted for one warning
+// per track and the concert pitch wins.
+func (im *importer) windBeatNotes(orig, mi int, gbt *gpBeat, tc *trackConv) []score.Note {
+	w := tc.wind
+	var best *score.Note
+	bestKey, kept := 0, 0
+	for _, nid := range im.ids(gbt.Notes, fmt.Sprintf("beat %d <Notes>", gbt.ID)) {
+		gn := im.notes[nid]
+		if gn == nil {
+			im.warnf("beat %d references note %d, which does not exist; skipped", gbt.ID, nid)
+			continue
+		}
+		var concert, transposed *gpPitch
+		for _, p := range gn.Properties {
+			switch p.Name {
+			case "ConcertPitch":
+				concert = p.Pitch
+			case "TransposedPitch":
+				transposed = p.Pitch
+			case "String", "Fret":
+				// Cannot appear — classifyWind refuses wind for a track
+				// with any fretted spelling — but must never be reported
+				// as an unknown property if a future edit lets one through.
+			default:
+				im.unknownProps[p.Name] = true
+			}
+		}
+		if concert == nil {
+			im.warnf("note %d: no ConcertPitch property; skipped", nid)
+			continue
+		}
+		key, ok := pitchKey(concert)
+		if !ok {
+			im.warnf("note %d: unparsable ConcertPitch; skipped", nid)
+			continue
+		}
+		if transposed != nil {
+			if tk, ok := pitchKey(transposed); ok && tk-key != w.Transpose {
+				tc.mismatched++
+			}
+		}
+		if key < w.LowSounding {
+			im.warnf("track %d bar %d: dropped note (key %d): below the %s's lowest note (key %d)",
+				orig+1, mi+1, key, w.Name, w.LowSounding)
+			continue
+		}
+		if key > 127-w.Transpose {
+			im.warnf("track %d bar %d: dropped note (key %d): its written pitch on a %s is past MIDI 127",
+				orig+1, mi+1, key, w.Name)
+			continue
+		}
+		kept++
+		if best == nil || key > bestKey {
+			n := w.NoteFor(key)
+			n.Tied = gn.Tie != nil && strings.EqualFold(gn.Tie.Destination, "true")
+			best, bestKey = &n, key
+		}
+	}
+	if best == nil {
+		return nil
+	}
+	if kept > 1 {
+		tc.chords++
+	}
+	return []score.Note{*best}
 }
 
 // flushDeferredWarnings emits the aggregated warnings collected during
