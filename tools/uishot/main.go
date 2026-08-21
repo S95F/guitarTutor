@@ -1,4 +1,4 @@
-// Command uishot renders one guitarTutor screen to a PNG.
+// Command uishot renders one musicTutor screen to a PNG.
 //
 // It exists so the layout can be looked at without a screen capture:
 // Ebitengine needs a real graphics context, so the window does open, but
@@ -23,14 +23,14 @@ import (
 
 	"github.com/hajimehoshi/ebiten/v2"
 
-	"github.com/S95F/guitarTutor/internal/edit"
-	"github.com/S95F/guitarTutor/internal/engine"
-	"github.com/S95F/guitarTutor/internal/pitch"
-	"github.com/S95F/guitarTutor/internal/practice"
-	"github.com/S95F/guitarTutor/internal/score"
-	"github.com/S95F/guitarTutor/internal/score/textfmt"
-	"github.com/S95F/guitarTutor/internal/synth"
-	"github.com/S95F/guitarTutor/internal/ui"
+	"github.com/S95F/musicTutor/internal/edit"
+	"github.com/S95F/musicTutor/internal/engine"
+	"github.com/S95F/musicTutor/internal/pitch"
+	"github.com/S95F/musicTutor/internal/practice"
+	"github.com/S95F/musicTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score/textfmt"
+	"github.com/S95F/musicTutor/internal/synth"
+	"github.com/S95F/musicTutor/internal/ui"
 )
 
 const (
@@ -288,7 +288,7 @@ func (p *memPrefs) SetDevices(c, pl string)   { p.cap, p.play = c, pl }
 func (p *memPrefs) SyncTrim() int             { return p.trim }
 func (p *memPrefs) SetSyncTrim(ms int)        { p.trim = ms }
 func (p *memPrefs) Save() error               { return nil }
-func (p *memPrefs) Path() string              { return `C:\Users\you\AppData\Roaming\guitartutor\config.json` }
+func (p *memPrefs) Path() string              { return `C:\Users\you\AppData\Roaming\musictutor\config.json` }
 
 type fakeAudio struct{}
 
@@ -320,7 +320,7 @@ func (l shotLibrary) Scan() ([]ui.PieceInfo, error) { return l.pieces, nil }
 // shotPieceFiles writes the files the start-screen shot lists, so the
 // entries are real rather than flagged missing.
 func shotPieceFiles() (string, error) {
-	dir := filepath.Join(os.TempDir(), "guitartutor-shot", "pieces")
+	dir := filepath.Join(os.TempDir(), "musictutor-shot", "pieces")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
@@ -337,7 +337,7 @@ func shotPieceFiles() (string, error) {
 
 // shotPieces is a plausible library: a few written pieces, described the
 // way the real scanner describes them, and one that will not parse. The
-// subtitles are what cmd/guitartutor's describePiece would say and the
+// subtitles are what cmd/musictutor's describePiece would say and the
 // problem line is what its textfmt.ProblemLine would render for the parser's
 // own message — a screenshot of words the app never produces is a
 // screenshot of a different app.

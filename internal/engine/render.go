@@ -3,8 +3,8 @@ package engine
 import (
 	"math"
 
-	"github.com/S95F/guitarTutor/internal/score"
-	"github.com/S95F/guitarTutor/internal/synth"
+	"github.com/S95F/musicTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/synth"
 )
 
 // A boundaryKind says what happens when a segment's end tick is reached.

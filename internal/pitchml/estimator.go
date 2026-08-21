@@ -5,7 +5,7 @@ import (
 	"math"
 	"slices"
 
-	"github.com/S95F/guitarTutor/internal/pitch"
+	"github.com/S95F/musicTutor/internal/pitch"
 )
 
 // An Estimator is what New returns, as a concrete interface: a

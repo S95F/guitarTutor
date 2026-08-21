@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/S95F/guitarTutor/internal/fretting"
-	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/fretting"
+	"github.com/S95F/musicTutor/internal/score"
 )
 
 // fretAssign is internal/fretting's assignment, indirected for tests.

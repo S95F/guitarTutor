@@ -50,8 +50,8 @@ import (
 
 	"github.com/hajimehoshi/ebiten/v2"
 
-	"github.com/S95F/guitarTutor/internal/engine"
-	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/engine"
+	"github.com/S95F/musicTutor/internal/score"
 )
 
 const (

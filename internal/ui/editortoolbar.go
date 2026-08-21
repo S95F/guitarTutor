@@ -41,7 +41,7 @@ import (
 
 	"github.com/hajimehoshi/ebiten/v2"
 
-	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score"
 )
 
 // An edButton is one control in the toolbar: a symbol, what it is called,

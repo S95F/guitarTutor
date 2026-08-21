@@ -952,7 +952,7 @@ func (b *Browser) handleDrop(fsys fs.FS) {
 			return
 		}
 	}
-	b.errMsg = "dropped file is not a piece guitarTutor can open: " + filepath.Base(paths[0])
+	b.errMsg = "dropped file is not a piece musicTutor can open: " + filepath.Base(paths[0])
 	b.noteSkipped(skipped)
 }
 
@@ -1052,7 +1052,7 @@ func (b *Browser) handleKey(k ebiten.Key) error {
 // browserBindings resolves this screen's control table. It is the single
 // source of both the footer hint and the ?/F1 overlay.
 func (b *Browser) browserBindings() []helpBinding {
-	leave := helpBinding{Group: "session", Keys: "esc", Hint: "esc quit", Desc: "Quit guitarTutor"}
+	leave := helpBinding{Group: "session", Keys: "esc", Hint: "esc quit", Desc: "Quit musicTutor"}
 	if b.sh != nil && b.sh.Depth() > 1 {
 		leave = helpBinding{Group: "session", Keys: "esc", Hint: "esc back", Desc: "Go back to where you came from"}
 	}
@@ -1086,7 +1086,7 @@ func (b *Browser) browserBindings() []helpBinding {
 		{Group: "session", Keys: "H", Desc: "Show or hide the getting-started strip"},
 		{Group: "session", Keys: "? or F1", Hint: "? help", Desc: "This key-binding list"},
 		leave,
-		{Group: "session", Keys: "Q", Desc: "Quit guitarTutor"},
+		{Group: "session", Keys: "Q", Desc: "Quit musicTutor"},
 	}
 }
 

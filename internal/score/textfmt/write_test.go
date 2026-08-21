@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score"
 )
 
 // gtabFixtures are the .gtab sources in the tree. Every one of them has to

@@ -3,10 +3,10 @@ package integration
 import (
 	"testing"
 
-	"github.com/S95F/guitarTutor/internal/engine"
-	"github.com/S95F/guitarTutor/internal/score"
-	"github.com/S95F/guitarTutor/internal/score/textfmt"
-	"github.com/S95F/guitarTutor/internal/synth"
+	"github.com/S95F/musicTutor/internal/engine"
+	"github.com/S95F/musicTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score/textfmt"
+	"github.com/S95F/musicTutor/internal/synth"
 )
 
 // The whole articulation chain on a real file: the parser puts a technique

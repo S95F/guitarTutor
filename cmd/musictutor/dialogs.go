@@ -20,7 +20,7 @@ import (
 
 	"github.com/ncruces/zenity"
 
-	"github.com/S95F/guitarTutor/internal/ui"
+	"github.com/S95F/musicTutor/internal/ui"
 )
 
 // pieceFileFilters builds the dialog filter from the importer's own
@@ -75,7 +75,7 @@ func pickSavePath(suggest string) string {
 	opts := []zenity.Option{
 		zenity.Title("Save the piece"),
 		zenity.ConfirmOverwrite(),
-		zenity.FileFilter{Name: "guitarTutor tab (.gtab)", Patterns: []string{"*.gtab"}, CaseFold: true},
+		zenity.FileFilter{Name: "musicTutor tab (.gtab)", Patterns: []string{"*.gtab"}, CaseFold: true},
 	}
 	if suggest != "" {
 		opts = append(opts, zenity.Filename(suggest))

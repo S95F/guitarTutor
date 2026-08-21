@@ -14,11 +14,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/S95F/guitarTutor/internal/practice"
+	"github.com/S95F/musicTutor/internal/practice"
 )
 
 // splitDeviceMsg is the real thing warnOnSplitDevices raises in
-// cmd/guitartutor — two full Windows device names inside one sentence. It
+// cmd/musictutor — two full Windows device names inside one sentence. It
 // is 1383 pixels wide at scale 1 against a 1168 pixel banner interior,
 // which is what made the unwrapped banner draw it from x=-51 to x=1331
 // with its head and its tail clipped off the window.

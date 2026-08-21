@@ -1,4 +1,4 @@
-// Package engine is guitarTutor's frame-counted practice sequencer: the one
+// Package engine is musicTutor's frame-counted practice sequencer: the one
 // clock everything else hangs off (ROADMAP.md "Guiding principles").
 //
 // The engine owns a playback position in ticks and advances it by rendered
@@ -35,8 +35,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/S95F/guitarTutor/internal/score"
-	"github.com/S95F/guitarTutor/internal/synth"
+	"github.com/S95F/musicTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/synth"
 )
 
 // Options configures a new Engine.
@@ -570,7 +570,7 @@ func (e *Engine) Read(p []byte) (int, error) {
 }
 
 // RenderFrames renders exactly len(left) frames into the given buffers
-// (zeroing them first). Offline path: used by `guitartutor render` and by
+// (zeroing them first). Offline path: used by `musictutor render` and by
 // tests. Same code path as Read.
 func (e *Engine) RenderFrames(left, right []float32) {
 	clear(left)

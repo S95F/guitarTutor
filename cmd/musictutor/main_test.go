@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/S95F/guitarTutor/internal/engine"
-	"github.com/S95F/guitarTutor/internal/score"
-	"github.com/S95F/guitarTutor/internal/synth"
-	"github.com/S95F/guitarTutor/internal/ui"
+	"github.com/S95F/musicTutor/internal/engine"
+	"github.com/S95F/musicTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/synth"
+	"github.com/S95F/musicTutor/internal/ui"
 )
 
 // oneBarScore builds a validated one-bar 4/4 piece at 120 BPM: exactly two
@@ -159,14 +159,14 @@ func TestRenderAllCountInAndTempoChange(t *testing.T) {
 	}
 }
 
-// TestFlagFirstDiagnostic: a flag in command position ("guitartutor
+// TestFlagFirstDiagnostic: a flag in command position ("musictutor
 // -listen song.gtab") used to print only the generic usage text, leaving
 // the actual mistake — flags follow a subcommand — for the user to
 // deduce. The diagnostic must name the argument and show the invocation
 // that would have worked.
 func TestFlagFirstDiagnostic(t *testing.T) {
 	got := flagFirstDiagnostic("-listen")
-	for _, want := range []string{`"-listen"`, "guitartutor play -listen <file>"} {
+	for _, want := range []string{`"-listen"`, "musictutor play -listen <file>"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("diagnostic %q does not contain %q", got, want)
 		}
@@ -190,7 +190,7 @@ func TestCheckPieceArgument(t *testing.T) {
 		wantParts []string // nil means the argument must be accepted
 	}{
 		{name: "mistyped subcommand", arg: "devcies",
-			wantParts: []string{`"devcies" is not a command or a piece file`, "guitartutor help", ".gtab"}},
+			wantParts: []string{`"devcies" is not a command or a piece file`, "musictutor help", ".gtab"}},
 		{name: "nonexistent non-piece path", arg: filepath.Join(t.TempDir(), "song.pdf"),
 			wantParts: []string{"is not a command or a piece file"}},
 		{name: "existing file in a format nothing imports", arg: existing,
@@ -238,7 +238,7 @@ func TestLoadAgreesWithPieceExtensions(t *testing.T) {
 }
 
 // TestSetUsageNamesThePositionalArgument: Go's default -h dump lists the
-// flags and nothing else, so 'guitartutor play -h' never said a <file>
+// flags and nothing else, so 'musictutor play -h' never said a <file>
 // was required or what kind of file it takes. The replacement must lead
 // with the synopsis, carry the extra lines, and still include the flags.
 func TestSetUsageNamesThePositionalArgument(t *testing.T) {
@@ -246,10 +246,10 @@ func TestSetUsageNamesThePositionalArgument(t *testing.T) {
 	fs.String("sf2", "", "SoundFont file")
 	var buf strings.Builder
 	fs.SetOutput(&buf)
-	setUsage(fs, "guitartutor play [flags] <file>", piecesLine)
+	setUsage(fs, "musictutor play [flags] <file>", piecesLine)
 	fs.Usage()
 	out := buf.String()
-	for _, want := range []string{"usage: guitartutor play [flags] <file>", "pieces: .gtab", "-sf2"} {
+	for _, want := range []string{"usage: musictutor play [flags] <file>", "pieces: .gtab", "-sf2"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("usage output %q does not contain %q", out, want)
 		}
@@ -264,8 +264,8 @@ func TestSetUsageNamesThePositionalArgument(t *testing.T) {
 // device flag's help must say where the names are listed.
 func TestDeviceFlagHelpNamesTheDevicesCommand(t *testing.T) {
 	for _, help := range []string{inFlagHelp, outFlagHelp} {
-		if !strings.Contains(help, "guitartutor devices") {
-			t.Errorf("flag help %q does not say to run 'guitartutor devices'", help)
+		if !strings.Contains(help, "musictutor devices") {
+			t.Errorf("flag help %q does not say to run 'musictutor devices'", help)
 		}
 	}
 }

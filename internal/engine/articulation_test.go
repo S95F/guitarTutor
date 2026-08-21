@@ -3,8 +3,8 @@ package engine
 import (
 	"testing"
 
-	"github.com/S95F/guitarTutor/internal/score"
-	"github.com/S95F/guitarTutor/internal/synth"
+	"github.com/S95F/musicTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/synth"
 )
 
 // The engine's half of articulation: which notes are handed to a voice as

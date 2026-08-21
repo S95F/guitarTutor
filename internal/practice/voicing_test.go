@@ -3,7 +3,7 @@ package practice
 import (
 	"testing"
 
-	"github.com/S95F/guitarTutor/internal/pitch"
+	"github.com/S95F/musicTutor/internal/pitch"
 )
 
 // Chord-verification coverage beyond the E shape.

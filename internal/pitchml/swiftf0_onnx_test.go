@@ -66,15 +66,15 @@ func TestNewReportsAMissingModel(t *testing.T) {
 //
 //   - the ONNX Runtime shared library — onnxruntime.dll on Windows,
 //     libonnxruntime.so on Linux, libonnxruntime.dylib on macOS — beside
-//     the test binary or at $GUITARTUTOR_ONNXRUNTIME;
+//     the test binary or at $MUSICTUTOR_ONNXRUNTIME;
 //   - swift_f0.onnx, beside the test binary or at
-//     $GUITARTUTOR_SWIFTF0_MODEL.
+//     $MUSICTUTOR_SWIFTF0_MODEL.
 //
 // Neither is committed to this repository (a shared library and a model
 // are not source), so the test skips until someone installs them:
 //
-//	GUITARTUTOR_ONNXRUNTIME=/path/to/libonnxruntime.so \
-//	GUITARTUTOR_SWIFTF0_MODEL=/path/to/swift_f0.onnx \
+//	MUSICTUTOR_ONNXRUNTIME=/path/to/libonnxruntime.so \
+//	MUSICTUTOR_SWIFTF0_MODEL=/path/to/swift_f0.onnx \
 //	go test -tags onnx ./internal/pitchml/...
 func TestRealInference(t *testing.T) {
 	res, err := osResolver().resolve(Options{SampleRate: 48000})

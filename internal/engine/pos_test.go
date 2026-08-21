@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score"
 )
 
 // Pos is the snapshot a UI interpolates from, so what it has to guarantee

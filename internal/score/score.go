@@ -1,4 +1,4 @@
-// Package score defines guitarTutor's canonical music representation.
+// Package score defines musicTutor's canonical music representation.
 //
 // Ticks are authoritative: every position and duration is expressed in
 // MIDI-style ticks at PPQ pulses per quarter note, and wall-clock time is

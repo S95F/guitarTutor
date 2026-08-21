@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/S95F/guitarTutor/internal/fretting"
-	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/fretting"
+	"github.com/S95F/musicTutor/internal/score"
 )
 
 // overLong reports whether v file ticks would rescale past MaxTicks

@@ -14,8 +14,8 @@ package edit
 import (
 	"fmt"
 
-	"github.com/S95F/guitarTutor/internal/score"
-	"github.com/S95F/guitarTutor/internal/score/textfmt"
+	"github.com/S95F/musicTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score/textfmt"
 )
 
 // BarCount is how many bars the piece has. Every track has the same

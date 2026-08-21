@@ -1,4 +1,4 @@
-// Package pitch is guitarTutor's monophonic pitch engine: an MPM (McLeod
+// Package pitch is musicTutor's monophonic pitch engine: an MPM (McLeod
 // pitch method) detector with a YIN-FFT cross-check, an onset/energy gate,
 // and a note tracker that turns per-hop f0 estimates into discrete note
 // events. Pure Go on gonum's FFT; designed for a live electric-guitar DI

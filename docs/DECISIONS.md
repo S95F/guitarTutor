@@ -1,6 +1,6 @@
 # Technology Decisions
 
-Lightweight decision records for guitarTutor. Each records what was chosen, what was rejected, and why — based on a survey of the Go audio/music ecosystem and comparable applications conducted in August 2026.
+Lightweight decision records for musicTutor. Each records what was chosen, what was rejected, and why — based on a survey of the Go audio/music ecosystem and comparable applications conducted in August 2026.
 
 ---
 

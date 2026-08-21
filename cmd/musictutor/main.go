@@ -1,11 +1,11 @@
-// Command guitartutor is the guitarTutor practice application.
+// Command musictutor is the musicTutor practice application.
 //
-//	guitartutor <file>                    open a piece in the windowed shell
-//	guitartutor play [flags] <file>       open the practice view from the terminal
-//	guitartutor render [flags] <file>     render the piece to a WAV
-//	guitartutor devices                   list audio endpoints
-//	guitartutor calibrate [flags]         measure the round-trip latency
-//	guitartutor version                   print the version
+//	musictutor <file>                    open a piece in the windowed shell
+//	musictutor play [flags] <file>       open the practice view from the terminal
+//	musictutor render [flags] <file>     render the piece to a WAV
+//	musictutor devices                   list audio endpoints
+//	musictutor calibrate [flags]         measure the round-trip latency
+//	musictutor version                   print the version
 //
 // Pieces are .gtab, .mid, .gp, .musicxml, or .mxl files.
 //
@@ -26,17 +26,17 @@ import (
 
 	"github.com/ebitengine/oto/v3"
 
-	"github.com/S95F/guitarTutor/internal/appconfig"
-	"github.com/S95F/guitarTutor/internal/audiofile"
-	"github.com/S95F/guitarTutor/internal/engine"
-	"github.com/S95F/guitarTutor/internal/gpimport"
-	"github.com/S95F/guitarTutor/internal/midiimport"
-	"github.com/S95F/guitarTutor/internal/mxlimport"
-	"github.com/S95F/guitarTutor/internal/score"
-	"github.com/S95F/guitarTutor/internal/score/textfmt"
-	"github.com/S95F/guitarTutor/internal/synth"
-	"github.com/S95F/guitarTutor/internal/ui"
-	"github.com/S95F/guitarTutor/internal/wavio"
+	"github.com/S95F/musicTutor/internal/appconfig"
+	"github.com/S95F/musicTutor/internal/audiofile"
+	"github.com/S95F/musicTutor/internal/engine"
+	"github.com/S95F/musicTutor/internal/gpimport"
+	"github.com/S95F/musicTutor/internal/midiimport"
+	"github.com/S95F/musicTutor/internal/mxlimport"
+	"github.com/S95F/musicTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score/textfmt"
+	"github.com/S95F/musicTutor/internal/synth"
+	"github.com/S95F/musicTutor/internal/ui"
+	"github.com/S95F/musicTutor/internal/wavio"
 )
 
 // sampleRate is the project-wide audio rate (ROADMAP "Guiding principles").
@@ -87,7 +87,7 @@ func main() {
 	// changed without ever touching a terminal.
 	if len(os.Args) < 2 {
 		if err := runShell(""); err != nil {
-			fmt.Fprintln(os.Stderr, "guitartutor:", err)
+			fmt.Fprintln(os.Stderr, "musictutor:", err)
 			os.Exit(1)
 		}
 		return
@@ -95,7 +95,7 @@ func main() {
 	var err error
 	switch os.Args[1] {
 	case "version", "-version", "--version":
-		fmt.Println("guitartutor", version)
+		fmt.Println("musictutor", version)
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 	case "play":
@@ -137,13 +137,13 @@ func main() {
 				break
 			}
 			if note != "" {
-				fmt.Fprintln(os.Stderr, "guitartutor:", note)
+				fmt.Fprintln(os.Stderr, "musictutor:", note)
 			}
 			err = runShell(os.Args[1])
 		}
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "guitartutor:", err)
+		fmt.Fprintln(os.Stderr, "musictutor:", err)
 		os.Exit(1)
 	}
 }
@@ -152,7 +152,7 @@ func main() {
 // the first argument is a flag: what was misunderstood, and the shape of
 // the invocation that would have worked.
 func flagFirstDiagnostic(arg string) string {
-	return fmt.Sprintf("guitartutor: unknown command %q — flags follow a subcommand: guitartutor play %s <file>", arg, arg)
+	return fmt.Sprintf("musictutor: unknown command %q — flags follow a subcommand: musictutor play %s <file>", arg, arg)
 }
 
 // checkExtraArguments diagnoses everything after the one piece a bare
@@ -165,7 +165,7 @@ func flagFirstDiagnostic(arg string) string {
 func checkExtraArguments(piece string, rest []string) (note string, err error) {
 	for _, a := range rest {
 		if strings.HasPrefix(a, "-") {
-			return "", fmt.Errorf("flags go with the play subcommand: guitartutor play [flags] %q", piece)
+			return "", fmt.Errorf("flags go with the play subcommand: musictutor play [flags] %q", piece)
 		}
 	}
 	if len(rest) == 0 {
@@ -199,7 +199,7 @@ func checkPieceArgument(arg string) error {
 		}
 	}
 	if _, err := os.Stat(arg); err != nil {
-		return fmt.Errorf("%q is not a command or a piece file (run 'guitartutor help'; pieces are .gtab, .mid, .gp, .musicxml, .mxl)", arg)
+		return fmt.Errorf("%q is not a command or a piece file (run 'musictutor help'; pieces are .gtab, .mid, .gp, .musicxml, .mxl)", arg)
 	}
 	return fmt.Errorf("%s: unsupported file type %q (want .gtab, .mid, .gp, .musicxml, or .mxl)", arg, filepath.Ext(arg))
 }
@@ -208,14 +208,14 @@ func checkPieceArgument(arg string) error {
 // it on stdout where a pager or a grep can reach it; only the
 // unknown-flag path, where the help is a diagnostic, writes to stderr.
 func usage(w io.Writer) {
-	fmt.Fprint(w, `guitartutor — practice companion for guitarists
+	fmt.Fprint(w, `musictutor — practice companion for guitarists
 
 usage:
-  guitartutor play [flags] <file>
-  guitartutor render [flags] <file>
-  guitartutor devices
-  guitartutor calibrate [flags]
-  guitartutor version
+  musictutor play [flags] <file>
+  musictutor render [flags] <file>
+  musictutor devices
+  musictutor calibrate [flags]
+  musictutor version
 
 `+piecesLine+`
 
@@ -258,14 +258,14 @@ const piecesLine = "pieces: .gtab (text tab), .mid (MIDI), .gp (Guitar Pro 7/8),
 // names come from, because "name fragment" alone left the user to guess
 // which names the fragment was a fragment of.
 const (
-	inFlagHelp  = "capture device for live input: a unique part of a name from 'guitartutor devices' (default: the system default)"
-	outFlagHelp = "playback device: a unique part of a name from 'guitartutor devices' (default: the system default)"
+	inFlagHelp  = "capture device for live input: a unique part of a name from 'musictutor devices' (default: the system default)"
+	outFlagHelp = "playback device: a unique part of a name from 'musictutor devices' (default: the system default)"
 )
 
 // setUsage replaces fs's -h output with one that starts from the
 // synopsis. Go's default dump lists the flags and nothing else — no hint
 // that a <file> is required, no word on what kind of file — so
-// 'guitartutor play -h' answered every question except the one a person
+// 'musictutor play -h' answered every question except the one a person
 // asking for help actually has. extra lines (the pieces line, a
 // subcommand's one-sentence description) follow the synopsis, then the
 // flag defaults.
@@ -380,10 +380,10 @@ func runPlay(args []string) error {
 	backing := fs.String("backing", "", "backing-track audio file (wav/flac/mp3)")
 	backingOff := fs.Float64("backing-offset", 0, "backing start offset in seconds (positive skips into the file)")
 	backingGain := fs.Float64("backing-gain", 1.0, "backing track volume")
-	setUsage(fs, "guitartutor play [flags] <file>", piecesLine)
+	setUsage(fs, "musictutor play [flags] <file>", piecesLine)
 	fs.Parse(args)
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: guitartutor play [flags] <file>")
+		return fmt.Errorf("usage: musictutor play [flags] <file>")
 	}
 	if err := validateScale(*scale); err != nil {
 		return err
@@ -446,7 +446,7 @@ func runPlay(args []string) error {
 		// settings screen to press S for.
 		conds := cond.notes
 		if cond.uncalibrated {
-			conds = append(conds, "timing is not calibrated for these devices — quit and run 'guitartutor calibrate'")
+			conds = append(conds, "timing is not calibrated for these devices — quit and run 'musictutor calibrate'")
 		}
 		if msg := composeBanner(conds); msg != "" {
 			app.SetLiveWarning(msg)
@@ -482,10 +482,10 @@ func runRender(args []string) error {
 	backing := fs.String("backing", "", "backing-track audio file (wav/flac/mp3)")
 	backingOff := fs.Float64("backing-offset", 0, "backing start offset in seconds")
 	backingGain := fs.Float64("backing-gain", 1.0, "backing track volume")
-	setUsage(fs, "guitartutor render [flags] <file>", piecesLine)
+	setUsage(fs, "musictutor render [flags] <file>", piecesLine)
 	fs.Parse(args)
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: guitartutor render [flags] <file>")
+		return fmt.Errorf("usage: musictutor render [flags] <file>")
 	}
 	if err := validateScale(*scale); err != nil {
 		return err

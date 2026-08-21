@@ -69,7 +69,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score"
 )
 
 // DefaultProgram is the General MIDI program assumed for parts with no

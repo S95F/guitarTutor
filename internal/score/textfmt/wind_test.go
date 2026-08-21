@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score"
 )
 
 func TestParseWindTrack(t *testing.T) {

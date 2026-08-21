@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/S95F/guitarTutor/internal/score/textfmt"
+	"github.com/S95F/musicTutor/internal/score/textfmt"
 	"github.com/hajimehoshi/ebiten/v2"
 )
 

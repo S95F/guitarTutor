@@ -11,10 +11,10 @@ import (
 
 	ort "github.com/yalue/onnxruntime_go"
 
-	"github.com/S95F/guitarTutor/internal/pitch"
+	"github.com/S95F/musicTutor/internal/pitch"
 )
 
-// This file is the only place in guitarTutor that touches
+// This file is the only place in musicTutor that touches
 // github.com/yalue/onnxruntime_go, and it exists only under the onnx build
 // tag. The binding dlopen's the ONNX Runtime at run time from a path we
 // hand it, which is why D4 chose it: no import library, no headers, no

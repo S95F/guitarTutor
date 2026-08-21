@@ -25,7 +25,7 @@ The app is wrong more often than it looks, and every source below is already in 
 | Source | Evidence |
 |---|---|
 | **Chords are a deterministic miss generator** — the detector is monophonic, so a 3-note chord yields 3 misses on *perfect synthetic audio* | `internal/practice/roundtrip_test.go` documents exactly this |
-| Sessions run **uncalibrated** — `setupListen` warns and proceeds with offset 0 | `cmd/guitartutor/live.go` |
+| Sessions run **uncalibrated** — `setupListen` warns and proceeds with offset 0 | `cmd/musictutor/live.go` |
 | Weak calibration — confidence varies, which is why `appconfig.ConfidenceFor` exists | `internal/appconfig` |
 | Split-device clock drift — correct at minute 0, wrong at minute 20 | ROADMAP Known risks |
 | Dead notes are pitchless but keep their events | `internal/score/events.go` |
@@ -112,7 +112,7 @@ correctly at the call site. `internal/stats` would collide with `practice.Stats`
 A separate JSON file beside `config.json`, with `appconfig`'s conventions: atomic
 temp-file-plus-rename, a versioned schema, an environment override as the test seam, and a
 zero value that is a valid "nothing recorded yet" document. Add an `appconfig.Dir()` helper
-so "where guitarTutor keeps its state" is defined once.
+so "where musicTutor keeps its state" is defined once.
 
 The document holds settings, pieces keyed by ID, aliases, a capped session log, the streak,
 badge state, and lifetime totals. Aggregates are lossless; only the per-session log is
@@ -287,7 +287,7 @@ deterministically on both CI platforms.
 
 ## Known dependencies
 
-- `advanceLagFrames` is 4 seconds and lives in `cmd/guitartutor`.
+- `advanceLagFrames` is 4 seconds and lives in `cmd/musictutor`.
 - `score.Score` has a title but no artist or composer field, so identity evidence is thinner than it looks and re-linking leans on basename plus structural size.
 
 See the [ROADMAP](../ROADMAP.md) for phasing, and [DECISIONS](DECISIONS.md) D7 for why this

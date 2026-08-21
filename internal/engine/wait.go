@@ -1,6 +1,6 @@
 package engine
 
-import "github.com/S95F/guitarTutor/internal/score"
+import "github.com/S95F/musicTutor/internal/score"
 
 // Wait mode is the "pause until you play it" practice feature (ROADMAP
 // Phase 2): with it enabled, playback halts the position exactly at the

@@ -2,7 +2,7 @@
 // calibrated latency offsets, an optional SoundFont path, recently-opened
 // pieces and the window geometry to restore — as a small JSON file in the
 // platform config directory
-// (os.UserConfigDir()/guitartutor/config.json).
+// (os.UserConfigDir()/musictutor/config.json).
 //
 // The zero Config is always usable: a missing file loads as one without
 // error, and a corrupted file loads as one alongside the parse error so
@@ -17,7 +17,7 @@
 // must not silently strip settings the newer one stored (see
 // ErrNewerVersion).
 //
-// The GUITARTUTOR_CONFIG_DIR environment variable overrides the config
+// The MUSICTUTOR_CONFIG_DIR environment variable overrides the config
 // directory entirely; it exists as the test seam (see EnvConfigDir).
 package appconfig
 
@@ -31,10 +31,10 @@ import (
 
 // EnvConfigDir names the environment variable that, when non-empty,
 // replaces the default config directory: the file lives directly at
-// $GUITARTUTOR_CONFIG_DIR/config.json. This is the test seam — tests
+// $MUSICTUTOR_CONFIG_DIR/config.json. This is the test seam — tests
 // point it at a temp dir (t.Setenv) so they never touch the real user
 // config — but it also lets users run fully portable installs.
-const EnvConfigDir = "GUITARTUTOR_CONFIG_DIR"
+const EnvConfigDir = "MUSICTUTOR_CONFIG_DIR"
 
 // CurrentVersion is the config schema version this build reads and
 // writes. Load migrates any file from firstVersion..CurrentVersion up to
@@ -56,20 +56,23 @@ const CurrentVersion = 4
 const firstVersion = 1
 
 // ErrNewerVersion reports a config file written by a newer build of
-// guitarTutor than the one reading it. Load refuses such a file (it
+// musicTutor than the one reading it. Load refuses such a file (it
 // cannot know what its fields mean) and Save refuses to overwrite one (it
 // would downgrade settings the newer build is still using), both
 // returning an error wrapping this one so callers can recognize the case
 // and tell the user to upgrade rather than blaming a corrupt file.
-var ErrNewerVersion = errors.New("config file is from a newer version of guitarTutor")
+var ErrNewerVersion = errors.New("config file is from a newer version of musicTutor")
 
 // dirName and fileName locate the config under os.UserConfigDir().
+// oldDirName is what the directory was called before the app was renamed
+// from guitarTutor; Path migrates it (see migrateOldDir).
 const (
-	dirName  = "guitartutor"
-	fileName = "config.json"
+	dirName    = "musictutor"
+	oldDirName = "guitartutor"
+	fileName   = "config.json"
 )
 
-// A Config holds the user preferences guitarTutor persists between runs.
+// A Config holds the user preferences musicTutor persists between runs.
 // The zero value is a valid "no preferences yet" config; all lookups on
 // it simply report nothing stored.
 type Config struct {
@@ -140,8 +143,9 @@ type Config struct {
 // stops correcting an error and starts being one.
 const MaxSyncTrimMS = 250
 
-// Path returns the config file path: $GUITARTUTOR_CONFIG_DIR/config.json
-// when the override is set, else os.UserConfigDir()/guitartutor/config.json.
+// Path returns the config file path: $MUSICTUTOR_CONFIG_DIR/config.json
+// when the override is set, else os.UserConfigDir()/musictutor/config.json
+// — after adopting a guitartutor-era directory if one is still there.
 func Path() (string, error) {
 	if dir := os.Getenv(EnvConfigDir); dir != "" {
 		return filepath.Join(dir, fileName), nil
@@ -150,7 +154,28 @@ func Path() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("appconfig: locating user config dir: %w", err)
 	}
+	migrateOldDir(base)
 	return filepath.Join(base, dirName, fileName), nil
+}
+
+// migrateOldDir renames the pre-rename config directory into place, once:
+// only when the new name does not exist yet and the old one does. The
+// directory holds everything the app remembers — devices, calibrations,
+// recents, and the pieces library beside the config file — so abandoning
+// it at the rename would silently reset a user who had all of that. A
+// rename moves the lot in one step; if it fails (permissions, an odd
+// filesystem), the app proceeds with a fresh directory rather than
+// refusing to start, and the old one stays intact where it was.
+func migrateOldDir(base string) {
+	newDir := filepath.Join(base, dirName)
+	if _, err := os.Stat(newDir); err == nil || !os.IsNotExist(err) {
+		return
+	}
+	oldDir := filepath.Join(base, oldDirName)
+	if _, err := os.Stat(oldDir); err != nil {
+		return
+	}
+	_ = os.Rename(oldDir, newDir)
 }
 
 // Load reads the config file. A missing file is not an error — a first

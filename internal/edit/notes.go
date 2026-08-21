@@ -3,8 +3,8 @@ package edit
 import (
 	"fmt"
 
-	"github.com/S95F/guitarTutor/internal/score"
-	"github.com/S95F/guitarTutor/internal/score/textfmt"
+	"github.com/S95F/musicTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score/textfmt"
 )
 
 // SetFret puts a note at the cursor: on the cursor's string, in the

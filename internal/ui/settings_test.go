@@ -1430,14 +1430,14 @@ func TestSettingsConfigPath(t *testing.T) {
 	if got := s.configText(); !strings.Contains(got, "unknown") {
 		t.Errorf("configText with no path = %q, want it to admit the location is unknown", got)
 	}
-	s.SetConfigPath(`C:\Users\p\AppData\Roaming\guitarTutor\config.json`)
-	if got := s.configText(); !strings.Contains(got, `AppData\Roaming\guitarTutor\config.json`) {
+	s.SetConfigPath(`C:\Users\p\AppData\Roaming\musicTutor\config.json`)
+	if got := s.configText(); !strings.Contains(got, `AppData\Roaming\musicTutor\config.json`) {
 		t.Errorf("configText after SetConfigPath = %q", got)
 	}
 
-	p := &settingsPathPrefs{path: `C:\cfg\guitarTutor.json`}
+	p := &settingsPathPrefs{path: `C:\cfg\musicTutor.json`}
 	sh := NewShell(Services{Prefs: p}, settingsStubScreen{})
-	if got := NewSettings(sh).configText(); !strings.Contains(got, `C:\cfg\guitarTutor.json`) {
+	if got := NewSettings(sh).configText(); !strings.Contains(got, `C:\cfg\musicTutor.json`) {
 		t.Errorf("configText from a Prefs with Path = %q", got)
 	}
 }
@@ -1618,8 +1618,8 @@ func TestSettingsRowValueIsBoundedByItsButtons(t *testing.T) {
 // went wrong.
 func TestSettingsSaveErrorFitsTheFooter(t *testing.T) {
 	s, p := newSettingsFixture(t, nil)
-	p.saveErr = errors.New(`appconfig: rename C:\Users\p\AppData\Roaming\guitarTutor\config.json.tmp ` +
-		`C:\Users\p\AppData\Roaming\guitarTutor\config.json: The process cannot access the file ` +
+	p.saveErr = errors.New(`appconfig: rename C:\Users\p\AppData\Roaming\musicTutor\config.json.tmp ` +
+		`C:\Users\p\AppData\Roaming\musicTutor\config.json: The process cannot access the file ` +
 		`because it is being used by another process.`)
 
 	if _, ok := s.saveErrLine(); ok {

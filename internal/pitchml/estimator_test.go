@@ -5,7 +5,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/S95F/guitarTutor/internal/pitch"
+	"github.com/S95F/musicTutor/internal/pitch"
 )
 
 // fakeRunner stands in for the ONNX session so the whole front end —

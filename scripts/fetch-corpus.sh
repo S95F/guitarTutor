@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fetch the real-instrument test corpus into testdata/real/ (gitignored).
 #
-# Nothing here is committed to guitarTutor: the score corpora are copyleft
+# Nothing here is committed to musicTutor: the score corpora are copyleft
 # (MPL-2.0 / GPL-3.0) and stay legally clean precisely because they are
 # never redistributed, and the audio datasets are gigabytes with their own
 # attribution terms. See docs/TESTDATA.md for the full licence reasoning

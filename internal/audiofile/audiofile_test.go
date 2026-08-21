@@ -13,7 +13,7 @@ import (
 	"github.com/mewkiz/flac/frame"
 	"github.com/mewkiz/flac/meta"
 
-	"github.com/S95F/guitarTutor/internal/wavio"
+	"github.com/S95F/musicTutor/internal/wavio"
 )
 
 // sine generates n samples of a sine at freq Hz and the given rate,

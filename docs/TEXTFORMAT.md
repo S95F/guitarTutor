@@ -1,4 +1,4 @@
-# The guitarTutor text tab format (`.gtab`)
+# The musicTutor text tab format (`.gtab`)
 
 A small, git-diffable format for authoring practice pieces by hand. It is
 *inspired by* [alphaTex](https://alphatab.net/docs/alphatex/syntax) —

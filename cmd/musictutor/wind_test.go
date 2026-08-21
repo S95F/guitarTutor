@@ -8,8 +8,8 @@ import (
 	"math"
 	"testing"
 
-	"github.com/S95F/guitarTutor/internal/pitch"
-	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/pitch"
+	"github.com/S95F/musicTutor/internal/score"
 )
 
 // windBarScore is a one-bar soprano sax piece whose longest note is a

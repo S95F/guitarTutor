@@ -1,4 +1,4 @@
-// Package textfmt parses the guitarTutor text tab format (.gtab), the
+// Package textfmt parses the musicTutor text tab format (.gtab), the
 // small alphaTex-inspired authoring language specified in
 // docs/TEXTFORMAT.md.
 //
@@ -17,7 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score"
 )
 
 // A ParseError reports a syntax or semantic error at a position in .gtab

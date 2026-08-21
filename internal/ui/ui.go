@@ -15,8 +15,8 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
 	"github.com/hajimehoshi/ebiten/v2/vector"
 
-	"github.com/S95F/guitarTutor/internal/engine"
-	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/engine"
+	"github.com/S95F/musicTutor/internal/score"
 )
 
 const (
@@ -225,9 +225,9 @@ func (a *App) Run() error {
 	ebiten.SetWindowSize(screenW, screenH)
 	title := a.sc.Title
 	if title == "" {
-		title = "guitarTutor"
+		title = "musicTutor"
 	} else {
-		title = "guitarTutor — " + title
+		title = "musicTutor — " + title
 	}
 	ebiten.SetWindowTitle(title)
 	err := ebiten.RunGame(a)
@@ -852,7 +852,7 @@ type practiceBinding struct {
 	Enabled func(a *App) bool
 	// Reword replaces Hint and Desc when what a key DOES depends on how
 	// the view is hosted. Escape is the case: under the shell it returns
-	// to the start screen, but `guitartutor play song.gp` has nothing
+	// to the start screen, but `musictutor play song.gp` has nothing
 	// behind it, so the same key ends the process — and saying "go back"
 	// there, one line above "Q quit", promises a screen that does not
 	// exist.
@@ -924,7 +924,7 @@ var practiceBindings = []practiceBinding{
 		Enabled: func(a *App) bool { return a.settings != nil },
 		Caveat: func(a *App) string {
 			if a.settings == nil {
-				return "needs the full app — start guitarTutor without a file"
+				return "needs the full app — start musicTutor without a file"
 			}
 			return ""
 		}},
@@ -940,7 +940,7 @@ var practiceBindings = []practiceBinding{
 			}
 			return "esc back", "Leave this piece and go back"
 		}},
-	{Group: "session", Keys: "Q", Hint: "Q quit", Desc: "Quit guitarTutor"},
+	{Group: "session", Keys: "Q", Hint: "Q quit", Desc: "Quit musicTutor"},
 }
 
 // helpRows resolves the binding table against this App: which bindings
@@ -1157,7 +1157,7 @@ func (a *App) drawHUD(screen *ebiten.Image, l practiceLayout) {
 // neutral fallback for a score that carries none.
 func (a *App) pieceTitle() string {
 	if a.sc.Title == "" {
-		return "guitarTutor"
+		return "musicTutor"
 	}
 	// The budget is what the header actually has left: the full width
 	// less both margins, the status line sharing the row, and a gap. A

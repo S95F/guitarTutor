@@ -302,7 +302,7 @@ func TestReadSkipsExtraChunks(t *testing.T) {
 	// consumed) sit between fmt and data.
 	file := wavFile(
 		chunk("fmt ", fmtChunk(1, 1, 22050, 16)),
-		chunk("LIST", append([]byte("INFO"), chunk("IART", []byte("guitarTutor"))...)),
+		chunk("LIST", append([]byte("INFO"), chunk("IART", []byte("musicTutor"))...)),
 		chunk("junk", []byte{1, 2, 3}), // odd size: pad byte follows
 		chunk("data", pcm16Data(-16384, 8192)),
 	)

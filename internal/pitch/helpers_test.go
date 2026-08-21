@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/S95F/guitarTutor/internal/synth"
+	"github.com/S95F/musicTutor/internal/synth"
 )
 
 // testSR is the pipeline's standard rate; all tests run at it.

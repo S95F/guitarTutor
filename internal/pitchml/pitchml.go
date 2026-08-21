@@ -19,9 +19,9 @@ const EstimatorName = "swiftf0"
 const (
 	// EnvRuntime locates the ONNX Runtime shared library
 	// (onnxruntime.dll / libonnxruntime.so / libonnxruntime.dylib).
-	EnvRuntime = "GUITARTUTOR_ONNXRUNTIME"
+	EnvRuntime = "MUSICTUTOR_ONNXRUNTIME"
 	// EnvModel locates the exported SwiftF0 model file.
-	EnvModel = "GUITARTUTOR_SWIFTF0_MODEL"
+	EnvModel = "MUSICTUTOR_SWIFTF0_MODEL"
 )
 
 // DefaultModelName is the file name looked for beside the executable when
@@ -274,5 +274,5 @@ func runtimeHelp(lib string) string {
 // modelHelp is the same for the model file.
 func modelHelp() string {
 	return "Download or export " + DefaultModelName + " from https://github.com/lars76/swift-f0 (MIT) to the directory holding the executable, or set " +
-		EnvModel + " (or Options.ModelPath) to the file. It is intentionally not bundled with guitarTutor."
+		EnvModel + " (or Options.ModelPath) to the file. It is intentionally not bundled with musicTutor."
 }

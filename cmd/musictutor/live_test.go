@@ -8,14 +8,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/S95F/guitarTutor/internal/appconfig"
-	"github.com/S95F/guitarTutor/internal/audio"
-	"github.com/S95F/guitarTutor/internal/engine"
-	"github.com/S95F/guitarTutor/internal/latency"
-	"github.com/S95F/guitarTutor/internal/pitch"
-	"github.com/S95F/guitarTutor/internal/practice"
-	"github.com/S95F/guitarTutor/internal/score"
-	"github.com/S95F/guitarTutor/internal/ui"
+	"github.com/S95F/musicTutor/internal/appconfig"
+	"github.com/S95F/musicTutor/internal/audio"
+	"github.com/S95F/musicTutor/internal/engine"
+	"github.com/S95F/musicTutor/internal/latency"
+	"github.com/S95F/musicTutor/internal/pitch"
+	"github.com/S95F/musicTutor/internal/practice"
+	"github.com/S95F/musicTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/ui"
 )
 
 // Fake device lists for the resolution tests. The capture default and the

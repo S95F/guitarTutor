@@ -109,7 +109,7 @@ verdicts live, and it is why the apron exists at all.
 This is the most important rule in the view, and it is forced by numbers already in the
 tree, not by taste:
 
-- `advanceLagFrames = 4 * sampleRate` in `cmd/guitartutor/live.go`. A miss is finalized
+- `advanceLagFrames = 4 * sampleRate` in `cmd/musictutor/live.go`. A miss is finalized
   **four seconds** after the note sounded, deliberately, because the tracker only reports
   a note when it *closes* and a sustained note's detection arrives its own duration late.
 - Even a perfect hit carries `ErrFrames` of +1000..3000 (21–63 ms) — measured in
@@ -228,7 +228,7 @@ clamping, flash-ring bounds, no flash burst on seek, lane bijection, and view pr
 ## Known dependencies
 
 - `readBlockFrames` (stage 0 above).
-- `advanceLagFrames` lives in `cmd/guitartutor`, where `internal/ui` cannot see it; the apron is sized against it by hand until it moves to `internal/practice`.
+- `advanceLagFrames` lives in `cmd/musictutor`, where `internal/ui` cannot see it; the apron is sized against it by hand until it moves to `internal/practice`.
 - `colLoop` is not alpha-premultiplied.
 
 See the [ROADMAP](../ROADMAP.md) for phasing, and [DECISIONS](DECISIONS.md) D7 for why this

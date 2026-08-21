@@ -74,7 +74,7 @@ jobs:
       #
       # TODO: real coverage needs three things, two of them outside this
       # file. (1) here: fetch an ONNX Runtime release behind actions/cache
-      # and export GUITARTUTOR_ONNXRUNTIME. (2) internal/pitchml/testdata:
+      # and export MUSICTUTOR_ONNXRUNTIME. (2) internal/pitchml/testdata:
       # a committed synthetic .onnx graph — one float input, two float
       # outputs, a few hundred bytes — which is enough to drive the
       # session and tensor plumbing and is preferable to downloading
@@ -92,7 +92,7 @@ jobs:
       # default single-binary build.
       #
       # Scoped to ./... deliberately. This check used to list the deps of
-      # ./cmd/guitartutor, which does not import internal/pitchml at all
+      # ./cmd/musictutor, which does not import internal/pitchml at all
       # (measured: 0 of its 270 deps), so it could never observe the leak
       # it exists to police.
       #

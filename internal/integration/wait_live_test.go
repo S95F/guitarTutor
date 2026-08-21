@@ -5,13 +5,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/S95F/guitarTutor/internal/audio"
-	"github.com/S95F/guitarTutor/internal/engine"
-	"github.com/S95F/guitarTutor/internal/live"
-	"github.com/S95F/guitarTutor/internal/pitch"
-	"github.com/S95F/guitarTutor/internal/practice"
-	"github.com/S95F/guitarTutor/internal/score"
-	"github.com/S95F/guitarTutor/internal/synth"
+	"github.com/S95F/musicTutor/internal/audio"
+	"github.com/S95F/musicTutor/internal/engine"
+	"github.com/S95F/musicTutor/internal/live"
+	"github.com/S95F/musicTutor/internal/pitch"
+	"github.com/S95F/musicTutor/internal/practice"
+	"github.com/S95F/musicTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/synth"
 )
 
 // waitRiff builds the wait-mode piece: four quarter notes at 120 BPM, the
@@ -42,7 +42,7 @@ func waitRiff(t *testing.T) *score.Score {
 // callback, a ~100 ms round trip configured as the calibrated offset, and
 // a simulated player whose DI'd guitar — Karplus-Strong plucks of each
 // awaited key, a beat into each wait — is the capture stream. The wiring
-// below is the -listen analysis callback (cmd/guitartutor) minus the
+// below is the -listen analysis callback (cmd/musictutor) minus the
 // window.
 //
 // Asserted end to end:
@@ -73,7 +73,7 @@ func TestWaitModeLiveLoop(t *testing.T) {
 	gate := practice.NewWaitGate(pcfg)
 	eng.SetEventTap(scorer.ExpectNote)
 
-	// The -listen wiring (cmd/guitartutor newOnNotes): the wait is
+	// The -listen wiring (cmd/musictutor newOnNotes): the wait is
 	// tracked by the generation WaitingOn returns with its events, the
 	// gate arms with a fresh-attack floor a grace before the arm, and the
 	// confirming detections are recorded with WaitConfirmed BEFORE
@@ -149,7 +149,7 @@ func TestWaitModeLiveLoop(t *testing.T) {
 
 	// The capture side is the player's DI'd guitar — a persistent KS
 	// voice — while the engine's playback goes to the output side only
-	// (headphones on the interface, the setup `guitartutor devices`
+	// (headphones on the interface, the setup `musictutor devices`
 	// recommends). The ~100 ms round trip is the scorer's configured
 	// offset above. The DI keeps the monophonic detector honest: what
 	// rings across a wait is the player's own previous note, the exact

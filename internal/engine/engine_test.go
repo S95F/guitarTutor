@@ -5,8 +5,8 @@ import (
 	"math"
 	"testing"
 
-	"github.com/S95F/guitarTutor/internal/score"
-	"github.com/S95F/guitarTutor/internal/synth"
+	"github.com/S95F/musicTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/synth"
 )
 
 // A noteRec is one recorded NoteOn or NoteOff with the exact frame index

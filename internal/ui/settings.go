@@ -769,7 +769,7 @@ const syncTrimStepMS = 5
 // package deliberately does not know what the config file looks like — it
 // works against the Prefs facade and nothing else. The storage layer
 // enforces the same bound on the way in and out, and a test in
-// cmd/guitartutor, which is the one place that sees both, asserts the two
+// cmd/musictutor, which is the one place that sees both, asserts the two
 // numbers agree.
 const MaxSyncTrimMS = 250
 
@@ -1214,7 +1214,7 @@ func (s *Settings) framesText(frames int) string {
 // The selected marker used to be unconditional, so on first run the row
 // read "[1/3] Microphone (...) (system default) <- selected" for a device
 // Prefs had never been told about. The application only opens the live
-// capture path when the STORED capture ID is non-empty (cmd/guitartutor:
+// capture path when the STORED capture ID is non-empty (cmd/musictutor:
 // captureID == "" falls back to playback-only), so the user who came from
 // the checklist step "choose your audio interface", read that line and
 // pressed Escape got no scoring at all and nothing to explain it. An entry
@@ -1748,7 +1748,7 @@ func (s *Settings) rowIndex(kind settingsRow) int {
 func (s *Settings) settingsBindings() []helpBinding {
 	leave := helpBinding{Group: "session", Keys: "esc", Hint: "esc back", Desc: "Go back to where you came from"}
 	if s.sh != nil && s.sh.Depth() <= 1 {
-		leave = helpBinding{Group: "session", Keys: "esc", Hint: "esc quit", Desc: "Quit guitarTutor"}
+		leave = helpBinding{Group: "session", Keys: "esc", Hint: "esc quit", Desc: "Quit musicTutor"}
 	}
 	return []helpBinding{
 		{Group: "moving", Keys: "up / down", Hint: "up/dn select", Desc: "Move between settings"},

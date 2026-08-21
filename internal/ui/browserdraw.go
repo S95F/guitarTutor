@@ -235,7 +235,7 @@ func (b *Browser) Draw(screen *ebiten.Image) {
 	screen.Fill(colBG)
 	b.anim.tick()
 	l := b.layout()
-	drawHeader(screen, "guitarTutor", b.headerStatus(), colDim)
+	drawHeader(screen, "musicTutor", b.headerStatus(), colDim)
 	b.drawHint(screen, l)
 	b.drawActions(screen, l)
 	b.drawPanes(screen, l)

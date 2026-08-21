@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/S95F/guitarTutor/internal/engine"
-	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/engine"
+	"github.com/S95F/musicTutor/internal/score"
 )
 
 // The playhead's contract: it fills in the gaps between the engine's

@@ -10,15 +10,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/S95F/guitarTutor/internal/appconfig"
-	"github.com/S95F/guitarTutor/internal/audio"
-	"github.com/S95F/guitarTutor/internal/engine"
-	"github.com/S95F/guitarTutor/internal/latency"
-	"github.com/S95F/guitarTutor/internal/live"
-	"github.com/S95F/guitarTutor/internal/pitch"
-	"github.com/S95F/guitarTutor/internal/practice"
-	"github.com/S95F/guitarTutor/internal/score"
-	"github.com/S95F/guitarTutor/internal/ui"
+	"github.com/S95F/musicTutor/internal/appconfig"
+	"github.com/S95F/musicTutor/internal/audio"
+	"github.com/S95F/musicTutor/internal/engine"
+	"github.com/S95F/musicTutor/internal/latency"
+	"github.com/S95F/musicTutor/internal/live"
+	"github.com/S95F/musicTutor/internal/pitch"
+	"github.com/S95F/musicTutor/internal/practice"
+	"github.com/S95F/musicTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/ui"
 )
 
 // liveBackend returns the duplex backend or a friendly explanation.
@@ -48,7 +48,7 @@ var setEventTap = func(eng *engine.Engine, fn func(ev score.NoteEvent, outFrame 
 // hundreds of characters and stay internal).
 func runDevices(args []string) error {
 	if len(args) != 0 {
-		return fmt.Errorf("usage: guitartutor devices")
+		return fmt.Errorf("usage: musictutor devices")
 	}
 	b, err := liveBackend()
 	if err != nil {
@@ -106,7 +106,7 @@ func resolveDevice(devs []audio.DeviceInfo, kind, query string) (string, error) 
 	case 1:
 		return matches[0].ID, nil
 	case 0:
-		return "", fmt.Errorf("no %s device matches %q (run 'guitartutor devices')", kind, query)
+		return "", fmt.Errorf("no %s device matches %q (run 'musictutor devices')", kind, query)
 	default:
 		names := make([]string, len(matches))
 		for i, d := range matches {
@@ -512,7 +512,7 @@ type liveConditions struct {
 //
 // The conditions the session opened under come back alongside it rather
 // than being shown here: this function cannot know whether "press S for
-// settings" or "run 'guitartutor calibrate'" is the remedy that is true
+// settings" or "run 'musictutor calibrate'" is the remedy that is true
 // for its caller, and a banner set here was overwritten by whichever
 // banner the caller set next (App.SetLiveWarning holds one message).
 //
@@ -536,7 +536,7 @@ func setupListen(eng *engine.Engine, app *ui.App, sc *score.Score, inQ, outQ str
 	offset, calibrated := calibratedOffset(cfg, inID, outID)
 	cond.uncalibrated = !calibrated
 	if !calibrated {
-		fmt.Fprintln(os.Stderr, "warning: no latency calibration for these devices — run 'guitartutor calibrate'.")
+		fmt.Fprintln(os.Stderr, "warning: no latency calibration for these devices — run 'musictutor calibrate'.")
 		fmt.Fprintln(os.Stderr, "Scoring works, but timing verdicts are skewed by the unmeasured round trip.")
 	}
 
@@ -733,7 +733,7 @@ func calibrationPass(ctx context.Context, b audio.Backend, inID, outID string, p
 	case <-deadline.C:
 		stream.Stop()
 		stream.Close()
-		return 0, 0, fmt.Errorf("calibration timed out — no audio flowed (check the devices with 'guitartutor devices')")
+		return 0, 0, fmt.Errorf("calibration timed out — no audio flowed (check the devices with 'musictutor devices')")
 	}
 	stream.Stop()
 	stream.Close()
@@ -773,12 +773,12 @@ func runCalibrate(args []string) error {
 	fs := flag.NewFlagSet("calibrate", flag.ExitOnError)
 	inQ := fs.String("in", "", inFlagHelp)
 	outQ := fs.String("out", "", outFlagHelp)
-	setUsage(fs, "guitartutor calibrate [-in device] [-out device]",
+	setUsage(fs, "musictutor calibrate [-in device] [-out device]",
 		"calibrate measures the round-trip latency offset used to align scoring;",
 		"the output must be audible to the input (mic near the speakers, or a loopback).")
 	fs.Parse(args)
 	if fs.NArg() != 0 {
-		return fmt.Errorf("usage: guitartutor calibrate [-in device] [-out device]")
+		return fmt.Errorf("usage: musictutor calibrate [-in device] [-out device]")
 	}
 	b, err := liveBackend()
 	if err != nil {

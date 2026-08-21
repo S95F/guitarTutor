@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score"
 )
 
 // wrapWindPart builds a one-part document whose declaration carries a

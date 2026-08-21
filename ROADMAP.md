@@ -1,4 +1,4 @@
-# guitarTutor Roadmap
+# musicTutor Roadmap
 
 Phases are ordered so that every phase ends with something a guitarist can actually practice with. Phase 1 is deliberately a complete, useful product *before* any live audio input exists — the research behind this ordering is captured in [docs/DECISIONS.md](docs/DECISIONS.md).
 
@@ -35,7 +35,7 @@ Roughly "Guitar Pro 8's speed trainer minus the editor" — a product people pay
 - [x] Synthesis: a built-in Karplus-Strong plucked-string voice ships as the default (zero assets — nothing to download), with SoundFont SF2 synthesis via `go-meltysynth` when the user supplies a file (`-sf2`). See DECISIONS D2 amendment.
 - [x] **Frame-counted sequencer** (`internal/engine`): our own scheduler over the parsed score — *not* meltysynth's built-in MIDI sequencer — driving NoteOn/NoteOff, metronome accents, loop boundaries, and the tab cursor from one frame counter, rendering directly into `ebitengine/oto` v3 (beep turned out to be unneeded until Phase 3's file decoding).
 - [x] Audio pipeline standardized on 48 kHz float32 stereo
-- [x] Offline WAV renderer (`guitartutor render`) — same engine code path, used by the end-to-end tests
+- [x] Offline WAV renderer (`musictutor render`) — same engine code path, used by the end-to-end tests
 
 **The practice loop**
 
@@ -62,7 +62,7 @@ Live capture, and with it the cgo build event. This phase is where the two-clock
 - [x] `audio.Backend` interface (device enumeration, duplex stream open); Phase 1's oto path remains the playback-only fallback for `CGO_ENABLED=0` builds
 - [x] `gen2brain/malgo` (miniaudio) backend: **one full-duplex WASAPI shared-mode stream** — guitar capture and playback in one callback. 48 kHz float32, 480-frame periods negotiated on real hardware. (Found upstream: malgo v0.11.25's Backend enum omits `ma_backend_custom`, so its `BackendNull` requests the wrong backend — worked around locally; worth filing upstream.)
 - [x] Callback discipline: the callback renders the engine and memcpys capture into a race-free SPSC ring (drop-newest overflow, backpressure signal); analysis runs in an ordinary goroutine
-- [x] Device selection by name fragment (`guitartutor devices`, `-in`/`-out`), remembered in config; in-app picker delivered by the Phase 5 settings screen — *buffer-size setting and hot-unplug recovery still pending*
+- [x] Device selection by name fragment (`musictutor devices`, `-in`/`-out`), remembered in config; in-app picker delivered by the Phase 5 settings screen — *buffer-size setting and hot-unplug recovery still pending*
 - [x] Same-device steering: documented in `devices` output and README, and the practice view now raises a split-device warning banner when capture and playback are on different interfaces
 - [x] CI builds cgo on both platforms (runners ship gcc) plus a `CGO_ENABLED=0` fallback build check and a Linux `-race` leg; contributor toolchain documented in README
 
@@ -77,7 +77,7 @@ Live capture, and with it the cgo build event. This phase is where the two-clock
 **Scoring & feedback**
 
 - [x] Tuner view (T in the practice view): note name + cents bar from the live detector
-- [x] Latency calibration (`guitartutor calibrate`): click train over the duplex stream, cross-correlated, per-device-pair offset stored with confidence — verified end-to-end through a VB-Cable software loopback (94.6 ms at 0.87 confidence). *Manual nudge slider pending.*
+- [x] Latency calibration (`musictutor calibrate`): click train over the duplex stream, cross-correlated, per-device-pair offset stored with confidence — verified end-to-end through a VB-Cable software loopback (94.6 ms at 0.87 confidence). *Manual nudge slider pending.*
 - [x] Scoring against timing windows (±150 ms default) with the calibrated offset reconciling the input/output clocks; misses finalize behind a lag because the tracker reports notes only when they close
 - [x] Hit / close / miss feedback tinting the tab; running accuracy and input meter in the HUD — *per-section/per-pass accuracy breakdown pending*
 - [x] **Wait mode** (W): playback holds at each user note until the detector hears it (octave-exact, intonation-lenient)

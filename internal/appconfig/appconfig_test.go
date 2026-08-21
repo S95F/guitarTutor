@@ -28,7 +28,7 @@ func TestPathDefaultUsesUserConfigDir(t *testing.T) {
 	if err != nil {
 		t.Skipf("os.UserConfigDir unavailable: %v", err)
 	}
-	if want := filepath.Join("guitartutor", "config.json"); !strings.HasSuffix(p, want) {
+	if want := filepath.Join("musictutor", "config.json"); !strings.HasSuffix(p, want) {
 		t.Errorf("Path = %q, want suffix %q", p, want)
 	}
 }
@@ -490,5 +490,60 @@ func TestPiecesDirIsUnderTheConfigDir(t *testing.T) {
 	// Idempotent: a second call on an existing folder is fine.
 	if _, err := EnsurePiecesDir(); err != nil {
 		t.Errorf("EnsurePiecesDir on an existing folder: %v", err)
+	}
+}
+
+// TestMigrateOldDirAdoptsGuitartutor: the rename must not reset anyone.
+// The old directory holds the config and the pieces library; when no new
+// directory exists yet, the whole thing is renamed into place in one move.
+func TestMigrateOldDirAdoptsGuitartutor(t *testing.T) {
+	base := t.TempDir()
+	old := filepath.Join(base, oldDirName)
+	if err := os.MkdirAll(filepath.Join(old, "pieces"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		fileName:                           `{"version": 4}`,
+		filepath.Join("pieces", "my.gtab"): "\\tempo 120\n0.6.1",
+	} {
+		if err := os.WriteFile(filepath.Join(old, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	migrateOldDir(base)
+
+	for _, name := range []string{fileName, filepath.Join("pieces", "my.gtab")} {
+		if _, err := os.Stat(filepath.Join(base, dirName, name)); err != nil {
+			t.Errorf("after migration, %s: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Error("the old directory is still there; the move must not fork the config")
+	}
+}
+
+// TestMigrateOldDirNeverOverwrites: once a musictutor directory exists —
+// even an empty one — a leftover guitartutor directory is evidence, not a
+// donor. Renaming over live settings would be worse than the reset the
+// migration exists to prevent.
+func TestMigrateOldDirNeverOverwrites(t *testing.T) {
+	base := t.TempDir()
+	for _, dir := range []string{dirName, oldDirName} {
+		if err := os.MkdirAll(filepath.Join(base, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(base, oldDirName, fileName), []byte(`{"version": 4}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	migrateOldDir(base)
+
+	if _, err := os.Stat(filepath.Join(base, oldDirName, fileName)); err != nil {
+		t.Errorf("the old directory was disturbed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, dirName, fileName)); !os.IsNotExist(err) {
+		t.Error("migration wrote into an existing musictutor directory")
 	}
 }

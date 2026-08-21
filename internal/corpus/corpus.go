@@ -1,7 +1,7 @@
 // Package corpus locates the real-instrument test corpus: recorded guitar
 // audio, and score files exported by Guitar Pro and MuseScore themselves.
 //
-// Everything guitarTutor's audio and importer code is validated against
+// Everything musicTutor's audio and importer code is validated against
 // today is SYNTHESIZED — Karplus-Strong plucks for pitch, chroma and
 // chord tests, and self-authored fixtures for the .gp and MusicXML
 // importers. That has already flattered the project once: Phase 4 shipped

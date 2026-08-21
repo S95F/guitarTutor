@@ -48,8 +48,8 @@ import (
 
 	"gitlab.com/gomidi/midi/v2/smf"
 
-	"github.com/S95F/guitarTutor/internal/fretting"
-	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/fretting"
+	"github.com/S95F/musicTutor/internal/score"
 )
 
 // Grid is the quantization grid in score ticks: a straight 1/32 note.

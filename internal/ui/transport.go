@@ -23,7 +23,7 @@ import (
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/vector"
 
-	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score"
 )
 
 // Vertical layout of the practice view. The tab sits low enough to leave
@@ -133,7 +133,7 @@ var practiceChips = []practiceChip{
 		act: func(a *App) { a.openBPMEntry() }},
 	{label: "SETTINGS", key: "S",
 		disabled: func(a *App) bool { return a.settings == nil },
-		whenOff:  func(a *App) string { return "settings need the full app — start guitarTutor without a file" },
+		whenOff:  func(a *App) string { return "settings need the full app — start musicTutor without a file" },
 		act:      func(a *App) { a.openSettings() }},
 	{label: "HELP", key: "?",
 		on:  func(a *App) bool { return a.helpOpen },

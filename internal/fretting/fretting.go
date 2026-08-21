@@ -32,7 +32,7 @@ package fretting
 import (
 	"sort"
 
-	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score"
 )
 
 // MaxFret is the highest fret considered playable.

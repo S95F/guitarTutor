@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/S95F/guitarTutor/internal/appconfig"
-	"github.com/S95F/guitarTutor/internal/audio"
-	"github.com/S95F/guitarTutor/internal/ui"
+	"github.com/S95F/musicTutor/internal/appconfig"
+	"github.com/S95F/musicTutor/internal/audio"
+	"github.com/S95F/musicTutor/internal/ui"
 )
 
 // --- test doubles -------------------------------------------------------

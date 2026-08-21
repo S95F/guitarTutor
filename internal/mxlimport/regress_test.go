@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/S95F/guitarTutor/internal/fretting"
-	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/fretting"
+	"github.com/S95F/musicTutor/internal/score"
 )
 
 // findWarn returns the warnings containing sub.

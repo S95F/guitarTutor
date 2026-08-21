@@ -15,13 +15,13 @@ import (
 
 	"github.com/ebitengine/oto/v3"
 
-	"github.com/S95F/guitarTutor/internal/appconfig"
-	"github.com/S95F/guitarTutor/internal/audio"
-	"github.com/S95F/guitarTutor/internal/engine"
-	"github.com/S95F/guitarTutor/internal/live"
-	"github.com/S95F/guitarTutor/internal/score"
-	"github.com/S95F/guitarTutor/internal/score/textfmt"
-	"github.com/S95F/guitarTutor/internal/ui"
+	"github.com/S95F/musicTutor/internal/appconfig"
+	"github.com/S95F/musicTutor/internal/audio"
+	"github.com/S95F/musicTutor/internal/engine"
+	"github.com/S95F/musicTutor/internal/live"
+	"github.com/S95F/musicTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score/textfmt"
+	"github.com/S95F/musicTutor/internal/ui"
 )
 
 // runShell opens the windowed application: the start screen lists recent
@@ -111,7 +111,7 @@ func (o *shellOpener) showEditor(sc *score.Score, path string) {
 				return
 			}
 		}
-		fmt.Fprintln(os.Stderr, "guitartutor: cannot edit that piece:", err)
+		fmt.Fprintln(os.Stderr, "musictutor: cannot edit that piece:", err)
 		return
 	}
 	o.installEditor(ed)
@@ -192,7 +192,7 @@ func (o *shellOpener) installEditor(ed *ui.Editor) {
 	// to the start screen: write, hear it, fix it, hear it again.
 	ed.SetPractice(func(p string) {
 		if _, err := o.shell.OpenPiece(p); err != nil {
-			fmt.Fprintln(os.Stderr, "guitartutor: cannot practise that piece:", err)
+			fmt.Fprintln(os.Stderr, "musictutor: cannot practise that piece:", err)
 		}
 	})
 	o.shell.Show(ed)
@@ -681,7 +681,7 @@ func (o *shellOpener) Open(path string) (ui.Screen, []string, error) {
 			app.SetLiveWarning("could not re-open the piece: " + err.Error())
 		}
 	})
-	// Q's binding reads "Quit guitarTutor", and under the Shell only this
+	// Q's binding reads "Quit musicTutor", and under the Shell only this
 	// wiring makes that true — without it Q silently behaved as Escape,
 	// while the help overlay promised otherwise on adjacent lines (audit D4).
 	app.SetQuitAll(func() {
@@ -775,7 +775,7 @@ func (o *shellOpener) Open(path string) (ui.Screen, []string, error) {
 
 // uncalibratedShellWarning is the practice view's wording for a live
 // session whose round trip has never been measured. The stderr line
-// setupListen prints says to run 'guitartutor calibrate' — true in a
+// setupListen prints says to run 'musictutor calibrate' — true in a
 // terminal, useless in a window Explorer opened — so the shell's banner
 // names the remedy that exists right here instead.
 const uncalibratedShellWarning = "timing is not calibrated for these devices — press S for settings, then calibrate now"
@@ -847,7 +847,7 @@ func framesToDuration(frames int) time.Duration {
 // it never produced.
 func (o *shellOpener) setTitleFor(path string) {
 	if o.shell != nil {
-		o.shell.SetTitle("guitarTutor — " + strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)))
+		o.shell.SetTitle("musicTutor — " + strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)))
 	}
 }
 

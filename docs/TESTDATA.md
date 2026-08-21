@@ -1,6 +1,6 @@
 # The real-instrument test corpus
 
-Everything guitarTutor's audio and importer code is validated against in
+Everything musicTutor's audio and importer code is validated against in
 this repository is **synthesized or self-authored**: Karplus-Strong plucks
 for pitch, chroma and chord tests, and hand-built fixtures for the `.gp`
 and MusicXML importers. That is fast, deterministic, and it has already
@@ -48,7 +48,7 @@ this document by a wide margin.
 GPL-3.0 are *distribution* licences. GPLv3 §2 permits unlimited private
 use of copies you never convey; MPL-2.0 §3's obligations likewise trigger
 on distribution. Fetching these onto a developer's machine to run tests
-conveys nothing, so no copyleft obligation attaches and guitarTutor's MIT
+conveys nothing, so no copyleft obligation attaches and musicTutor's MIT
 licence is untouched. This only works because they stay gitignored — do
 not vendor the GPL corpus into the repository. (MPL-2.0 is per-file, so
 vendoring *those* would merely make those files MPL; GPL vendoring is the
@@ -77,7 +77,7 @@ cite them anyway — see [FIXTURES.md](FIXTURES.md).
 
 **Rejected, with reasons.** *IDMT-SMT-Guitar* is the best technique corpus
 going and is CC **BY-NC-ND** — usable for an unmonetised hobby project
-today, but it would become unusable the moment guitarTutor is sold or used
+today, but it would become unusable the moment musicTutor is sold or used
 commercially, and our MIT licence explicitly invites that downstream. ND
 also means a CI job uploading a trimmed clip as an artefact is a
 violation. Guitar-TECHS covers the same axis under CC BY 4.0, so take
@@ -90,7 +90,7 @@ or OAuth and cannot be scripted.
 
 ### Or record your own
 
-For guitarTutor's specific weak spots, five minutes of your own playing
+For musicTutor's specific weak spots, five minutes of your own playing
 beats any dataset, because you can record exactly the cases the tests say
 are marginal: **open G, open C and A major** (the voicings where
 synthesized chroma does not separate cleanly), a **downstroke strummed

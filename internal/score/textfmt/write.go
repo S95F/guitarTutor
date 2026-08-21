@@ -28,7 +28,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score"
 )
 
 // Format renders sc as .gtab source. The returned bytes parse back to a

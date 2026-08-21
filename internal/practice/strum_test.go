@@ -4,8 +4,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/S95F/guitarTutor/internal/pitch"
-	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/pitch"
+	"github.com/S95F/musicTutor/internal/score"
 )
 
 // Pitch classes used below, spelled out so the chords read as chords.

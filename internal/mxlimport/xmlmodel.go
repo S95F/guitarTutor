@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score"
 )
 
 // xmlContainer is META-INF/container.xml inside a .mxl archive.

@@ -1,4 +1,4 @@
-// Package edit is the model behind guitarTutor's tablature editor: a
+// Package edit is the model behind musicTutor's tablature editor: a
 // score being written by hand, a cursor pointing into it, and the
 // operations that change it. It knows nothing about Ebitengine — the
 // screen in internal/ui is a projection of what is here, and every rule
@@ -27,8 +27,8 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/S95F/guitarTutor/internal/score"
-	"github.com/S95F/guitarTutor/internal/score/textfmt"
+	"github.com/S95F/musicTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score/textfmt"
 )
 
 // undoDepth is how many operations can be taken back. Snapshots are whole

@@ -29,8 +29,8 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
 	"github.com/hajimehoshi/ebiten/v2/vector"
 
-	"github.com/S95F/guitarTutor/internal/edit"
-	"github.com/S95F/guitarTutor/internal/score/textfmt"
+	"github.com/S95F/musicTutor/internal/edit"
+	"github.com/S95F/musicTutor/internal/score/textfmt"
 )
 
 // Layout of the text pane.

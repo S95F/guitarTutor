@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/S95F/guitarTutor/internal/score"
-	"github.com/S95F/guitarTutor/internal/score/textfmt"
+	"github.com/S95F/musicTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score/textfmt"
 )
 
 // saveable is the invariant every test asserts after every edit: the piece

@@ -19,8 +19,8 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/text/v2"
 	"github.com/hajimehoshi/ebiten/v2/vector"
 
-	"github.com/S95F/guitarTutor/internal/pitch"
-	"github.com/S95F/guitarTutor/internal/practice"
+	"github.com/S95F/musicTutor/internal/pitch"
+	"github.com/S95F/musicTutor/internal/practice"
 )
 
 // noteKey identifies one tab note for verdict and wait-point matching:
@@ -212,7 +212,7 @@ func (a *App) syncLive() {
 // pass's hit or miss onto notes the player has not reached yet — an
 // upcoming note showing green. Clearing the map at the loop boundary
 // would not be enough on its own, because misses finalize seconds late
-// (see advanceLagFrames in cmd/guitartutor) and the previous pass's
+// (see advanceLagFrames in cmd/musictutor) and the previous pass's
 // results are still arriving well into the next one.
 //
 // Behind the playhead a stale verdict is the latest thing known about a
@@ -573,12 +573,12 @@ func (a *App) tunerIdleLine() (string, float64) {
 
 // liveRemedy names the step that would turn live input on from where the
 // user is standing. Naming the settings screen is only honest when one is
-// wired behind S; a window started as `guitartutor play <file>` has no
+// wired behind S; a window started as `musictutor play <file>` has no
 // settings at all, and pointing its user at a greyed chip would send them
 // in a circle.
 func (a *App) liveRemedy() string {
 	if a.settings != nil {
 		return "choose your capture device in settings (S)"
 	}
-	return "quit and re-run with: guitartutor play -listen <file>"
+	return "quit and re-run with: musictutor play -listen <file>"
 }

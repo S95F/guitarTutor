@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/S95F/guitarTutor/internal/pitch"
+	"github.com/S95F/musicTutor/internal/pitch"
 )
 
 const testRate = 48000

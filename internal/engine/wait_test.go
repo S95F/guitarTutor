@@ -3,7 +3,7 @@ package engine
 import (
 	"testing"
 
-	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score"
 )
 
 // waitDuetScore builds a two-track score for wait-mode tests: a user track

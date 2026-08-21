@@ -26,7 +26,7 @@ import (
 	mp3 "github.com/hajimehoshi/go-mp3"
 	"github.com/mewkiz/flac"
 
-	"github.com/S95F/guitarTutor/internal/wavio"
+	"github.com/S95F/musicTutor/internal/wavio"
 )
 
 // SampleRate is the output sample rate: the project-wide 48 kHz standard.

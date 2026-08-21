@@ -47,7 +47,7 @@ type Closer interface {
 // audio down again afterwards. It is the seam between the UI and
 // everything that needs an engine, a synth, and an audio device: the UI
 // package knows how to show a file browser, and nothing about how to
-// build a playback pipeline. cmd/guitartutor implements it.
+// build a playback pipeline. cmd/musictutor implements it.
 type Opener interface {
 	// Open loads path and returns the practice screen for it, along with
 	// any importer warnings worth showing the user.
@@ -60,7 +60,7 @@ type Opener interface {
 
 // Services is what screens can ask of the application beyond opening a
 // piece: the persisted preferences, and the audio devices to choose
-// between. Implemented by cmd/guitartutor; a nil field means that
+// between. Implemented by cmd/musictutor; a nil field means that
 // facility is unavailable in this build or on this machine (no live
 // audio backend, for instance), and screens must degrade rather than
 // assume.
@@ -193,7 +193,7 @@ type Shell struct {
 
 // NewShell creates the application host with root as its first screen.
 func NewShell(svc Services, root Screen) *Shell {
-	return &Shell{svc: svc, stack: []Screen{root}, title: "guitarTutor"}
+	return &Shell{svc: svc, stack: []Screen{root}, title: "musicTutor"}
 }
 
 // Services exposes the application facilities to screens.
@@ -259,7 +259,7 @@ func (s *Shell) Depth() int { return len(s.stack) }
 // dropped — releasing what each owns, top-down, exactly as popping them
 // one at a time would — and Update then reports errQuit to Ebitengine.
 // It is what the practice view's Q key does under the Shell; the binding
-// reads "Quit guitarTutor", and until this existed nothing an integrator
+// reads "Quit musicTutor", and until this existed nothing an integrator
 // could wire made that true (audit D4). The Opener's audio is not
 // released here: the application's run function owns that teardown (it
 // deferred CloseCurrent), and the process is ending either way.
@@ -347,7 +347,7 @@ func (s *Shell) Update() error {
 		// Leaving a practice screen releases its audio.
 		if _, isPractice := top.(*App); isPractice && s.svc.Opener != nil {
 			s.svc.Opener.CloseCurrent()
-			s.SetTitle("guitarTutor")
+			s.SetTitle("musicTutor")
 		}
 		// A screen that owns resources of its own releases them here, so
 		// nothing it started outlives it (see Closer).

@@ -4,13 +4,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/S95F/guitarTutor/internal/audio"
-	"github.com/S95F/guitarTutor/internal/engine"
-	"github.com/S95F/guitarTutor/internal/live"
-	"github.com/S95F/guitarTutor/internal/pitch"
-	"github.com/S95F/guitarTutor/internal/practice"
-	"github.com/S95F/guitarTutor/internal/score/textfmt"
-	"github.com/S95F/guitarTutor/internal/synth"
+	"github.com/S95F/musicTutor/internal/audio"
+	"github.com/S95F/musicTutor/internal/engine"
+	"github.com/S95F/musicTutor/internal/live"
+	"github.com/S95F/musicTutor/internal/pitch"
+	"github.com/S95F/musicTutor/internal/practice"
+	"github.com/S95F/musicTutor/internal/score/textfmt"
+	"github.com/S95F/musicTutor/internal/synth"
 )
 
 // fakeBackend is an in-process audio.Backend whose stream the test drives
@@ -71,7 +71,7 @@ func TestLiveLoopScoresLoopback(t *testing.T) {
 	// The advance lag must exceed the longest sustained note plus its
 	// decay: the tracker reports a note only when it closes, so the
 	// fixture's 2 s whole note arrives ~2 s "late" (same constant as the
-	// -listen wiring; see cmd/guitartutor advanceLagFrames).
+	// -listen wiring; see cmd/musictutor advanceLagFrames).
 	onNotes := func(closed []pitch.Note, current pitch.Note, sounding bool, consumed int64) {
 		scorer.Detected(closed)
 		scorer.Advance(consumed - 4*sr)
@@ -84,7 +84,7 @@ func TestLiveLoopScoresLoopback(t *testing.T) {
 		Stream:  audio.StreamConfig{SampleRate: sr, PeriodFrames: period},
 		OnNotes: onNotes,
 		// Phase 4: strums carry the chroma that verifies chords. Wired
-		// exactly as cmd/guitartutor does, so this test fails if that
+		// exactly as cmd/musictutor does, so this test fails if that
 		// wiring is ever dropped — without it the bar-3 chord silently
 		// reverts to one hit and two misses.
 		OnStrums: func(sts []pitch.Strum) {

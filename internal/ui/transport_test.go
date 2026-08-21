@@ -8,7 +8,7 @@ package ui
 import (
 	"testing"
 
-	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score"
 )
 
 // pressAt builds a pointer pressing the middle of r this frame.

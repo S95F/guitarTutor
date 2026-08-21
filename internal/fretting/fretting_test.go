@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/S95F/guitarTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score"
 )
 
 // single wraps a melodic line as one-key beats.

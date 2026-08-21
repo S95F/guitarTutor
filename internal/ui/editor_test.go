@@ -9,9 +9,9 @@ import (
 
 	"github.com/hajimehoshi/ebiten/v2"
 
-	"github.com/S95F/guitarTutor/internal/edit"
-	"github.com/S95F/guitarTutor/internal/score"
-	"github.com/S95F/guitarTutor/internal/score/textfmt"
+	"github.com/S95F/musicTutor/internal/edit"
+	"github.com/S95F/musicTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score/textfmt"
 )
 
 // newTestEditor builds an editor with no Shell behind it. Everything the

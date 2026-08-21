@@ -1,9 +1,9 @@
-// Package pitchml is guitarTutor's optional ONNX pitch backend: SwiftF0
+// Package pitchml is musicTutor's optional ONNX pitch backend: SwiftF0
 // (MIT, https://github.com/lars76/swift-f0) wrapped as a
 // [pitch.F0Estimator], per docs/DECISIONS.md D4 and ROADMAP Phase 4.
 //
 // The default engine is the in-house MPM/YIN-FFT detector in
-// [github.com/S95F/guitarTutor/internal/pitch]; it is pure Go and ships in
+// [github.com/S95F/musicTutor/internal/pitch]; it is pure Go and ships in
 // a single binary with no external runtime. This package exists for the
 // case that engine handles worst — a noisy, distorted, or heavily
 // compressed signal, where autocorrelation octave-flips — and it buys that
@@ -28,12 +28,12 @@
 //
 // 3. Build with the tag:
 //
-//	go build -tags onnx ./cmd/guitartutor
+//	go build -tags onnx ./cmd/musictutor
 //
 // 4. Point the app at the two files. Easiest is to drop both beside the
 // executable, where they are found with no configuration:
 //
-//	guitartutor.exe
+//	musictutor.exe
 //	onnxruntime.dll        (or onnxruntime/lib/onnxruntime.dll)
 //	swift_f0.onnx          (or models/swift_f0.onnx)
 //

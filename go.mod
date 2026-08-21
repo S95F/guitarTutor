@@ -1,4 +1,4 @@
-module github.com/S95F/guitarTutor
+module github.com/S95F/musicTutor
 
 go 1.26
 

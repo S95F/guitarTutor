@@ -2,7 +2,7 @@
 
 package pitchml
 
-import "github.com/S95F/guitarTutor/internal/pitch"
+import "github.com/S95F/musicTutor/internal/pitch"
 
 // This file is the whole package in a default build. It exposes the same
 // exported API as swiftf0_onnx.go and imports nothing beyond the pitch

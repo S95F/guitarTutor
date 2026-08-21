@@ -1,9 +1,9 @@
-# guitarTutor
-[![CI](https://github.com/S95F/guitarTutor/actions/workflows/ci.yml/badge.svg)](https://github.com/S95F/guitarTutor/actions/workflows/ci.yml)
+# musicTutor
+[![CI](https://github.com/S95F/musicTutor/actions/workflows/ci.yml/badge.svg)](https://github.com/S95F/musicTutor/actions/workflows/ci.yml)
 
 Plug in your electric guitar. Load a piece. Practice it properly.
 
-guitarTutor is an open-source guitar practice companion written in Go. You import a piece of music (or write one in a simple text format), and the app plays it back — synthesized from the score, with a metronome and scrolling tablature — while you play along on a real guitar plugged into your audio interface. Loop the hard bars, slow them down, and let the app ramp the tempo back up as you nail each pass. It listens to your playing and tells you which notes you hit.
+musicTutor is an open-source guitar practice companion written in Go. You import a piece of music (or write one in a simple text format), and the app plays it back — synthesized from the score, with a metronome and scrolling tablature — while you play along on a real guitar plugged into your audio interface. Loop the hard bars, slow them down, and let the app ramp the tempo back up as you nail each pass. It listens to your playing and tells you which notes you hit.
 
 > **Status: Phases 1–4 core work, pre-alpha.** The practice player is functional; the app can hear you (`play -listen`: live pitch detection, hit/close/miss on the tab, a tuner, wait mode); and it now opens **Guitar Pro 7/8 `.gp`** and **MusicXML** files directly and plays **backing tracks** (WAV/FLAC/MP3) pinned to score time. Chords are now scored by verifying each expected note against the strum's spectrum. The importers are built clean-room against the documented formats and validated on a self-authored corpus, and detection thresholds are tuned on synthesized audio — real Guitar-Pro/MuseScore exports and real guitar recordings are the remaining validation gaps, so files and bug reports are gold. The app shell (Phase 5) has since landed: run the binary bare and you get a start screen with recent pieces, opening through the system's own file dialog, drag-and-drop, and in-app settings for devices, latency calibration, SoundFont and count-in — the command line remains the fastest path for anyone who prefers it. See the [roadmap](ROADMAP.md) and [decisions](docs/DECISIONS.md).
 
@@ -11,7 +11,7 @@ guitarTutor is an open-source guitar practice companion written in Go. You impor
 
 The tools guitarists actually practice with are either editors that can't hear you (Guitar Pro, TuxGuitar), subscription apps with unreliable note detection (Yousician, the now-abandoned Rocksmith+), or web players that break mid-loop (Songsterr). Rocksmith 2014 was delisted in 2023 and Ubisoft closed its studio in January 2026 — there is a real vacuum for an **offline-first, no-subscription, import-your-own-music** practice tool.
 
-guitarTutor aims to fill it with the practice loop every guitarist converges on:
+musicTutor aims to fill it with the practice loop every guitarist converges on:
 
 1. Pick a section of the piece.
 2. Loop it — gaplessly, or with a count-in before each pass.
@@ -108,7 +108,7 @@ A few load-bearing design rules, distilled from research into why comparable app
 Requires Go 1.26+. Phase 1 is pure Go — no C toolchain, no assets to download.
 
 ```bash
-go build ./cmd/guitartutor
+go build ./cmd/musictutor
 ```
 
 Run it with no arguments — or double-click the binary — and it opens the start screen, which lands on your pieces in three lists:
@@ -122,13 +122,13 @@ Run it with no arguments — or double-click the binary — and it opens the sta
 A getting-started strip across the top tracks three steps — choose your audio interface, measure the round trip, open (or write) a piece — and ticks each off against the real configuration rather than just listing them. Press **H** to put it away, and **H** again to bring it back; the choice is remembered, and everything it points at is a row in settings.
 
 ```bash
-./guitartutor
+./musictutor
 ```
 
 Or go straight to a piece:
 
 ```bash
-./guitartutor play testdata/fixture_riff.gtab
+./musictutor play testdata/fixture_riff.gtab
 ```
 
 ### Writing your own
@@ -151,12 +151,12 @@ Bars stay exactly full, across every track at once — the editor refuses an edi
 
 ### Playing a piece
 
-Or your own piece: `guitartutor play song.gp` — also `.mid`, `.musicxml`/`.mxl`, and `.gtab`. Useful flags: `-scale 0.7` start slowed down, `-countin 4`, `-met` metronome, `-sf2 your.sf2` SoundFont synthesis instead of the built-in pluck.
+Or your own piece: `musictutor play song.gp` — also `.mid`, `.musicxml`/`.mxl`, and `.gtab`. Useful flags: `-scale 0.7` start slowed down, `-countin 4`, `-met` metronome, `-sf2 your.sf2` SoundFont synthesis instead of the built-in pluck.
 
 Play along with the original recording under the synth:
 
 ```bash
-guitartutor play -backing song.flac -backing-offset 1.2 song.gp
+musictutor play -backing song.flac -backing-offset 1.2 song.gp
 ```
 
 The backing audio is pinned to score time, so looping and seeking stay aligned; slowing down pitch-shifts it (the synthesized parts stay pitch-true — no pure-Go time-stretch exists yet, a documented limitation). `-backing-offset` is the file position, in seconds, at the piece's first tick.
@@ -176,17 +176,17 @@ The playhead is drawn where the music is **sounding**, not where it is being ren
 ### Live mode — the guitar plugs in
 
 ```bash
-guitartutor devices
+musictutor devices
 ```
 
 lists your audio endpoints. Pick the interface your guitar is plugged into (a unique name fragment is enough), calibrate the round trip once, then practice with the app listening:
 
 ```bash
-guitartutor calibrate -in scarlett -out scarlett
+musictutor calibrate -in scarlett -out scarlett
 ```
 
 ```bash
-guitartutor play -listen -in scarlett -out scarlett testdata/fixture_riff.gtab
+musictutor play -listen -in scarlett -out scarlett testdata/fixture_riff.gtab
 ```
 
 Notes you play are matched against the score: green = hit, amber = close (loose intonation, wrong octave, or a damped note whose attack landed but whose pitch never spoke), red = miss. **T** opens the tuner; **W** enables wait mode, which holds playback at each note until you actually play it.
@@ -198,7 +198,7 @@ Live mode needs a cgo build (the default when a C compiler is present — on Win
 There is also an offline renderer — useful for checking a piece without opening the UI:
 
 ```bash
-./guitartutor render -o out.wav testdata/fixture_riff.gtab
+./musictutor render -o out.wav testdata/fixture_riff.gtab
 ```
 
 To write your own pieces, see the [text tab format](docs/TEXTFORMAT.md).
