@@ -130,6 +130,18 @@ func build(which, piece string) (ui.Screen, error) {
 		}
 		ed, err := ui.NewEditorFor(nil, s, piece)
 		if err != nil {
+			// A wind piece cannot open on the grid; the app routes it to
+			// the text view, and the -text screenshot follows it there.
+			if which == "editor-text" {
+				src, rerr := os.ReadFile(piece)
+				if rerr != nil {
+					return nil, err
+				}
+				ted := ui.NewEditorForText(nil, src, piece)
+				ted.SetSaveDialog(func(string) {})
+				ted.SetPractice(func(string) {})
+				return ted, nil
+			}
 			return nil, err
 		}
 		ed.SetSaveDialog(func(string) {})
