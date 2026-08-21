@@ -165,6 +165,12 @@ per frame while waiting.
 high-string-first. `laneOf(str, nStr, mirror)` puts the low strings outside-left, the way a
 right-handed player sees the neck. Keep `mirror` unexported and false until someone asks.
 
+**Scope: fretted tracks.** The whole view is lane-per-string; a wind track (D8) has one
+lane and its practice view is already a pitch ladder, so a highway for winds is a separate
+design question (pitch lanes? one lane with height?) that should not be answered by
+accident here. Gate the `H` toggle on `Track.Wind == nil` and leave a wind highway to its
+own future page.
+
 Tuning and capo are a real gap — `drawTab` shows neither — and the highway has the natural
 place for them: a note letter under each lane's near end, from the existing `keyNames`
 table, plus `capo N` in the HUD.

@@ -28,6 +28,14 @@ testdata/real/
   scores/      .gp from Guitar Pro, .musicxml/.mxl from MuseScore
 ```
 
+The wind side (D8) has the same gap and, as yet, no categories: every
+sax number in the tree is measured on the synthesized reed voice. When
+wind recordings arrive they will want their own directories — long
+tones, tonguing and slurring at speed, altissimo, and a mic'd room with
+the app's own playback bleeding in, which is the failure mode a DI'd
+guitar can never show. `corpus.Category` is an open string type, so
+adding them is a constant and a directory, not a redesign.
+
 ## What to fetch, and why these
 
 ### Scores (5.6–21 MB — do this one first)

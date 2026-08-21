@@ -32,7 +32,7 @@ The app is wrong more often than it looks, and every source below is already in 
 | Bends are tracked but not judged | ROADMAP Phase 2, unchecked |
 | Dropped capture samples under backpressure | `live.Session.DroppedSamples()` |
 | Signal below the -55 dBFS gate detects as nothing | `pitch.DefaultConfig` |
-| The 4 s advance lag force-misses a note held longer | `advanceLagFrames = 4 * sampleRate` |
+| The 4 s advance lag force-misses a note held longer | `advanceLagFrames = 4 * sampleRate` — fixed for winds, whose lag now covers the piece's longest note at the slowest speed (`advanceLagFor`); still a fretted-track constant |
 | A seek or loop edit truncates the answering window of whatever just sounded | fixed — `Scorer.AbandonBefore`, driven by `Engine.DiscontinuityFrame` |
 
 ## The never-punish invariants

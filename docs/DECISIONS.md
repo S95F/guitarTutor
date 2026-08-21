@@ -35,6 +35,8 @@ Lightweight decision records for musicTutor. Each records what was chosen, what 
 
 **Amendment (Phase 3 as built):** beep stayed unnecessary at the point it was planned to enter. Backing-track decoding imports the underlying decoders directly (`internal/wavio` for WAV, `mewkiz/flac`, `hajimehoshi/go-mp3`) into `internal/audiofile`, because the engine mixes the decoded PCM itself — pinned to score time so seeks, loops, and tempo scaling stay exact — and beep's streamer abstraction would sit unused between the two. beep is now expected never to enter.
 
+**Amendment (D8, winds):** the built-in path gained a second voice. A blown note holds at level while the breath holds it and stops when the breath stops, which a decaying delay loop cannot say, so wind tracks get a band-limited wavetable voice with an attack/sustain/release envelope (`internal/synth/reed.go`) — a placeholder reed, honestly labelled, level-matched to the window the detector's gates are calibrated against. `synth.NewBuiltin` picks per track by General MIDI program (brass/reeds/pipes sustain, everything else plucks); the SoundFont path was already instrument-generic.
+
 ## D3 — Piece formats: MIDI + own text format first; Guitar Pro 7/8 next; MusicXML later
 
 **Decision:** Phase 1 imports Standard MIDI Files via [gomidi/midi v2](https://gitlab.com/gomidi/midi) and a small in-house text tab format (alphaTex-*inspired*, deliberately not alphaTex-compatible). Phase 3 adds a clean-room Guitar Pro 7/8 `.gp` importer, then a MusicXML subset.
@@ -56,6 +58,8 @@ Lightweight decision records for musicTutor. Each records what was chosen, what 
 **Rejected:** aubio (GPL — viral; bindings dead), cycfi/Q (superb guitar-specific C++, but a cgo shim we'd own; revisit if the MPM port disappoints), CREPE (~1× realtime on CPU — too slow), PESTO (LGPL, no ONNX artifact), existing Go YIN toys (unmaintained, untested on live buffers).
 
 **Consequences:** A WAV fixture corpus of real recorded guitar (per technique, per pickup) is built *before* any threshold tuning. Octave-error guards for distorted signals; docs recommend a clean/DI signal for scoring. Ubisoft's Rocksmith-era detection patents are sidestepped by implementing chord verification from the published chroma-template literature (Oudre et al.), which predates them as prior art.
+
+**Amendment (D8, winds):** the monophonic core was the right long bet — a wind part flows through the untouched f0 path. What became per-instrument is the configuration: `pitch.ConfigForKeys` fits the search range to the scored track's compass (the guitar default's 1500 Hz ceiling sits three semitones over a soprano sax's top E6), and a wind session wires no strum callback at all — no chords to verify, and breath noise must not claim the palm-mute deadline credit. The onset thresholds remain tuned on pick attacks; soft same-pitch tonguing that never opens an 8 dB gap can merge two notes into one, which is a documented gap awaiting real recordings, not a claim.
 
 ## D5 — Product scope: practice player first, detection second
 
@@ -96,3 +100,26 @@ Gamification was rejected as a retention funnel, and **that judgment stands** �
 - **Highway as the primary or only view**, which would sacrifice the tab-reading transfer for nothing.
 
 **Consequences:** The "never punish a detection error" rules become a **contract with tests**, not a style preference — `TestMissNeverReducesAnything` is the flagship, and the scoring path contains no subtraction operator for it to catch. Scoring is withheld entirely behind a credibility gate rather than shown with a caveat: a number the user cannot trust is worse than no number. `internal/progress` owns persisted user data, so its durability rules are stricter than `appconfig`'s (never overwrite a newer schema; quarantine rather than replace a corrupt file). Highway lookahead reads the score model, **not** the engine event tap — the tap fires at sounding time, which is far too late to draw an approaching note, and its single subscriber slot belongs to the scorer. Recognition and the highway are both opt-out, and neither may block practice.
+
+## D8 — A second instrument family: monophonic winds (amends D3; renames the app)
+
+**Decision:** The score model carries two instrument families. A fretted track stays exactly what D3 recorded. A wind track — first instrument: B-flat soprano saxophone — is one chromatic lane: `Note.String` is always 1 and `Note.Fret` counts semitones above the instrument's lowest sounding note, with a `WindInstrument` registry (sax family, flute, clarinet, trumpet) carrying each horn's range, written transposition, and General MIDI program. With the app no longer only for guitarists, **guitarTutor became musicTutor** — module path, binary, config directory (migrated by one rename on first touch), and docs.
+
+**Why this shape:** D3's load-bearing invariant is that pitch is *derived, never stored*, and everything downstream — events, the engine's legato continuation, tie merging, the scorer's expectations — consumes the `{String, Fret}` coordinate. A wind note that stored its pitch would have forked all of it. One lane whose offset is the derivation keeps the invariant and the plumbing: slurs ride the same continuation machinery as hammer-ons (`TechSlur` *is* `TechHammer` — one bit, two instrument-appropriate names, both meaning "the pitch changes without a new attack"), ties merge on the lane like they merge on a string, and the engine did not change at all. Sounding (concert) pitch lives in the model; written pitch — what a transposing player reads — is applied only at the edges: the text format, the note glyphs, the tuner.
+
+**What the player sees:** written pitch everywhere. A soprano sax player fingering a written D5 is told D5 by the practice view, the editor's text, and the tuner, while the synth sounds and the microphone hears the concert C5 underneath. Teaching a transposing player concert names would be technically true and pedagogically wrong.
+
+**Scope honestly drawn (what did NOT land with D8):**
+
+- The notation grid cannot hold a wind part; wind pieces open in the editor's **text view**, which round-trips them completely. The refusal names the instrument and the fallback.
+- Guitar Pro wind parts are not imported (their per-note warnings are the evidence trail for the pitch properties real files use); MIDI and MusicXML wind parts are.
+- MusicXML slurs are not yet mapped to `TechSlur` — imported wind lines arrive tongued.
+- Every wind detection number is synthesis-validated only (the round trip scores 14/14 on the reed voice); real sax recordings — mic bleed, breath noise, soft tonguing — are the same validation gap D4 has always named for guitar, and the corpus has no wind category yet.
+
+**Rejected:**
+- **Pitch-storing wind notes** — forks the model's one invariant; see above.
+- **Modeling a wind as a one-string "tuning"** — kept `Track.Pitch` unbranched but left every consumer believing in strings, capos, and `TuningName`; the explicit `Track.Wind` makes each surface decide honestly instead of accidentally.
+- **Concert pitch in the UI with a "transposing" footnote** — a footnote does not survive contact with a learner reading a chart.
+- **Renaming `.gtab`** — an extension is a file format's name, not the app's, and it is on disk in every user's library, the OS dialog filter, and a dozen pinned diagnostics.
+
+**Consequences:** `score.Validate` enforces the family split (a wind track has nil tuning, no capo, one note per beat, no pull-offs or dead notes). The live session is configured per instrument at one seam (`setupListen`): detector range from the horn's compass, no strum wiring, and a miss-finalization lag that covers the longest held note at the slowest practice speed — a wind player holds a note for as long as the score says, and a false miss on a correctly held long tone is D5's rage-quit failure with no decay to hide behind. Adding the next wind instrument is one registry row; adding a *bowed* or *keyboard* family is a real design event that should get its own record.

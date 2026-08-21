@@ -1,17 +1,17 @@
 # musicTutor
 [![CI](https://github.com/S95F/musicTutor/actions/workflows/ci.yml/badge.svg)](https://github.com/S95F/musicTutor/actions/workflows/ci.yml)
 
-Plug in your electric guitar. Load a piece. Practice it properly.
+Plug in your guitar — or mic up your sax. Load a piece. Practice it properly.
 
-musicTutor is an open-source guitar practice companion written in Go. You import a piece of music (or write one in a simple text format), and the app plays it back — synthesized from the score, with a metronome and scrolling tablature — while you play along on a real guitar plugged into your audio interface. Loop the hard bars, slow them down, and let the app ramp the tempo back up as you nail each pass. It listens to your playing and tells you which notes you hit.
+musicTutor is an open-source practice companion written in Go, built first for guitarists and now growing past them. You import a piece of music (or write one in a simple text format), and the app plays it back — synthesized from the score, with a metronome and scrolling notation: tablature for a fretted track, a pitch ladder of written note names for a wind one — while you play along on your real instrument. Loop the hard bars, slow them down, and let the app ramp the tempo back up as you nail each pass. It listens to your playing and tells you which notes you hit.
 
-> **Status: Phases 1–4 core work, pre-alpha.** The practice player is functional; the app can hear you (`play -listen`: live pitch detection, hit/close/miss on the tab, a tuner, wait mode); and it now opens **Guitar Pro 7/8 `.gp`** and **MusicXML** files directly and plays **backing tracks** (WAV/FLAC/MP3) pinned to score time. Chords are now scored by verifying each expected note against the strum's spectrum. The importers are built clean-room against the documented formats and validated on a self-authored corpus, and detection thresholds are tuned on synthesized audio — real Guitar-Pro/MuseScore exports and real guitar recordings are the remaining validation gaps, so files and bug reports are gold. The app shell (Phase 5) has since landed: run the binary bare and you get a start screen with recent pieces, opening through the system's own file dialog, drag-and-drop, and in-app settings for devices, latency calibration, SoundFont and count-in — the command line remains the fastest path for anyone who prefers it. See the [roadmap](ROADMAP.md) and [decisions](docs/DECISIONS.md).
+> **Status: Phases 1–4 core work plus the multi-instrument turn, pre-alpha.** The practice player is functional; the app can hear you (`play -listen`: live pitch detection, hit/close/miss on the notation, a tuner, wait mode); and it opens **Guitar Pro 7/8 `.gp`** and **MusicXML** files directly and plays **backing tracks** (WAV/FLAC/MP3) pinned to score time. Chords are scored by verifying each expected note against the strum's spectrum. The app also speaks its first non-guitar family now — **monophonic winds, soprano sax first** (the whole sax family, flute, clarinet and trumpet ride the same registry): wind parts import from MIDI/MusicXML at correct concert pitch, display and author in **written pitch** (a B♭ soprano sax reads a major second above what it sounds), play on a built-in sustained reed voice, and score through the same detector. The importers are built clean-room against the documented formats and validated on a self-authored corpus, and detection thresholds are tuned on synthesized audio — real Guitar-Pro/MuseScore exports and real recordings of either instrument are the remaining validation gaps, so files and bug reports are gold. The app shell (Phase 5) has since landed: run the binary bare and you get a start screen with recent pieces, opening through the system's own file dialog, drag-and-drop, and in-app settings for devices, latency calibration, SoundFont and count-in — the command line remains the fastest path for anyone who prefers it. See the [roadmap](ROADMAP.md) and [decisions](docs/DECISIONS.md) (D8 is the multi-instrument design).
 
 ## Why
 
 The tools guitarists actually practice with are either editors that can't hear you (Guitar Pro, TuxGuitar), subscription apps with unreliable note detection (Yousician, the now-abandoned Rocksmith+), or web players that break mid-loop (Songsterr). Rocksmith 2014 was delisted in 2023 and Ubisoft closed its studio in January 2026 — there is a real vacuum for an **offline-first, no-subscription, import-your-own-music** practice tool.
 
-musicTutor aims to fill it with the practice loop every guitarist converges on:
+musicTutor aims to fill it with the practice loop every musician converges on — the horn player woodshedding a line needs exactly what the guitarist does:
 
 1. Pick a section of the piece.
 2. Loop it — gaplessly, or with a count-in before each pass.
@@ -55,6 +55,13 @@ musicTutor aims to fill it with the practice loop every guitarist converges on:
 - In-app settings: audio device pickers, latency calibration in-window, SoundFont, count-in
 - Fixed-BPM entry, track solo, a help overlay, and live warnings surfaced in the UI
 
+**The multi-instrument turn — monophonic winds (core landed)**
+
+- A wind instrument registry — soprano/alto/tenor/baritone sax, flute, clarinet, trumpet — carrying each horn's range, written transposition, and General MIDI program
+- Wind parts in `.gtab` (written-pitch notes, `\instrument`, slurs), from MIDI/MusicXML imports, on a built-in sustained reed voice, drawn as a pitch ladder of the names the player actually reads
+- Detection fitted per instrument; a held long tone can never be force-missed by a decay assumption
+- Still open: real-recording validation (everything is synthesis so far), wind parts in the notation editor (the text view carries them today), Guitar Pro wind parts
+
 **Later (Phase 6 and beyond)**
 
 - macOS and Linux ports
@@ -68,8 +75,8 @@ See the full [ROADMAP](ROADMAP.md) for phasing, acceptance criteria, and explici
 ```mermaid
 flowchart LR
     subgraph Input
-        GP[".gp / MIDI / text tab"]
-        Ed["Tab editor<br/>(write it yourself)"]
+        GP[".gp / MIDI / text format"]
+        Ed["Editor<br/>(write it yourself)"]
         Lib["Your library<br/>(the app's own folder)"]
     end
     Lib --> Score
@@ -77,12 +84,12 @@ flowchart LR
     Ed --> Score
     Score -.saves as .gtab.-> Ed
     Score --> Seq["Frame-counted sequencer"]
-    Seq --> Synth["Synth<br/>(built-in pluck / SoundFont)"]
-    Seq --> Tab["Scrolling tab view"]
+    Seq --> Synth["Synth<br/>(built-in pluck & reed / SoundFont)"]
+    Seq --> Tab["Notation view<br/>(tab / pitch ladder)"]
     Seq --> Click["Metronome"]
     Synth --> Out["Audio out"]
     Click --> Out
-    Guitar["Guitar via audio interface"] --> Detect["Pitch detection<br/>(MPM / YIN-FFT)"]
+    Inst["Your instrument<br/>(guitar DI or mic)"] --> Detect["Pitch detection<br/>(MPM / YIN-FFT)"]
     Detect --> Scorer["Scorer"]
     Seq --> Scorer
     Scorer --> Tab
@@ -93,15 +100,24 @@ A few load-bearing design rules, distilled from research into why comparable app
 - **The score is tick-based** (PPQ 960 + tempo map, SMF semantics). Wall-clock time is always derived, never stored — this is what makes looping, tempo scaling, and scoring drift-free.
 - **One clock.** With live input, capture and playback run in a single full-duplex audio callback so scoring timestamps and playback share a frame counter. That only truly holds when both run on the same physical interface — so the app steers you to plug headphones into the interface your guitar is plugged into, and treats split-device setups (which drift) as a case to detect, not ignore.
 - **Synthesis is the primary playback path.** Tempo change is exact and free when the piece is rendered from the score; audio backing tracks are a secondary import.
-- **Scoring is forgiving and optional.** Detection latency has a physics floor (~25–50 ms at low E's 82.4 Hz); feedback is scored against timing windows, never marketed as instant. Nothing blocks your practice if detection misfires.
+- **Scoring is forgiving and optional.** Detection latency has a physics floor set by the instrument's lowest note (~25–50 ms at a guitar low E's 82.4 Hz; a soprano sax, sounding two octaves higher, is comfortably faster); feedback is scored against timing windows, never marketed as instant. Nothing blocks your practice if detection misfires.
 - **Pure Go until it can't be.** Phase 1 builds with no C toolchain at all. cgo arrives with audio capture in Phase 2 — release builds require it from then on, but a pure-Go playback-only backend stays maintained for contributor and CI builds. ONNX (for ML pitch) remains optional behind a build tag.
 
 ## What you'll need
 
+**Guitar:**
+
 - An electric guitar and a USB audio interface (Focusrite Scarlett-class is plenty). Any interface with a clean DI signal works — no proprietary cable required. (A Rocksmith Real Tone cable enumerates as an ordinary USB capture device and should work for input — mono, no direct monitoring — though it's untested.)
 - Use your interface's **direct monitoring** to hear yourself; the app deliberately does not software-monitor your guitar (the round-trip latency would be unpleasant).
 - **Want your distorted tone while you practice?** Hardware modelers or pedals in front of the interface work transparently. Software amp sims can run alongside if your interface's driver is multi-client (common on Focusrite-class gear: your sim takes the ASIO path while the app captures via WASAPI shared mode). Either way, scoring works best on the clean DI signal — heavy distortion degrades pitch detection.
-- Windows first; macOS and Linux are planned once the practice loop is solid.
+
+**Soprano sax (or any wind the app knows):**
+
+- A microphone into the same interface, and — this is not optional the way it is for a DI'd guitar — **headphones**. A mic hears the app's own playback and metronome from your speakers, and nothing in the analysis path can untangle your horn from that bleed yet; with headphones the mic hears only you. Direct monitoring is unnecessary: you can hear a saxophone.
+- The app shows **written pitch** everywhere — the note names on the scrolling view, the tuner, the text format are all what you read on a chart for your B♭ (or E♭) instrument, while playback and scoring use the sounding pitch underneath.
+- Honesty note: wind scoring is validated on synthesized audio so far. It should work — a sax is a strong, clean, monophonic signal, which is the easy case for this detector — but nobody has proven it against a real horn in a real room yet. Be the first; file what you find.
+
+**Either way:** Windows first; macOS and Linux are planned once the practice loop is solid.
 
 ## Building & running
 
@@ -133,7 +149,7 @@ Or go straight to a piece:
 
 ### Writing your own
 
-Not everything you practise exists as a file. The start screen's **Write a new piece** button (or **N**) opens a tablature editor. The rhythm of writing a piece in it is three keys:
+Not everything you practise exists as a file. The start screen's **Write a new piece** button (or **N**) opens the editor on a tablature grid. The rhythm of writing a piece in it is three keys:
 
 - **0–30** types a fret onto the highlighted string (two digits within a moment make one number),
 - **↑ ↓** choose the string, **[** and **]** the note value,
@@ -146,6 +162,8 @@ The staff is labelled with your tuning down the left, note lengths are drawn as 
 Pieces are saved as `.gtab` — the small, git-diffable [text format](docs/TEXTFORMAT.md) — into the app's own pieces folder by default, where they show up in your library. **shift+P** saves and opens the piece for practice; **esc** comes back to the editing, so writing a bar, hearing it, and fixing it is a loop rather than a round trip.
 
 **F2** swaps the notation for the raw `.gtab` text, parsed as you type, with a legend beside it explaining every piece of the format — so the escape hatch does not require having read the format documentation first. That is where the parts of the format the toolbar has no button for live: a General MIDI program, a backing-track flag, an unusual tuning, a comment to yourself.
+
+**Wind parts are written here too, as text.** `\instrument soprano sax` at the top of a track, then the notes as the pitch names you read — `D5.8 E5.8 G5.4l` — with `l` for a slur where a guitarist would hammer on ([the format page](docs/TEXTFORMAT.md) has the whole grammar). The notation grid is a strings-by-frets surface and cannot hold a wind part yet, so wind pieces open straight into this text view, which round-trips them completely.
 
 Bars stay exactly full, across every track at once — the editor refuses an edit that would overflow a bar rather than spilling it into the next one, and says what would not fit.
 
@@ -173,13 +191,13 @@ The mouse works everywhere too: a transport bar and toggles across the top, a ti
 
 The playhead is drawn where the music is **sounding**, not where it is being rendered. Those are not the same place: rendered audio waits its turn in the output buffer, so a playhead taken straight from the sequencer runs ahead of what you can hear — by a sixteenth note at 150 BPM, which is exactly the error that makes you think you are dragging when you are not. The app subtracts the buffering it can measure; **Settings → audio / visual sync** trims the last few milliseconds inside the driver, which no software can measure.
 
-### Live mode — the guitar plugs in
+### Live mode — the app listens
 
 ```bash
 musictutor devices
 ```
 
-lists your audio endpoints. Pick the interface your guitar is plugged into (a unique name fragment is enough), calibrate the round trip once, then practice with the app listening:
+lists your audio endpoints. Pick the interface your guitar — or your mic — is plugged into (a unique name fragment is enough), calibrate the round trip once, then practice with the app listening:
 
 ```bash
 musictutor calibrate -in scarlett -out scarlett
@@ -193,6 +211,8 @@ Notes you play are matched against the score: green = hit, amber = close (loose 
 
 **Chords are scored too — with a caveat worth reading.** The pitch tracker is monophonic, so rather than guess at a chord the app verifies the notes it already expects: each strum's pitch-class spectrum is checked against the expected chord, every string independently. Weak evidence is never a miss — a string the app can't clearly hear scores *close*, and a chord whose spectrum doesn't match convicts nobody. On synthesized chords across eight voicings and four strum speeds, correct playing produces a false miss on about 1% of strings, and no wrong chord scores a clean sweep of hits. But all of that is measured on **synthesized** guitar: chord scoring against a real instrument is unvalidated, and [ROADMAP.md](ROADMAP.md) lists the specific shapes that remain marginal. Heavy distortion degrades detection; feed the clean DI signal.
 
+**A wind session listens differently, on purpose.** There are no chords to verify and no palm mutes to credit, so none of that machinery runs; the detector's search range is fitted to your horn instead of a guitar neck, and the miss deadline stretches to cover the longest note in the piece at the slowest practice speed — a correctly held long tone must never be called a miss just because you were still holding it. Wear headphones (see *What you'll need*): a mic that can hear the app's own playback is feeding your score somebody else's notes.
+
 Live mode needs a cgo build (the default when a C compiler is present — on Windows install [mingw-w64](https://www.mingw-w64.org/) or build with [MSYS2](https://www.msys2.org/); if cgo builds misbehave in PowerShell, run the build from Git Bash). On Windows a `CGO_ENABLED=0` build still works fully as a playback-only practice player; on Linux and macOS Ebitengine itself needs cgo, so a C toolchain is required either way there.
 
 There is also an offline renderer — useful for checking a piece without opening the UI:
@@ -201,7 +221,7 @@ There is also an offline renderer — useful for checking a piece without openin
 ./musictutor render -o out.wav testdata/fixture_riff.gtab
 ```
 
-To write your own pieces, see the [text tab format](docs/TEXTFORMAT.md).
+To write your own pieces, see the [text format](docs/TEXTFORMAT.md).
 
 ## Non-goals
 
@@ -210,12 +230,12 @@ To write your own pieces, see the [text tab format](docs/TEXTFORMAT.md).
 - **No amp modeling** — use your amp sim of choice alongside; the app only needs your dry signal.
 - **No dynamic difficulty** — slow-then-ramp at full difficulty is the practice loop that works.
 - **No XP grind, no loss-framing streaks, no leaderboards.** A practice log and additive recognition are planned ([docs/PROGRESS.md](docs/PROGRESS.md)), built so that misses cannot subtract and the streak never reads a note verdict — a detection error must never cost you anything. This is a practice tool, not a retention funnel.
-- **The 2D tab stays the primary view.** A perspective [note highway](docs/HIGHWAY.md) is planned as an opt-in second view, because reading tab transfers to reading real tab and that's worth keeping.
+- **The 2D notation stays the primary view.** A perspective [note highway](docs/HIGHWAY.md) is planned as an opt-in second view for fretted tracks, because reading tab transfers to reading real tab and that's worth keeping.
 - **No subscriptions, ever.**
 
 ## Contributing
 
-The project is at the "argue about the roadmap" stage — issues and discussion are very welcome, especially from guitarists who practice with existing tools and from anyone who has fought Go audio or DSP before. Start with [ROADMAP.md](ROADMAP.md) and [docs/DECISIONS.md](docs/DECISIONS.md). The two Phase 6 features have their designs written up ahead of the code, and both reverse an earlier non-goal — [docs/HIGHWAY.md](docs/HIGHWAY.md) and [docs/PROGRESS.md](docs/PROGRESS.md) are where to argue with them.
+The project is at the "argue about the roadmap" stage — issues and discussion are very welcome, especially from guitarists and horn players who practice with existing tools, and from anyone who has fought Go audio or DSP before. Real recordings are the standing gap on both families: a mic'd sax take of a known line is as valuable a bug report as any stack trace. Start with [ROADMAP.md](ROADMAP.md) and [docs/DECISIONS.md](docs/DECISIONS.md). The two Phase 6 features have their designs written up ahead of the code, and both reverse an earlier non-goal — [docs/HIGHWAY.md](docs/HIGHWAY.md) and [docs/PROGRESS.md](docs/PROGRESS.md) are where to argue with them.
 
 ## License
 
