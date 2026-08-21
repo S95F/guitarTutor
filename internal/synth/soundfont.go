@@ -198,7 +198,12 @@ func (v *soundFontVoice) NoteOnSpec(spec NoteSpec) {
 		return
 	}
 	if s := v.continuation(spec); s != nil {
-		semis := float64(spec.Key - spec.From)
+		// The bend rides on the key the channel was STRUCK at, which on a
+		// chained slur or legato run (every note continued from the one
+		// before) is not the note it comes From: measuring the offset from
+		// spec.From instead left the second link of every chain sounding
+		// spec.From's offset short of its written pitch.
+		semis := float64(int32(spec.Key) - s.key)
 		if spec.Attack == AttackSlide {
 			s.dst = semis
 			s.step = (semis - s.bend) / (sfSlideSeconds * float64(v.sampleRate))
@@ -242,11 +247,15 @@ func (v *soundFontVoice) continuation(spec NoteSpec) *sfSlot {
 	if spec.Attack == AttackPluck {
 		return nil
 	}
-	if d := spec.Key - spec.From; d > sfBendRange || d < -sfBendRange {
-		return nil
-	}
 	for i := range v.slots {
 		if s := &v.slots[i]; s.held && s.logical == int32(spec.From) {
+			// The reach that matters is from the key the channel was
+			// STRUCK at — the pitch the bend is measured from — not from
+			// the note continued From: a chain of in-reach links can
+			// still drift a slot beyond what its bend can express.
+			if d := int32(spec.Key) - s.key; d > sfBendRange || d < -sfBendRange {
+				return nil
+			}
 			return s
 		}
 	}

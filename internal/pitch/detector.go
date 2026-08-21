@@ -360,6 +360,15 @@ func NewDetector(cfg Config) *Detector {
 		if d.fluxLo < 2 {
 			d.fluxLo = 2
 		}
+		// ... and no higher than the transform can serve: the Hann kernel
+		// reads two bins past the band, and coeff's last bin is w. Without
+		// this clamp a MinHz near Nyquist pushed fluxLo past w-2, the
+		// fluxHi < fluxLo fixup below dragged fluxHi back OUT of the range
+		// it had just been clamped into, and hannMags indexed coeff out of
+		// range on the first ungated hop.
+		if d.fluxLo > w-2 {
+			d.fluxLo = w - 2
+		}
 		fhi := float64(onsetFluxMaxHz)
 		if cfg.MaxHz > fhi {
 			fhi = cfg.MaxHz

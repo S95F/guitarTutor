@@ -190,6 +190,28 @@ func TestDetectorTinyWindowDoesNotPanic(t *testing.T) {
 	}
 }
 
+// TestDetectorNearNyquistRangeDoesNotPanic: a tiny window with a search
+// range pushed up near Nyquist put the flux band's low edge past the last
+// bin the Hann kernel can read, and the fluxHi >= fluxLo fixup then
+// dragged the high edge back out of the clamped range with it — the first
+// loud hop indexed coeff out of range inside hannMags. The band must stay
+// inside [2, Window-2] whatever the config asks for.
+func TestDetectorNearNyquistRangeDoesNotPanic(t *testing.T) {
+	cfg := DefaultConfig(testSR)
+	cfg.Window = 4
+	cfg.Hop = 4
+	cfg.MinHz = 23000
+	cfg.MaxHz = 24000
+	d := NewDetector(cfg)
+	if w := d.cfg.Window; d.fluxLo < 2 || d.fluxHi < d.fluxLo || d.fluxHi > w-2 {
+		t.Errorf("flux band [%d, %d] not inside 2..Window-2 (Window %d)", d.fluxLo, d.fluxHi, w)
+	}
+	// Loud enough that hops are never gated, so hannMags actually runs.
+	if frames := feedAll(d, sine(1000, 0.4, 0.5), 4); len(frames) == 0 {
+		t.Fatal("no frames emitted")
+	}
+}
+
 // TestDetectorAboveRangeToneUnvoiced is the regression test for the
 // subharmonic alias: a 2 kHz tone with the default MaxHz of 1500 has its
 // true NSDF peak below tauMin, so the first in-range peak is the f/2
