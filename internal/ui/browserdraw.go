@@ -255,7 +255,7 @@ func (b *Browser) headerStatus() string {
 		total += len(b.panes[p])
 	}
 	if total == 0 {
-		return "a practice companion for guitarists"
+		return "a practice companion for guitarists and horn players"
 	}
 	return fmt.Sprintf("%d pieces to hand", total)
 }

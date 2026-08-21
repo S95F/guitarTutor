@@ -890,7 +890,7 @@ var practiceBindings = []practiceBinding{
 	{Group: "transport", Keys: "space", Hint: "space play/pause", Desc: "Start or pause playback"},
 	{Group: "transport", Keys: "left / right", Hint: "arrows seek", Desc: "Jump to the previous / next bar; inside a loop, right wraps to the loop start"},
 	{Group: "transport", Keys: "home / end", Desc: "Jump to the first / last bar"},
-	{Group: "transport", Keys: "click / drag", Desc: "On the tab or the timeline: move the playhead"},
+	{Group: "transport", Keys: "click / drag", Desc: "On the notation or the timeline: move the playhead"},
 
 	{Group: "tempo", Keys: "up / down", Hint: "up/dn tempo", Desc: "Practice speed up / down by 5%"},
 	{Group: "tempo", Keys: "shift+B", Hint: "shift+B bpm", Desc: "Type an exact target BPM"},
@@ -902,7 +902,7 @@ var practiceBindings = []practiceBinding{
 	// idea anyway.
 	{Group: "loop", Keys: "A / B", Hint: "A/B loop", Desc: "Set the loop start / end at the current bar"},
 	{Group: "loop", Keys: "L", Desc: "Clear the loop"},
-	{Group: "loop", Keys: "shift+drag", Desc: "Drag out a new loop on the tab or the timeline, snapped to beats"},
+	{Group: "loop", Keys: "shift+drag", Desc: "Drag out a new loop on the notation or the timeline, snapped to beats"},
 	{Group: "loop", Keys: "drag an edge", Desc: "Move a loop end: snaps to the beat, shift for tick-exact"},
 
 	{Group: "tracks", Keys: "1..9", Hint: "1-9 mute", Desc: "Mute / unmute a track (or click its chip)"},
@@ -918,7 +918,7 @@ var practiceBindings = []practiceBinding{
 		Enabled: func(a *App) bool { return a.waitCtl },
 		Caveat:  liveInputCaveat(func(a *App) bool { return a.waitCtl })},
 
-	{Group: "view", Keys: "+ / -", Desc: "Zoom the tab in / out (or the wheel over it)"},
+	{Group: "view", Keys: "+ / -", Desc: "Zoom the notation in / out (or the wheel over it)"},
 
 	{Group: "session", Keys: "S", Hint: "S settings", Desc: "Settings, without leaving the piece",
 		Enabled: func(a *App) bool { return a.settings != nil },
@@ -1003,7 +1003,17 @@ func (a *App) drawTab(screen *ebiten.Image) {
 	ppt := a.pxPerTick()
 	phX := float32(screenW * playheadX)
 	tr := a.displayed()
-	nStr := len(tr.Tuning)
+	wind := tr.Wind != nil
+	nLines := a.laneLines()
+	bandTop, bandBottom := float64(tabTop), a.tabBottom()
+
+	// The wind track's vertical axis: written pitch instead of string
+	// number. Everything else about the band — its height, its chrome,
+	// its verdicts — is shared with the tab.
+	var ladder windLadder
+	if wind {
+		ladder = windLadderFor(tr)
+	}
 
 	tickToX := func(t int64) float32 {
 		return phX + float32((float64(t)-pos)*ppt)
@@ -1012,18 +1022,23 @@ func (a *App) drawTab(screen *ebiten.Image) {
 	minTick := posTick - int64(float64(phX)/ppt) - score.PPQ
 	maxTick := posTick + int64(float64(screenW-float64(phX))/ppt) + score.PPQ
 
-	// String lines.
-	for si := 0; si < nStr; si++ {
-		y := float32(tabTop + si*stringGap)
-		vector.StrokeLine(screen, 0, y, screenW, y, 1, colString, false)
+	// String lines — or, for a wind track, the pitch ladder's octave
+	// reference lines.
+	if wind {
+		a.drawWindGrid(screen, ladder, bandTop, bandBottom)
+	} else {
+		for si := 0; si < nLines; si++ {
+			y := float32(tabTop + si*stringGap)
+			vector.StrokeLine(screen, 0, y, screenW, y, 1, colString, false)
+		}
 	}
 
 	// Loop region.
 	if la, lb, on := a.eng.Loop(); on {
 		x0, x1 := tickToX(la), tickToX(lb)
-		vector.DrawFilledRect(screen, x0, tabTop-20, x1-x0, float32(nStr-1)*stringGap+40, colLoop, false)
-		vector.StrokeLine(screen, x0, tabTop-20, x0, float32(tabTop+(nStr-1)*stringGap+20), 2, colLoopEdge, false)
-		vector.StrokeLine(screen, x1, tabTop-20, x1, float32(tabTop+(nStr-1)*stringGap+20), 2, colLoopEdge, false)
+		vector.DrawFilledRect(screen, x0, tabTop-20, x1-x0, float32(bandBottom-bandTop)+40, colLoop, false)
+		vector.StrokeLine(screen, x0, tabTop-20, x0, float32(bandBottom+20), 2, colLoopEdge, false)
+		vector.StrokeLine(screen, x1, tabTop-20, x1, float32(bandBottom+20), 2, colLoopEdge, false)
 	}
 
 	// Bars, beats, notes.
@@ -1034,25 +1049,32 @@ func (a *App) drawTab(screen *ebiten.Image) {
 			continue
 		}
 		x := tickToX(bar.Start)
-		vector.StrokeLine(screen, x, tabTop-14, x, float32(tabTop+(nStr-1)*stringGap+14), 1, colBarline, false)
+		vector.StrokeLine(screen, x, tabTop-14, x, float32(bandBottom+14), 1, colBarline, false)
 		drawTextSmall(screen, fmt.Sprintf("%d", bi+1), float64(x)+4, tabTop-32, colHint)
 
 		for _, beat := range bar.Beats {
 			for _, n := range beat.Notes {
 				nx := tickToX(beat.Start)
-				ny := float32(tabTop + (n.String-1)*stringGap)
-				label := fmt.Sprintf("%d", n.Fret)
-				if n.Tied {
-					label = "~" + label
-				}
-				if n.Tech&score.TechDead != 0 {
-					label = "x"
+				var ny float32
+				var label string
+				if wind {
+					ny = float32(ladder.y(tr.Wind.Written(tr.Pitch(n)), bandTop, bandBottom))
+					label = windNoteLabel(tr, n)
+				} else {
+					ny = float32(tabTop + (n.String-1)*stringGap)
+					label = fmt.Sprintf("%d", n.Fret)
+					if n.Tied {
+						label = "~" + label
+					}
+					if n.Tech&score.TechDead != 0 {
+						label = "x"
+					}
 				}
 				col, sounding := a.noteCue(beat.Start, beat.Dur, n.String, n.Inferred, pos, posTick, waiting)
-				// Blank out the string line behind the number. Fret
-				// numbers are mono so a 12 reads as wide as two 1s and
-				// chord columns stay aligned; the box is the measured
-				// advance, not a per-character guess.
+				// Blank out the line behind the glyph. Glyphs are mono so
+				// a 12 reads as wide as two 1s and chord columns stay
+				// aligned; the box is the measured advance, not a
+				// per-character guess.
 				w := float32(textWMono(label))
 				vector.DrawFilledRect(screen, nx-2, ny-9, w+4, 18, colNoteBG, false)
 				drawTextMono(screen, label, float64(nx), float64(ny)-9, col)
@@ -1066,11 +1088,11 @@ func (a *App) drawTab(screen *ebiten.Image) {
 	if n := len(tr.Bars); n > 0 {
 		endTick := tr.Bars[n-1].Start + tr.Bars[n-1].Len()
 		x := tickToX(endTick)
-		vector.StrokeLine(screen, x, tabTop-14, x, float32(tabTop+(nStr-1)*stringGap+14), 2, colBarline, false)
+		vector.StrokeLine(screen, x, tabTop-14, x, float32(bandBottom+14), 2, colBarline, false)
 	}
 
 	// Playhead.
-	vector.StrokeLine(screen, phX, tabTop-24, phX, float32(tabTop+(nStr-1)*stringGap+24), 2, colPlayhead, false)
+	vector.StrokeLine(screen, phX, tabTop-24, phX, float32(bandBottom+24), 2, colPlayhead, false)
 
 }
 

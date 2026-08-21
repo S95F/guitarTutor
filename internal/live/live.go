@@ -1,6 +1,6 @@
 // Package live glues a duplex audio stream to the practice engine and the
 // pitch pipeline: one audio callback pulls playback frames from the engine
-// and pushes the captured guitar signal into a lock-free ring that an
+// and pushes the captured instrument signal into a lock-free ring that an
 // analysis goroutine drains through the detector and tracker.
 //
 // Clock domains (docs/DECISIONS.md D1): input and output share the duplex

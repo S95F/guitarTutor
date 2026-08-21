@@ -1453,15 +1453,16 @@ const (
 )
 
 // calSetupHint is what sits under the calibration row when nothing is
-// running. Its job is to prevent the natural setup — guitar into the
+// running. Its job is to prevent the natural guitar setup — DI into the
 // input, monitors on the output, press the button — which fails after
 // several opaque seconds, because the click train comes out of the
-// speakers and a pickup only hears strings. Saying what must physically
-// happen, in a guitarist's words, is cheaper than explaining the failure
-// afterwards.
+// speakers and a pickup only hears strings. A mic'd player (a sax, a
+// voice) is already set up right, and the hint's mic clause is their
+// setup described. Saying what must physically happen is cheaper than
+// explaining the failure afterwards.
 const calSetupHint = "plays a few seconds of clicks that must travel out and back in:" +
 	" point a mic at your speakers, or cable an output back into an input;" +
-	" the guitar's own pickup won't hear them"
+	" a guitar's pickup won't hear them, a mic'd horn already does"
 
 type settingsItemKind int
 

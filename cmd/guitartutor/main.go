@@ -434,7 +434,7 @@ func runPlay(args []string) error {
 		if cfgErr != nil {
 			fmt.Fprintln(os.Stderr, "warning: existing config unreadable, ignoring it:", cfgErr)
 		}
-		session, cond, err := setupListen(eng, app, *inQ, *outQ, cfg)
+		session, cond, err := setupListen(eng, app, sc, *inQ, *outQ, cfg)
 		if err != nil {
 			return err
 		}

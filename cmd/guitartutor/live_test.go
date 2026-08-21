@@ -414,7 +414,7 @@ func TestSetupListenReportsConditions(t *testing.T) {
 		t.Helper()
 		eng := newEngine(sc, engine.Options{})
 		app := ui.New(eng, sc, 0)
-		session, cond, err := setupListen(eng, app, "", "", cfg)
+		session, cond, err := setupListen(eng, app, sc, "", "", cfg)
 		if err != nil {
 			t.Fatalf("setupListen: %v", err)
 		}
@@ -620,7 +620,7 @@ func TestSetupListenRollsBackTapOnFailure(t *testing.T) {
 	eng := newEngine(sc, engine.Options{})
 	app := ui.New(eng, sc, 0)
 
-	session, _, err := setupListen(eng, app, "", "", appconfig.Config{})
+	session, _, err := setupListen(eng, app, sc, "", "", appconfig.Config{})
 	if err == nil {
 		session.Stop()
 		t.Fatal("setupListen with a refusing backend returned nil error")
@@ -653,7 +653,7 @@ func TestSetupListenKeepsTapOnSuccess(t *testing.T) {
 	eng := newEngine(sc, engine.Options{})
 	app := ui.New(eng, sc, 0)
 
-	session, _, err := setupListen(eng, app, "", "", appconfig.Config{})
+	session, _, err := setupListen(eng, app, sc, "", "", appconfig.Config{})
 	if err != nil {
 		t.Fatalf("setupListen: %v", err)
 	}

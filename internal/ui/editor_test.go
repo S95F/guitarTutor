@@ -1414,11 +1414,11 @@ func TestEditorCapoEntryKeepsBadInput(t *testing.T) {
 // --- the text view's legend and help ----------------------------------------
 
 func TestGtabLegendCoversEveryDirective(t *testing.T) {
-	// \backing and \program are settable ONLY in the text view; a legend
-	// that omits them hides the one control the application offers for
-	// either.
+	// \instrument, \backing and \program are settable ONLY in the text
+	// view; a legend that omits them hides the one control the
+	// application offers for each.
 	for _, directive := range []string{
-		`\title`, `\tempo`, `\time`, `\tuning`, `\capo`, `\track`, `\backing`, `\program`,
+		`\title`, `\tempo`, `\time`, `\tuning`, `\capo`, `\track`, `\instrument`, `\backing`, `\program`,
 	} {
 		found := false
 		for _, row := range gtLegend {

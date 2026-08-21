@@ -117,6 +117,15 @@ func Open(sc *score.Score) (*Doc, error) {
 	if sc == nil {
 		return nil, fmt.Errorf("edit: no piece to open")
 	}
+	// The grid is a strings-by-frets surface and a wind part has neither;
+	// refusing here, by name, is what routes a wind piece to the text
+	// view (the caller's fallback) with a message that says so instead of
+	// a complaint about a zero-string tuning.
+	for _, tr := range sc.Tracks {
+		if tr.Wind != nil {
+			return nil, fmt.Errorf("edit: the notation editor cannot edit a %s part yet — the text view (F2) is where wind parts are written", tr.Wind.Name)
+		}
+	}
 	if err := sc.Validate(); err != nil {
 		return nil, fmt.Errorf("edit: the piece is not valid: %w", err)
 	}

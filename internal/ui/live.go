@@ -526,7 +526,10 @@ func (a *App) drawTuner(screen *ebiten.Image) {
 	if inTune {
 		col = colHit
 	}
-	name := fmt.Sprintf("%s %+.0fc", keyName(n.Key), n.Cents)
+	// displayName, not keyName: a transposing wind player reads written
+	// pitch, and a tuner that names the concert pitch instead would call
+	// every correctly fingered note by the wrong name.
+	name := fmt.Sprintf("%s %+.0fc", a.displayName(n.Key), n.Cents)
 	scale := 6.0
 	drawTextScaled(screen, name, centreXScaled(name, 0, screenW, scale), 250, scale, col)
 

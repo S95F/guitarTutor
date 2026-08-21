@@ -87,7 +87,7 @@ func WriteFile(path string, sc *score.Score) error {
 type writer struct {
 	sc  *score.Score
 	b   strings.Builder
-	ctx string // the bar being written, for error messages
+	ctx string       // the bar being written, for error messages
 	tr  *score.Track // the track being written, for its instrument
 
 	sticky int64

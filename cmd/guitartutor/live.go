@@ -58,7 +58,7 @@ func runDevices(args []string) error {
 	if err != nil {
 		return fmt.Errorf("enumerating devices: %w", err)
 	}
-	fmt.Printf("backend: %s\n\ncapture (guitar in):\n", b.Name())
+	fmt.Printf("backend: %s\n\ncapture (instrument in — a guitar's interface, a sax's mic):\n", b.Name())
 	for _, d := range capture {
 		mark := " "
 		if d.Default {
@@ -242,8 +242,11 @@ const (
 // tracker only reports a note when it CLOSES, so a sustained note's
 // detection arrives roughly its own duration late and must not be
 // pre-judged as a miss (see practice.Scorer.Advance). Four seconds covers
-// any note a practice piece holds; the cost is that a miss shows up on
-// the tab ~4 s after the fact.
+// any note a plucked string holds — the string decays and the tracker
+// closes the note whatever the player does; the cost is that a miss shows
+// up on the tab ~4 s after the fact. A wind player holds a note for as
+// long as the score says, so the wind lag is computed per piece instead
+// (advanceLagFor).
 const advanceLagFrames = 4 * sampleRate
 
 // maxRecentStrums bounds the buffer of attacks held for a gate that has
@@ -297,6 +300,10 @@ type liveWiring struct {
 	scorer *practice.Scorer
 	gate   *practice.WaitGate
 	pcfg   practice.Config
+	// advanceLag is how far miss finalization trails the capture clock:
+	// advanceLagFrames for fretted tracks, advanceLagFor's per-piece
+	// figure for winds.
+	advanceLag int64
 
 	armedGen    uint64
 	armedMin    int64
@@ -321,6 +328,7 @@ func newLiveWiring(eng *engine.Engine, app listenUI, scorer *practice.Scorer, ga
 		scorer:      scorer,
 		gate:        gate,
 		pcfg:        pcfg,
+		advanceLag:  advanceLagFrames,
 		offerBuf:    make([]pitch.Note, 0, 16),
 		confirmBuf:  make([]pitch.Note, 0, 16),
 		strumBuf:    make([]pitch.Strum, 0, 8),
@@ -379,7 +387,7 @@ func (w *liveWiring) onNotes(closed []pitch.Note, current pitch.Note, sounding b
 		w.scorer.AbandonBefore(d)
 	}
 	w.scorer.Detected(closed)
-	w.scorer.Advance(consumed - advanceLagFrames)
+	w.scorer.Advance(consumed - w.advanceLag)
 	w.results = w.scorer.Results(w.results[:0])
 	if len(w.results) > 0 {
 		w.app.OfferResults(w.results)
@@ -512,7 +520,7 @@ type liveConditions struct {
 // particular the event tap is rolled back, so a caller that falls back to
 // plain playback is not left with an engine feeding expectations into a
 // scorer nobody drains (see the rollback below).
-func setupListen(eng *engine.Engine, app *ui.App, inQ, outQ string, cfg appconfig.Config) (session *live.Session, cond liveConditions, err error) {
+func setupListen(eng *engine.Engine, app *ui.App, sc *score.Score, inQ, outQ string, cfg appconfig.Config) (session *live.Session, cond liveConditions, err error) {
 	b, err := liveBackend()
 	if err != nil {
 		return nil, cond, err
@@ -534,7 +542,10 @@ func setupListen(eng *engine.Engine, app *ui.App, inQ, outQ string, cfg appconfi
 
 	// The scored track comes from the view rather than a parameter of its
 	// own: it must be the track being drawn and waited on, and a second
-	// way to say so is a second way to say something different (W3).
+	// way to say so is a second way to say something different (W3). The
+	// score is only here so the wiring can read that one track's
+	// instrument.
+	tr := sc.Tracks[app.Track()]
 	pcfg := practice.Config{
 		SampleRate:          sampleRate,
 		Track:               app.Track(),
@@ -543,6 +554,7 @@ func setupListen(eng *engine.Engine, app *ui.App, inQ, outQ string, cfg appconfi
 	scorer := practice.NewScorer(pcfg)
 	gate := practice.NewWaitGate(pcfg)
 	wiring := newLiveWiring(eng, app, scorer, gate, pcfg)
+	wiring.advanceLag = advanceLagFor(sc, app.Track())
 	// From here on the engine feeds this scorer. If the wiring below
 	// fails, the session that would have drained the scorer never exists,
 	// and an engine left tapped keeps appending expectations to a list
@@ -557,7 +569,7 @@ func setupListen(eng *engine.Engine, app *ui.App, inQ, outQ string, cfg appconfi
 		}
 	}()
 
-	session, err = live.Start(live.Config{
+	lcfg := live.Config{
 		Backend: b,
 		Engine:  eng,
 		Stream: audio.StreamConfig{
@@ -565,14 +577,23 @@ func setupListen(eng *engine.Engine, app *ui.App, inQ, outQ string, cfg appconfi
 			CaptureDevice:  inID,
 			PlaybackDevice: outID,
 		},
+		// The detector's search range follows the scored instrument; the
+		// zero config is the guitar-tuned default.
+		Pitch:   pitchConfigFor(tr),
 		OnNotes: wiring.onNotes,
+	}
+	if tr.Wind == nil {
 		// Chord verification and palm-mute credit (Phase 4) both hang
 		// off strums; supplying this callback is what enables them.
 		// Without it the session silently scores like Phase 3: one hit
 		// and N-1 misses per strummed chord — and a wait point on a
-		// dead note never releases at all.
-		OnStrums: wiring.onStrums,
-	})
+		// dead note never releases at all. A wind track gets neither
+		// callback on purpose: it cannot hold a chord or a dead note, so
+		// the only thing strums could do there is let breath noise claim
+		// a palm-mute's deadline credit.
+		lcfg.OnStrums = wiring.onStrums
+	}
+	session, err = live.Start(lcfg)
 	if err != nil {
 		return nil, cond, err
 	}
@@ -583,6 +604,47 @@ func setupListen(eng *engine.Engine, app *ui.App, inQ, outQ string, cfg appconfi
 	fmt.Printf("listening on %s (offset %d frames, calibrated: %v)\n", b.Name(), offset, calibrated)
 	wired = true
 	return session, cond, nil
+}
+
+// advanceLagFor is the miss-finalization lag for a piece and its scored
+// track. The fretted default stands on string physics: a pluck decays, so
+// the tracker closes every note within a few seconds whatever the player
+// does. A wind player holds a note exactly as long as the (possibly
+// slowed) score says, and a note still open when its deadline passes is
+// falsely scored a miss — the #1 rage-quit failure (D5) — so the wind lag
+// covers the scored track's longest note at the slowest speed the
+// transport reaches, plus a second for the tracker to settle. The cost is
+// honest and accepted: on a wind track a genuine miss surfaces later.
+func advanceLagFor(sc *score.Score, track int) int64 {
+	if sc.Tracks[track].Wind == nil {
+		return advanceLagFrames
+	}
+	var longest float64
+	for _, ev := range sc.Events() {
+		if ev.Track != track {
+			continue
+		}
+		if d := sc.Tempos.TimeAt(ev.End) - sc.Tempos.TimeAt(ev.Start); d > longest {
+			longest = d
+		}
+	}
+	lag := int64((longest/minScale + 1) * sampleRate)
+	if lag < advanceLagFrames {
+		lag = advanceLagFrames
+	}
+	return lag
+}
+
+// pitchConfigFor fits the detector to the scored track's instrument: the
+// zero config takes the guitar-tuned defaults at the stream's negotiated
+// rate, and a wind track gets its search range fitted to the horn's
+// sounding compass (see pitch.ConfigForKeys — the guitar ceiling sits
+// only three semitones over a soprano sax's top note).
+func pitchConfigFor(tr *score.Track) pitch.Config {
+	if w := tr.Wind; w != nil {
+		return pitch.ConfigForKeys(0, w.LowSounding, w.LowSounding+w.Span)
+	}
+	return pitch.Config{}
 }
 
 // errCalibrationCanceled reports a pass abandoned through its context —

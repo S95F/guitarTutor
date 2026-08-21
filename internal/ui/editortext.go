@@ -519,6 +519,7 @@ var gtLegend = []struct{ example, means string }{
 	{"3.5.8", "fret 3, string 5, an eighth"},
 	{"5.4", "length sticks until you change it"},
 	{"(0.6 2.5)", "struck together: a chord"},
+	{"D5.8", "on a wind part: written pitch"},
 	{"r", "a rest"},
 	{"~0.6", "tied: hold, do not strike again"},
 	{"|", "ends a bar"},
@@ -531,6 +532,7 @@ var gtLegend = []struct{ example, means string }{
 	{"", "MARKS ON A NOTE"},
 	{"5.3h", "hammer-on (p s b v too)"},
 	{"7.3x", "dead note, muted"},
+	{"D5l", "slurred, on a wind part (s b v too)"},
 
 	{"", "THE PIECE"},
 	{"\\title", "what it is called"},
@@ -539,8 +541,11 @@ var gtLegend = []struct{ example, means string }{
 	{"\\tuning", "open strings, low to high"},
 	{"\\capo 2", "capo fret"},
 	{"\\track", "starts another part"},
-	// The two directives the text view is the ONLY place to set. A legend
-	// that omits them makes the one control for them undiscoverable.
+	// The directives the text view is the ONLY place to set. A legend
+	// that omits them makes the one control for them undiscoverable —
+	// \instrument doubly so, since it is also the only way to write a
+	// wind part at all.
+	{"\\instrument", "a wind part: soprano sax, flute…"},
 	{"\\backing", "this part is accompaniment, not yours"},
 	{"\\program 25", "instrument voice (General MIDI)"},
 	{"//", "a note to yourself"},
@@ -550,15 +555,16 @@ var gtLegend = []struct{ example, means string }{
 // however wide its example is.
 const gtLegendCol = 84.0
 
-// Legend spacing. A row is a shade tighter than it used to be because the
-// list now carries every one of the parser's directives — \backing and
-// \program were missing, and the text view is the only place either can
-// be set — and the whole list still has to fit beside the text without
-// scrolling.
+// Legend spacing. Tightened twice now, each time the format grew: first
+// when \backing and \program joined (the text view is the only place
+// either can be set), again when the wind rows did (\instrument, the
+// written-pitch note form, the slur letter — the text view is the only
+// place a wind part can be written at all). The whole list still has to
+// fit beside the text without scrolling.
 const (
 	gtLegendTop    = 34.0 // first row, under the column's own heading
-	gtLegendRowH   = 16.0
-	gtLegendSecGap = 2.0 // extra air before a section heading
+	gtLegendRowH   = 14.5
+	gtLegendSecGap = 1.0 // extra air before a section heading
 )
 
 // A gtLegendLine is one placed legend row: a section heading when example

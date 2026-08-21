@@ -492,4 +492,3 @@ func TestPiecesDirIsUnderTheConfigDir(t *testing.T) {
 		t.Errorf("EnsurePiecesDir on an existing folder: %v", err)
 	}
 }
-

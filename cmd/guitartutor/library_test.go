@@ -202,6 +202,14 @@ func TestDescribePiece(t *testing.T) {
 			src:  "\\tempo 90\n\\time 4/4\n\\tuning D2 A2 D3 G3 B3 E4\n\\capo 2\n0.6.1 |\n",
 			want: []string{"drop D · capo 2"},
 		},
+		{
+			// A wind piece is named by its instrument — the first thing
+			// its player wants to know — and never by tuning vocabulary.
+			name: "soprano sax",
+			src:  "\\tempo 96\n\\time 4/4\n\\instrument soprano sax\nD5.1 |\n",
+			want: []string{"soprano sax"},
+			not:  []string{"tuning", "capo"},
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got := describePiece(parse(tt.src))

@@ -63,7 +63,7 @@ func (b *Browser) stepList() []onboardStep {
 			detail: "no audio capture backend, so the app cannot score your playing",
 		})
 	} else {
-		detail := "the interface your guitar is plugged into"
+		detail := "the interface your guitar or mic plugs into"
 		if capID != "" {
 			detail = "chosen; change it in settings whenever you move interfaces"
 		}

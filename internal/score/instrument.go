@@ -68,6 +68,14 @@ func WindByName(name string) *WindInstrument {
 	return nil
 }
 
+// NoteFor returns the single-lane Note a sounding key occupies on the
+// instrument: String 1, Fret counting semitones above the lowest note.
+// The caller has already established key >= LowSounding; MIDI's 127
+// ceiling is Validate's to enforce.
+func (w *WindInstrument) NoteFor(key int) Note {
+	return Note{String: 1, Fret: key - w.LowSounding}
+}
+
 // WindByProgram finds the wind instrument a General MIDI program names, or
 // nil when the program is nobody's. Importers use it to recognise a wind
 // part in a file that carries programs but no instrument names.

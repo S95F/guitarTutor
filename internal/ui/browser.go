@@ -1072,7 +1072,7 @@ func (b *Browser) browserBindings() []helpBinding {
 		{Group: "choosing", Keys: "F5", Desc: "Re-read the library folder"},
 
 		{Group: "writing", Keys: "N", Hint: "N new piece", Off: b.newPiece == nil,
-			Desc: "Write a piece by hand in the tablature editor"},
+			Desc: "Write a piece by hand in the editor"},
 		{Group: "writing", Keys: "E", Hint: "E edit", Off: !browserCanEdit(b),
 			Desc: "Edit the selected piece; an imported one has to be saved as .gtab"},
 
@@ -1109,7 +1109,9 @@ func (b *Browser) hintLine() string { return hintLineOf(b.browserBindings()) }
 // ShowError replaces the whole status band with one error line. It is
 // the ONE place the band's fields are written together, so a new field
 // cannot be forgotten at some of the sites that reset it.
-func (b *Browser) ShowError(msg string) { b.errMsg, b.warns, b.warnsFrom, b.warnsFailed = msg, nil, "", false }
+func (b *Browser) ShowError(msg string) {
+	b.errMsg, b.warns, b.warnsFrom, b.warnsFailed = msg, nil, "", false
+}
 
 // clearStatus empties the status band.
 func (b *Browser) clearStatus() { b.ShowError("") }

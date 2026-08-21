@@ -458,6 +458,26 @@ func TestOpenSquaresUpARaggedPiece(t *testing.T) {
 	}
 }
 
+// TestOpenRefusesWindPiecesByName: the grid is a strings-by-frets surface
+// and cannot hold a wind part yet. What matters is the wording — the
+// error is what routes the piece to the text view, so it must name the
+// instrument and the fallback, not complain about a zero-string tuning.
+func TestOpenRefusesWindPiecesByName(t *testing.T) {
+	sc, err := textfmt.Parse([]byte("\\instrument soprano sax\nD5.1"), "sax")
+	if err != nil {
+		t.Fatalf("parsing the wind fixture: %v", err)
+	}
+	if _, err := Open(sc); err == nil {
+		t.Fatal("Open accepted a wind piece the grid cannot draw")
+	} else {
+		for _, want := range []string{"soprano sax", "text view"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("Open's refusal %q does not mention %q", err, want)
+			}
+		}
+	}
+}
+
 func TestOpenTheRichFixture(t *testing.T) {
 	src, err := os.ReadFile("../../testdata/fixture_rich.gtab")
 	if err != nil {

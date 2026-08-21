@@ -78,7 +78,7 @@ func TestReedReleaseIsFast(t *testing.T) {
 	if held <= 0 {
 		t.Fatal("no held output")
 	}
-	if db := 20 * math.Log10((tail + 1e-12) / held); db > -60 {
+	if db := 20 * math.Log10((tail+1e-12)/held); db > -60 {
 		t.Errorf("release is %.1f dB down after 250 ms, want at least -60", db)
 	}
 }

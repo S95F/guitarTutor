@@ -95,7 +95,7 @@ func (pieceLibrary) Scan() ([]ui.PieceInfo, error) {
 }
 
 // describePiece is the one line the library shows under a piece's title:
-// what the music is, in the terms a guitarist would ask.
+// what the music is, in the terms its player would ask.
 func describePiece(sc *score.Score) string {
 	bars, tracks := 0, len(sc.Tracks)
 	for _, tr := range sc.Tracks {
@@ -113,7 +113,7 @@ func describePiece(sc *score.Score) string {
 		parts = append(parts, plural(tracks, "track"))
 	}
 	if len(sc.Tracks) > 0 {
-		if name := tuningName(sc.Tracks[0]); name != "" {
+		if name := instrumentName(sc.Tracks[0]); name != "" {
 			parts = append(parts, name)
 		}
 	}
@@ -128,11 +128,17 @@ func plural(n int, noun string) string {
 	return fmt.Sprintf("%d %ss", n, noun)
 }
 
-// tuningName names a track's tuning when it is not the standard one, and
-// its capo when it has one. Saying "standard E" about every piece would
-// be noise; saying "drop D" about the one piece that is in it is the
-// whole point of a description.
-func tuningName(tr *score.Track) string {
+// instrumentName says what the piece is played on, when that is worth a
+// word. A wind track is named outright — "soprano sax" is the first thing
+// its player wants to know. A fretted track is assumed to be a guitar, so
+// only what departs from the default is said: the tuning when it is not
+// standard, the capo when there is one. Saying "standard E" about every
+// piece would be noise; saying "drop D" about the one piece that is in it
+// is the whole point of a description.
+func instrumentName(tr *score.Track) string {
+	if tr.Wind != nil {
+		return tr.Wind.Name
+	}
 	var parts []string
 	if !tr.Tuning.Equal(score.StandardTuning) {
 		parts = append(parts, score.TuningName(tr.Tuning))
@@ -142,4 +148,3 @@ func tuningName(tr *score.Track) string {
 	}
 	return strings.Join(parts, " · ")
 }
-

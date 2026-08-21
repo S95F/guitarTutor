@@ -178,8 +178,10 @@ type practiceLayout struct {
 // is positioned from it rather than from a constant, because the string
 // count comes from the piece: a bass has four and an extended-range
 // guitar has eight, and a fixed timeline would collide with one of them.
+// A wind track, whose Tuning is nil, borrows a six-string staff's height
+// (laneLines) so the band never degenerates.
 func (a *App) tabBottom() float64 {
-	return float64(tabTop + (len(a.displayed().Tuning)-1)*stringGap)
+	return float64(tabTop + (a.laneLines()-1)*stringGap)
 }
 
 // tabRect is the tab's clickable area: the string block plus the margins
