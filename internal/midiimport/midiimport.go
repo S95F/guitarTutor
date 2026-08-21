@@ -592,10 +592,12 @@ func (im *importer) assignFrets(rt *rawTrack) {
 // String 1, Fret counting semitones above the lowest note — arithmetic,
 // not a heuristic, which is why buildTrack does not mark the result
 // Inferred. A key still below the instrument after normalize's octave
-// shift is dropped (str stays 0), mirroring the fretted policy. There is
-// no ceiling to police: an SMF key stops at 127, which Validate already
-// bounds as pitch, and Span caps what the editor offers, not what a piece
-// may hold — altissimo imports as written.
+// shift is dropped (str stays 0), mirroring the fretted policy. The
+// ceiling is the WRITTEN pitch: a transposing instrument reads above
+// what it sounds, and a sounding key past 127 - Transpose has no written
+// note name, so the text format could never save the piece — such a note
+// is dropped with a warning rather than imported as something unwritable.
+// Span caps only what the editor offers — altissimo imports as written.
 //
 // The instrument is monophonic, so simultaneous attacks cannot all sound:
 // each same-tick chord keeps its highest note — melody on top, the
@@ -606,6 +608,11 @@ func (im *importer) assignWind(rt *rawTrack) {
 	for _, n := range rt.notes {
 		if n.key < w.LowSounding {
 			im.warnf("%s: dropped unplayable note (key %d) at tick %d: below the %s's lowest note",
+				rt.desc(), n.key, n.start, w.Name)
+			continue
+		}
+		if n.key > 127-w.Transpose {
+			im.warnf("%s: dropped note (key %d) at tick %d: its written pitch on a %s is past MIDI 127",
 				rt.desc(), n.key, n.start, w.Name)
 			continue
 		}

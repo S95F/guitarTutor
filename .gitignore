@@ -1,6 +1,16 @@
-# Binaries
+# Binaries — the app under both its names (stale guitartutor builds
+# linger on pre-rename checkouts), and each tool `go build ./tools/...`
+# can drop at the root.
 /musictutor
 /musictutor.exe
+/guitartutor
+/guitartutor.exe
+/uishot
+/uishot.exe
+/gengp
+/gengp.exe
+/genfixtures
+/genfixtures.exe
 /bin/
 /dist/
 

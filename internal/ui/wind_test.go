@@ -6,6 +6,7 @@ package ui
 // track with no strings at all.
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/S95F/musicTutor/internal/engine"
@@ -129,5 +130,55 @@ func TestWindVerdictKeying(t *testing.T) {
 	a.syncLive()
 	if v, ok := a.verdictAt(0, 1, 0); !ok || v != practice.VerdictHit {
 		t.Errorf("verdictAt(0, 1) = %v, %v; want the offered Hit", v, ok)
+	}
+}
+
+// TestNewEditorForRefusesWindByName: the notation grid cannot hold a wind
+// part, and the refusal must name the instrument and the fallback so the
+// caller can route the piece to the text view.
+func TestNewEditorForRefusesWindByName(t *testing.T) {
+	sc := newAppWind(t, 1).sc
+	if _, err := NewEditorFor(nil, sc, ""); err == nil {
+		t.Fatal("NewEditorFor accepted a wind piece the grid cannot draw")
+	} else {
+		for _, want := range []string{"soprano sax", "text view"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("refusal %q does not mention %q", err, want)
+			}
+		}
+	}
+}
+
+// TestWindTextPaneIsTheWholeEditor: a wind piece in the text view can run
+// file actions (applyTextThen) and toggle F2 without ever landing on the
+// grid, and Escape leaves cleanly when the text is still exactly the file.
+func TestWindTextPaneIsTheWholeEditor(t *testing.T) {
+	src := "\\instrument soprano sax\nD5.4 E5.4 G5.2 |\n"
+	e := NewEditorForText(nil, []byte(src), "sax.gtab")
+
+	acted := false
+	e.applyTextThen(func() { acted = true })
+	if !acted {
+		t.Fatal("applyTextThen never ran the action on a valid wind text")
+	}
+	if e.text == nil {
+		t.Fatal("applyTextThen closed the text view; a wind piece has no other editor")
+	}
+	if w := e.doc.Wind(); w == nil {
+		t.Fatal("the applied document lost its instrument")
+	}
+
+	e.toggleText()
+	if e.text == nil {
+		t.Fatal("F2 closed the text view on a wind piece")
+	}
+	if msg, _ := e.message(); !strings.Contains(msg, "soprano sax") {
+		t.Errorf("staying in the text view said %q, want it to name the instrument", msg)
+	}
+
+	// The text is exactly the file's own, so nothing is unsaved: Escape
+	// leaves, no prompt.
+	if err := e.escapeText(); err != errQuit {
+		t.Errorf("escapeText = %v, want errQuit (nothing typed, nothing to lose)", err)
 	}
 }

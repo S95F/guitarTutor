@@ -208,7 +208,7 @@ func checkPieceArgument(arg string) error {
 // it on stdout where a pager or a grep can reach it; only the
 // unknown-flag path, where the help is a diagnostic, writes to stderr.
 func usage(w io.Writer) {
-	fmt.Fprint(w, `musictutor — practice companion for guitarists
+	fmt.Fprint(w, `musictutor — practice companion for guitarists and wind players
 
 usage:
   musictutor play [flags] <file>
@@ -220,14 +220,14 @@ usage:
 `+piecesLine+`
 
 play flags:
-  -sf2 <path>     SoundFont for synthesis (default: built-in pluck)
+  -sf2 <path>     SoundFont for synthesis (default: built-in pluck and reed)
   -scale <f>      initial tempo scale, 0.25 to 2.0 (default 1.0)
   -met            start with the metronome on
   -countin <n>    count-in beats before playback starts
-  -track <n>      the track you are practising, 1-based: shown as tab, and
+  -track <n>      the track you are practising, 1-based: the one shown, and
                   under -listen the one scored and waited on
                   (default: the first user track)
-  -listen         hear your guitar: live pitch detection and scoring
+  -listen         hear your instrument: live pitch detection and scoring
   -in <id>        capture device for -listen (see devices; default system)
   -out <id>       playback device for -listen (default system)
   -backing <path>         backing-track audio (wav/flac/mp3), pinned to score time

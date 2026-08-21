@@ -344,12 +344,25 @@ func (d *Doc) rebuildWith(tempos []int64) error {
 	return nil
 }
 
-// checkPitches reports the first note of a track that its current tuning
-// and capo cannot sound.
+// checkPitches reports the first note of a track that its current
+// instrument cannot sound: outside the tuning's strings on a fretted
+// track, off the one lane or below the horn on a wind track.
 func checkPitches(tr *score.Track) error {
 	for bi, bar := range tr.Bars {
 		for _, bt := range bar.Beats {
 			for _, n := range bt.Notes {
+				if tr.Wind != nil {
+					if n.String != 1 {
+						return fmt.Errorf("bar %d has a note on string %d, and a %s has one lane, string 1", bi+1, n.String, tr.Wind.Name)
+					}
+					if n.Fret < 0 {
+						return fmt.Errorf("bar %d has a note below the %s's lowest note", bi+1, tr.Wind.Name)
+					}
+					if k := tr.Pitch(n); k > 127 {
+						return fmt.Errorf("bar %d: a note sounds MIDI key %d, above 127", bi+1, k)
+					}
+					continue
+				}
 				if n.String < 1 || n.String > len(tr.Tuning) {
 					return fmt.Errorf("bar %d has a note on string %d, and this tuning has %d strings", bi+1, n.String, len(tr.Tuning))
 				}

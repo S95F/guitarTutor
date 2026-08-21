@@ -458,24 +458,25 @@ func TestOpenSquaresUpARaggedPiece(t *testing.T) {
 	}
 }
 
-// TestOpenRefusesWindPiecesByName: the grid is a strings-by-frets surface
-// and cannot hold a wind part yet. What matters is the wording — the
-// error is what routes the piece to the text view, so it must name the
-// instrument and the fallback, not complain about a zero-string tuning.
-func TestOpenRefusesWindPiecesByName(t *testing.T) {
-	sc, err := textfmt.Parse([]byte("\\instrument soprano sax\nD5.1"), "sax")
+// TestOpenAcceptsWindPieces: the DOCUMENT takes a wind piece — the text
+// view edits and saves through it — even though the notation grid cannot
+// draw one (that refusal lives in ui.NewEditorFor, at the grid's own
+// door). The document must square up, report its instrument, and write
+// back out unchanged.
+func TestOpenAcceptsWindPieces(t *testing.T) {
+	sc, err := textfmt.Parse([]byte("\\instrument soprano sax\nD5.4 E5.4 G5.2"), "sax")
 	if err != nil {
 		t.Fatalf("parsing the wind fixture: %v", err)
 	}
-	if _, err := Open(sc); err == nil {
-		t.Fatal("Open accepted a wind piece the grid cannot draw")
-	} else {
-		for _, want := range []string{"soprano sax", "text view"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("Open's refusal %q does not mention %q", err, want)
-			}
-		}
+	d, err := Open(sc)
+	if err != nil {
+		t.Fatalf("Open refused a valid wind piece: %v", err)
 	}
+	if w := d.Wind(); w == nil || w.Name != "soprano sax" {
+		t.Errorf("Wind() = %v, want the soprano sax", w)
+	}
+	barFull(t, d)
+	saveable(t, d)
 }
 
 func TestOpenTheRichFixture(t *testing.T) {

@@ -174,3 +174,31 @@ func TestNewBuiltinDispatch(t *testing.T) {
 		}
 	}
 }
+
+// TestReedSoundsTheWholeChord: a fretted track pointed at a wind program
+// can strum — six NoteOns on one frame — and every note must sound. The
+// pool used to be small enough that the fifth and sixth notes stole the
+// first two before they rendered a sample.
+func TestReedSoundsTheWholeChord(t *testing.T) {
+	const sr = 48000
+	v := NewReed(sr, 64)
+	chord := []int{40, 45, 52, 56, 59, 64} // open E major
+	for _, k := range chord {
+		v.NoteOn(k, 1)
+	}
+	l, r := renderFrames(v, sr/2, 2048)
+	base := energy(monoSum(l, r))
+	// Releasing any one note must audibly change the mix: a note whose
+	// NoteOff changes nothing never sounded.
+	for _, k := range chord {
+		v2 := NewReed(sr, 64)
+		for _, kk := range chord {
+			v2.NoteOn(kk, 1)
+		}
+		v2.NoteOff(k)
+		l2, r2 := renderFrames(v2, sr/2, 2048)
+		if e := energy(monoSum(l2, r2)); math.Abs(e-base)/base < 0.01 {
+			t.Errorf("releasing key %d changed the mix by %.4f%%: that note never sounded", k, 100*math.Abs(e-base)/base)
+		}
+	}
+}

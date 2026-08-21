@@ -8,6 +8,7 @@ import (
 	"gitlab.com/gomidi/midi/v2/smf"
 
 	"github.com/S95F/musicTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score/textfmt"
 )
 
 // TestImportWindTrack: a channel whose program change is 64 (soprano sax)
@@ -233,5 +234,46 @@ func TestImportBandWithWind(t *testing.T) {
 	}
 	if !hasWarn(warns, "split into one part per channel") {
 		t.Errorf("warnings = %v, want the channel-split warning", warns)
+	}
+}
+
+// TestImportWindWrittenCeiling: a transposing horn reads above what it
+// sounds, and a sounding key whose written pitch would pass MIDI 127 has
+// no note name the text format could ever save — it is dropped, loudly.
+func TestImportWindWrittenCeiling(t *testing.T) {
+	var tr smf.Track
+	tr.Add(0, midi.ProgramChange(0, 67)) // baritone sax: written = sounding + 21
+	tr.Add(0, midi.NoteOn(0, 110, 100))  // written 131
+	tr.Add(960, midi.NoteOff(0, 110))
+	tr.Add(0, midi.NoteOn(0, 60, 100)) // written 81: fine
+	tr.Add(960, midi.NoteOff(0, 60))
+	s, warns, err := Import(buildSMF(t, 960, tr))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	track := s.Tracks[0]
+	var keys []int
+	for _, bar := range track.Bars {
+		for _, beat := range bar.Beats {
+			for _, n := range beat.Notes {
+				keys = append(keys, track.Pitch(n))
+			}
+		}
+	}
+	if len(keys) != 1 || keys[0] != 60 {
+		t.Fatalf("kept keys %v, want just 60", keys)
+	}
+	found := false
+	for _, w := range warns {
+		if strings.Contains(w, "written pitch") && strings.Contains(w, "past MIDI 127") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("warnings %v never explain the unwritable note", warns)
+	}
+	// The whole point: what the importer keeps, the format can save.
+	if _, err := textfmt.Format(s); err != nil {
+		t.Errorf("the imported piece cannot be written back: %v", err)
 	}
 }

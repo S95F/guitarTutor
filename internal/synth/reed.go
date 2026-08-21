@@ -22,8 +22,11 @@ const (
 	// only ever holds one blown note plus the release tails of its
 	// predecessors — but a fretted track pointed at a wind program can
 	// still send chords, and the pool absorbs them rather than asserting
-	// a monophony the caller never promised.
-	reedPolyphony = 4
+	// a monophony the caller never promised. Eight holds the widest
+	// fretted chord plus release tails, and alloc steals released tails
+	// before held notes, so the notes of one chord cannot evict each
+	// other on their shared attack frame.
+	reedPolyphony = 8
 	// reedTableSize is the single-cycle wavetable length. 2048 keeps the
 	// interpolation error far below audibility at every playable pitch.
 	reedTableSize = 2048
@@ -233,20 +236,29 @@ func (r *reed) incFor(key int) float64 {
 	return keyFreq(key) / float64(r.sampleRate)
 }
 
-// alloc returns a free voice slot, stealing the oldest note when the pool
-// is full.
+// alloc returns a free voice slot. A full pool steals the oldest
+// RELEASED voice first — a dying tail is the cheapest thing to lose —
+// and only when every slot is still held does it steal the oldest held
+// note, so the notes of one chord, all held, never silence each other.
 func (r *reed) alloc() *reedVoice {
-	var oldest *reedVoice
+	var oldestReleased, oldestHeld *reedVoice
 	for i := range r.voices {
 		v := &r.voices[i]
 		if !v.active {
 			return v
 		}
-		if oldest == nil || v.age < oldest.age {
-			oldest = v
+		if !v.held {
+			if oldestReleased == nil || v.age < oldestReleased.age {
+				oldestReleased = v
+			}
+		} else if oldestHeld == nil || v.age < oldestHeld.age {
+			oldestHeld = v
 		}
 	}
-	return oldest
+	if oldestReleased != nil {
+		return oldestReleased
+	}
+	return oldestHeld
 }
 
 // sounding returns the voice currently blowing key, or nil. A released or

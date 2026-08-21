@@ -157,6 +157,14 @@ func (e *Editor) toggleText() {
 	if !e.applyText() {
 		return
 	}
+	// A wind piece applies fine — the document takes it — but the grid
+	// cannot draw it, so the text view stays: it is the whole editor for
+	// a wind part, and closing it would land on a surface with nothing
+	// on it.
+	if w := e.doc.Wind(); w != nil {
+		e.report(fmt.Errorf("the notation view cannot show a %s part yet — this text is its editor", w.Name))
+		return
+	}
 	e.text = nil
 }
 
@@ -189,9 +197,16 @@ func (e *Editor) applyText() bool {
 	// A document opened from text starts its own history, so the grid's
 	// undo stack does not offer to take back edits made to a different
 	// text. The dirty flag is set by hand: edit.Open produces a clean
-	// document, and the text really is a change against what is on disk.
+	// document, and the text really is a change against what is on disk —
+	// except in a file-seeded pane whose text is still exactly the file's
+	// own: applying that is loading the piece, not editing it, and calling
+	// it dirty would put an unsaved-work prompt between a reader and the
+	// door.
 	e.doc = doc
 	e.doc.MarkSaved()
+	if e.text != nil && e.text.fromFile && e.text.text() == e.text.seed {
+		return true
+	}
 	e.markDirtyFromText()
 	return true
 }
@@ -203,17 +218,21 @@ func (e *Editor) markDirtyFromText() {
 	_ = e.doc.SetTitle(e.doc.Score().Title)
 }
 
-// applyTextThen applies the text view and, when it parses, returns to the
-// notation and runs act. It is the ONE path a file action may take while
-// the text is showing — ctrl+S and the toolbar's save and practice
-// controls all go through it, so none of them can act on the document the
-// on-screen text has diverged from. Text that will not parse keeps the
-// view open with the parser's complaint and does nothing else.
+// applyTextThen applies the text view and, when it parses, runs act. It
+// is the ONE path a file action may take while the text is showing —
+// ctrl+S and the toolbar's save and practice controls all go through it,
+// so none of them can act on the document the on-screen text has
+// diverged from. Text that will not parse keeps the view open with the
+// parser's complaint and does nothing else. A fretted piece returns to
+// the notation on the way; a wind piece stays in the text view, which is
+// its whole editor, and the action runs there.
 func (e *Editor) applyTextThen(act func()) {
 	if !e.applyText() {
 		return
 	}
-	e.text = nil
+	if e.doc.Wind() == nil {
+		e.text = nil
+	}
 	act()
 }
 
@@ -227,6 +246,13 @@ func (e *Editor) applyTextThen(act func()) {
 // hostage to a parse error they did not make protects nothing.
 func (e *Editor) escapeText() error {
 	if e.applyText() {
+		// A wind piece has no grid to go back to — for it, Escape means
+		// leaving the editor, through the same unsaved-work prompt any
+		// leave goes through. Holding the view open would trap the user
+		// in the one view the piece has.
+		if e.doc.Wind() != nil {
+			return e.leave()
+		}
 		e.text = nil
 		return nil
 	}

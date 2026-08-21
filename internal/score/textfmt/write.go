@@ -8,13 +8,17 @@ package textfmt
 // round trip on every fixture in the tree.
 //
 // The format is smaller than the model, and this is where that shows.
-// Three things a *score.Score can hold cannot be written down:
+// Four things a *score.Score can hold cannot be written down:
 //
 //   - a beat whose duration is not a plain, dotted, or triplet note value
 //     (an importer that quantised to something else, most often);
 //   - a tempo change that does not land on a barline (SMF places them
 //     wherever it likes);
-//   - two notes on one string in the same beat.
+//   - two notes on one string in the same beat;
+//   - a wind note whose WRITTEN pitch passes MIDI 127 — the sounding
+//     pitch fits, but a transposing instrument reads above what it
+//     sounds, and no note name reaches that high. (The importers drop
+//     such notes with a warning, so only a hand-built score can hold one.)
 //
 // Each is reported as an error naming the bar, rather than written out as
 // something Parse would reject or — worse — read back as a different

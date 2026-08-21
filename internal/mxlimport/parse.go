@@ -460,12 +460,15 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 
 	// Wind classification: the declared General MIDI program is the
 	// primary signal, the part name the fallback for files that carry no
-	// MIDI block at all. An explicit <staff-tuning> overrides both — a
-	// real tab staff, with authored string lines, is stronger evidence of
-	// a fretted instrument than a program number or a label — so the part
-	// stays fretted and the conflict is reported, never silently resolved.
+	// MIDI block at all — never for one that declared a program the
+	// registry does not know as a wind: a part labelled "Flute" whose
+	// file explicitly says guitar is a guitar, and the file's word wins.
+	// An explicit <staff-tuning> overrides both — a real tab staff, with
+	// authored string lines, is stronger evidence of a fretted instrument
+	// than a program number or a label — so the part stays fretted and
+	// the conflict is reported, never silently resolved.
 	wind := score.WindByProgram(pd.program)
-	if wind == nil {
+	if wind == nil && !pd.hasProgram {
 		wind = score.WindByName(pd.name)
 	}
 	if wind != nil {
@@ -651,8 +654,26 @@ func (im *importer) finish(pd *partData) {
 // ceiling — altissimo is real playing and imports fine.
 func (im *importer) finishWind(pd *partData, label string) {
 	w := pd.wind
-	chords := 0
+	// Range first, chords second: a chord whose TOP note is outside the
+	// instrument must fall back to its highest playable note, not lose
+	// the whole chord to the unplayable one. The ceiling is the written
+	// pitch — a sounding key past 127 - Transpose has no written note
+	// name, so the text format could never save it.
 	kept := pd.notes[:0]
+	for _, n := range pd.notes {
+		if n.key < w.LowSounding {
+			im.warnf("%s: dropped note (key %d) at tick %d: below the %s's lowest note (key %d)", label, n.key, n.start, w.Name, w.LowSounding)
+			continue
+		}
+		if n.key > 127-w.Transpose {
+			im.warnf("%s: dropped note (key %d) at tick %d: its written pitch on a %s is past MIDI 127", label, n.key, n.start, w.Name)
+			continue
+		}
+		kept = append(kept, n)
+	}
+	pd.notes = kept
+	chords := 0
+	kept = pd.notes[:0]
 	for i := 0; i < len(pd.notes); {
 		j := i
 		for j+1 < len(pd.notes) && pd.notes[j+1].start == pd.notes[i].start {
@@ -670,21 +691,10 @@ func (im *importer) finishWind(pd *partData, label string) {
 	if chords > 0 {
 		im.warnf("%s: kept only the highest note of %d chord(s); a %s plays one note at a time", label, chords, w.Name)
 	}
-	kept = pd.notes[:0]
 	for _, n := range pd.notes {
-		if n.key < w.LowSounding {
-			im.warnf("%s: dropped note (key %d) at tick %d: below the %s's lowest note (key %d)", label, n.key, n.start, w.Name, w.LowSounding)
-			continue
-		}
-		if n.key > 127 {
-			im.warnf("%s: dropped note (key %d) at tick %d: past MIDI 127", label, n.key, n.start)
-			continue
-		}
 		p := w.NoteFor(n.key)
 		n.str, n.fret = p.String, p.Fret
-		kept = append(kept, n)
 	}
-	pd.notes = kept
 }
 
 // finishFretted assigns a fretted part's missing fingerings with

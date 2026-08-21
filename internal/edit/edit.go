@@ -117,15 +117,6 @@ func Open(sc *score.Score) (*Doc, error) {
 	if sc == nil {
 		return nil, fmt.Errorf("edit: no piece to open")
 	}
-	// The grid is a strings-by-frets surface and a wind part has neither;
-	// refusing here, by name, is what routes a wind piece to the text
-	// view (the caller's fallback) with a message that says so instead of
-	// a complaint about a zero-string tuning.
-	for _, tr := range sc.Tracks {
-		if tr.Wind != nil {
-			return nil, fmt.Errorf("edit: the notation editor cannot edit a %s part yet — the text view (F2) is where wind parts are written", tr.Wind.Name)
-		}
-	}
 	if err := sc.Validate(); err != nil {
 		return nil, fmt.Errorf("edit: the piece is not valid: %w", err)
 	}
@@ -152,6 +143,19 @@ func Open(sc *score.Score) (*Doc, error) {
 // it: every change goes through this package so the invariants and the
 // undo history stay true.
 func (d *Doc) Score() *score.Score { return d.sc }
+
+// Wind returns the first wind instrument among the piece's tracks, or
+// nil. The editor asks because the notation grid is a strings-by-frets
+// surface: a piece with a wind part lives in the text view, which this
+// document serves just as well.
+func (d *Doc) Wind() *score.WindInstrument {
+	for _, tr := range d.sc.Tracks {
+		if tr.Wind != nil {
+			return tr.Wind
+		}
+	}
+	return nil
+}
 
 // TrackIndex is which track the cursor is editing.
 func (d *Doc) TrackIndex() int { return d.track }
@@ -383,7 +387,9 @@ func (d *Doc) squareUp() error {
 		}
 	}
 	for ti, tr := range d.sc.Tracks {
-		if len(tr.Tuning) == 0 {
+		// A fretted track without a tuning is an importer's gap to repair;
+		// a wind track without one is simply what a wind track is.
+		if tr.Wind == nil && len(tr.Tuning) == 0 {
 			tr.Tuning = append(score.Tuning(nil), score.StandardTuning...)
 		}
 		retick(tr)
@@ -491,13 +497,15 @@ func cloneScore(sc *score.Score) *score.Score {
 	return out
 }
 
-// cloneTrack deep-copies one track.
+// cloneTrack deep-copies one track. Wind is shared, not copied: it
+// points into the read-only score.WindInstruments registry.
 func cloneTrack(tr *score.Track) *score.Track {
 	c := &score.Track{
 		Name:    tr.Name,
 		Tuning:  append(score.Tuning(nil), tr.Tuning...),
 		Capo:    tr.Capo,
 		Program: tr.Program,
+		Wind:    tr.Wind,
 		Role:    tr.Role,
 		Bars:    make([]*score.Bar, len(tr.Bars)),
 	}

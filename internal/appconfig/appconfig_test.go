@@ -547,3 +547,52 @@ func TestMigrateOldDirNeverOverwrites(t *testing.T) {
 		t.Error("migration wrote into an existing musictutor directory")
 	}
 }
+
+// TestRehomePathsFollowsTheMigration: once the directory rename has
+// happened (old gone, new standing), stored paths into the old directory
+// — recents, written pieces, the browse dir, the SoundFont — follow it,
+// so the start screen the migration preserved is not emptied by its own
+// dangling entries. While the old directory still exists, nothing moves.
+func TestRehomePathsFollowsTheMigration(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv(EnvConfigDir, "")
+	t.Setenv("XDG_CONFIG_HOME", base) // Linux/macOS UserConfigDir
+	t.Setenv("AppData", base)         // Windows UserConfigDir
+	if err := os.MkdirAll(filepath.Join(base, dirName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	oldPieces := filepath.Join(base, oldDirName, "pieces", "riff.gtab")
+	elsewhere := filepath.Join(base, "elsewhere", "song.gtab")
+	c := Config{
+		Recents:       []string{oldPieces, elsewhere},
+		Created:       []string{oldPieces},
+		LastBrowseDir: filepath.Join(base, oldDirName, "pieces"),
+	}
+	c.rehomePaths()
+
+	want := filepath.Join(base, dirName, "pieces", "riff.gtab")
+	if c.Recents[0] != want {
+		t.Errorf("recent = %q, want %q", c.Recents[0], want)
+	}
+	if c.Recents[1] != elsewhere {
+		t.Errorf("a path outside the old directory moved: %q", c.Recents[1])
+	}
+	if c.Created[0] != want {
+		t.Errorf("created = %q, want %q", c.Created[0], want)
+	}
+	if wantDir := filepath.Join(base, dirName, "pieces"); c.LastBrowseDir != wantDir {
+		t.Errorf("browse dir = %q, want %q", c.LastBrowseDir, wantDir)
+	}
+
+	// With the old directory still standing, its paths are still valid
+	// and must not be rewritten.
+	if err := os.MkdirAll(filepath.Join(base, oldDirName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c2 := Config{Recents: []string{oldPieces}}
+	c2.rehomePaths()
+	if c2.Recents[0] != oldPieces {
+		t.Errorf("rehome fired with the old directory present: %q", c2.Recents[0])
+	}
+}

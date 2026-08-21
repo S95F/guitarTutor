@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // EnvConfigDir names the environment variable that, when non-empty,
@@ -214,7 +215,49 @@ func Load() (Config, error) {
 			path, c.Version, CurrentVersion, ErrNewerVersion)
 	}
 	c.migrate()
+	c.rehomePaths()
 	return c, nil
+}
+
+// rehomePaths follows the directory rename (migrateOldDir) into the
+// config's own contents: recents, the written-pieces list, the last
+// browse directory and the SoundFont path may all point into the
+// guitartutor-era directory, which the migration renamed away — leaving
+// them dangling would empty the start screen the rename was supposed to
+// preserve. The rewrite fires only when the old directory is actually
+// gone and the new one exists, so a setup where both still stand (no
+// migration ran) keeps its valid old-dir paths untouched.
+func (c *Config) rehomePaths() {
+	if os.Getenv(EnvConfigDir) != "" {
+		return
+	}
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return
+	}
+	oldDir := filepath.Join(base, oldDirName)
+	newDir := filepath.Join(base, dirName)
+	if _, err := os.Stat(oldDir); !os.IsNotExist(err) {
+		return
+	}
+	if _, err := os.Stat(newDir); err != nil {
+		return
+	}
+	prefix := oldDir + string(filepath.Separator)
+	rehome := func(p string) string {
+		if rest, ok := strings.CutPrefix(p, prefix); ok {
+			return filepath.Join(newDir, rest)
+		}
+		return p
+	}
+	for i, p := range c.Recents {
+		c.Recents[i] = rehome(p)
+	}
+	for i, p := range c.Created {
+		c.Created[i] = rehome(p)
+	}
+	c.LastBrowseDir = rehome(c.LastBrowseDir)
+	c.SoundFontPath = rehome(c.SoundFontPath)
 }
 
 // migrate brings a config parsed off disk up to CurrentVersion in place.

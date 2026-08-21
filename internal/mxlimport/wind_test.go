@@ -196,3 +196,62 @@ func TestWindOutOfRangeDropped(t *testing.T) {
 		t.Fatalf("events = %v, want only the in-range note (key 60, fret 4)", evs)
 	}
 }
+
+// TestWindNameNeverOverridesADeclaredProgram: a part labelled "Flute"
+// whose file explicitly declares a guitar program is a guitar — the
+// name fallback exists only for files that carry no MIDI block at all.
+func TestWindNameNeverOverridesADeclaredProgram(t *testing.T) {
+	m := `<attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>` +
+		note("E", 4, 960, -1, 0, "") +
+		note("C", 5, 960, -1, 0, `<chord/>`) +
+		note("G", 4, 960, -1, 0, "") +
+		note("G", 4, 960, -1, 0, "")
+	s, _, err := Import(wrapWindPart("Flute", 26, m)) // 1-based 26 = the guitar default
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	tr := s.Tracks[0]
+	if tr.Wind != nil {
+		t.Fatalf("a declared guitar program was overridden by the part name: track is a %s", tr.Wind.Name)
+	}
+	if len(tr.Tuning) == 0 {
+		t.Error("the fretted part lost its tuning")
+	}
+}
+
+// TestWindChordKeepsHighestPlayable: range first, chords second — a chord
+// whose top note is below the horn falls back to its highest playable
+// note instead of losing the whole chord to the unplayable one.
+func TestWindChordKeepsHighestPlayable(t *testing.T) {
+	// Soprano sax, no transpose block: written = sounding. G3 (55) is
+	// below the horn's Ab3 (56); D5 (74) is fine. The chord D5+G3 must
+	// keep D5.
+	m := `<attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>` +
+		note("D", 5, 1920, -1, 0, "") +
+		note("G", 3, 1920, -1, 0, `<chord/>`)
+	s, warns, err := Import(wrapWindPart("Part 1", 65, m))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	tr := s.Tracks[0]
+	var keys []int
+	for _, bar := range tr.Bars {
+		for _, beat := range bar.Beats {
+			for _, n := range beat.Notes {
+				keys = append(keys, tr.Pitch(n))
+			}
+		}
+	}
+	if len(keys) != 1 || keys[0] != 74 {
+		t.Fatalf("kept keys %v, want just the playable 74 (D5)", keys)
+	}
+	found := false
+	for _, w := range warns {
+		if strings.Contains(w, "below the soprano sax's lowest note") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("warnings %v never explain the dropped G3", warns)
+	}
+}

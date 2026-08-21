@@ -167,6 +167,13 @@ func NewEditorFor(sh *Shell, sc *score.Score, path string) (*Editor, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The grid is a strings-by-frets surface; a wind part has neither.
+	// Refusing here, by name, is what routes a wind piece to the text
+	// view (the caller's fallback), where the same document is fully
+	// editable and saveable.
+	if w := doc.Wind(); w != nil {
+		return nil, fmt.Errorf("the notation editor cannot edit a %s part yet — the text view is where wind parts are written", w.Name)
+	}
 	// Only a .gtab file can be written back; anything else has to be saved
 	// under a new name, so the path is deliberately dropped rather than
 	// kept and refused later.
