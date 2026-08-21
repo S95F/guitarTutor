@@ -6,8 +6,9 @@
 // starts and ends are quantized to the straight 1/32 grid (Grid ticks),
 // bars are built from the meter map with rests filled in, notes crossing
 // beat or bar boundaries continue as Tied notes (score.Events merges them
-// back — the round-trip invariant), and every note gets an Inferred
-// string/fret fingering from internal/fretting.
+// back — the round-trip invariant), and every note gets a string and fret:
+// a fretted part through internal/fretting's Inferred fingerings, a wind
+// part by arithmetic on the instrument's single lane.
 //
 // Quantization is straight-grid only in v1: triplet feel is not preserved,
 // and a warning is emitted when quantization moves a note edge by more
@@ -22,11 +23,19 @@
 // Channel 10, General MIDI percussion, is dropped rather than split off:
 // its keys select kit pieces, not pitches.
 //
+// A part whose program change names a wind instrument (score.WindByProgram)
+// imports as that instrument: one chromatic lane, one note at a time, so a
+// same-tick chord keeps only its highest note — melody on top, the
+// convention arrangers write by. A part with no program change keeps
+// DefaultProgram and stays guitar: the default is an assumption, not
+// evidence of an instrument.
+//
 // Deviations from the file are never silent — they are returned as
 // human-readable warnings: skipped percussion tracks (channel 10), tracks
 // split across channels, keys below the instrument's range shifted up an
-// octave, dropped unplayable notes, truncated same-string overlaps,
-// unterminated notes, and meter changes that fall inside a bar.
+// octave, dropped unplayable notes, chord notes a monophonic wind cannot
+// sound, truncated overlapping notes, unterminated notes, and meter
+// changes that fall inside a bar.
 package midiimport
 
 import (
@@ -71,8 +80,10 @@ const maxBars = 100_000
 // notes. The RoleUser track — the part offered for practice — is the
 // first of them that still sounds a note after fingering (see
 // setUserTrack, which explains why "first" alone is not enough); the rest
-// are RoleBacking. All tracks are standard tuning with fingerings
-// inferred by internal/fretting. The result always passes Validate.
+// are RoleBacking. A part whose program change names a wind instrument
+// (score.WindByProgram) becomes that wind's single-lane track; every other
+// part is a standard-tuning guitar track with fingerings inferred by
+// internal/fretting. The result always passes Validate.
 func Import(data []byte) (*score.Score, []string, error) {
 	sm, err := smf.ReadFrom(bytes.NewReader(data))
 	if err != nil {
@@ -147,7 +158,8 @@ type rawTrack struct {
 	channel int  // MIDI channel, 0-based
 	split   bool // the file track carried more than one channel
 	name    string
-	program int // program change on this channel, or -1
+	program int                   // program change on this channel, or -1
+	wind    *score.WindInstrument // the instrument the program names, or nil for a fretted part
 	notes   []*rawNote
 }
 
@@ -364,6 +376,12 @@ func (im *importer) splitChannels(ft *fileTrack) []*rawTrack {
 		rt := &rawTrack{index: ft.index, channel: int(ch), split: multi, name: ft.name, program: -1}
 		if p, ok := ft.programs[ch]; ok {
 			rt.program = p
+			// A program change naming a wind instrument makes the part
+			// that instrument. Classification wants explicit evidence: a
+			// part with no program change keeps the guitar default,
+			// because DefaultProgram is an assumption of ours, not
+			// something the file said.
+			rt.wind = score.WindByProgram(p)
 		}
 		if multi {
 			rt.name = partName(ft.name, ch)
@@ -463,13 +481,19 @@ func dedupe[T any](in []T, tick func(T) int64) []T {
 	return out
 }
 
-// normalize quantizes a track's notes to the Grid, shifts
-// below-instrument keys up an octave, infers fingerings via
-// internal/fretting (dropping notes fretting reports unplayable), and
-// truncates overlapping notes on the same string.
+// normalize quantizes a track's notes to the Grid, shifts keys below the
+// part's instrument up an octave, gives every note its string and fret —
+// heuristic fingerings for a fretted part (assignFrets), lane arithmetic
+// for a wind part (assignWind), either of which drops what the instrument
+// cannot sound — and truncates overlapping notes on the same lane.
 func (im *importer) normalize(rt *rawTrack) {
 	moved, shifted := 0, 0
+	// The range floor is the lowest note the part's instrument sounds; the
+	// one-octave rescue below it is the same policy for both families.
 	low := lowestKey(score.StandardTuning, 0)
+	if rt.wind != nil {
+		low = rt.wind.LowSounding
+	}
 	for _, n := range rt.notes {
 		qs, qe := quantize(n.start), quantize(n.end)
 		if qe <= qs {
@@ -498,6 +522,43 @@ func (im *importer) normalize(rt *rawTrack) {
 		return rt.notes[i].key < rt.notes[j].key
 	})
 
+	if rt.wind != nil {
+		im.assignWind(rt)
+	} else {
+		im.assignFrets(rt)
+	}
+	kept := rt.notes[:0]
+	for _, n := range rt.notes {
+		if n.str != 0 {
+			kept = append(kept, n)
+		}
+	}
+	rt.notes = kept
+
+	// A new attack on a string still ringing cuts the ringing note off:
+	// strings are monophonic, and a wind part's whole lane is.
+	truncated := 0
+	last := map[int]*rawNote{}
+	for _, n := range rt.notes {
+		if p := last[n.str]; p != nil && p.end > n.start {
+			p.end = n.start
+			truncated++
+		}
+		last[n.str] = n
+	}
+	if truncated > 0 {
+		if rt.wind != nil {
+			im.warnf("%s: truncated %d note(s) still sounding at the next attack (a %s plays one note at a time)", rt.desc(), truncated, rt.wind.Name)
+		} else {
+			im.warnf("%s: truncated %d note(s) overlapping a later note on the same string", rt.desc(), truncated)
+		}
+	}
+}
+
+// assignFrets gives a fretted part's notes their string and fret via the
+// internal/fretting heuristic, leaving str 0 — dropped — on the notes it
+// reports unplayable.
+func (im *importer) assignFrets(rt *rawTrack) {
 	// Group simultaneous attacks into chords and hand the onset sequence
 	// to the fretting heuristic.
 	var onsets [][]*rawNote
@@ -525,27 +586,49 @@ func (im *importer) normalize(rt *rawTrack) {
 		im.warnf("%s: dropped unplayable note (key %d) at tick %d: %s",
 			rt.desc(), u.Key, onsets[u.Beat][0].start, u.Reason)
 	}
-	kept := rt.notes[:0]
-	for _, n := range rt.notes {
-		if n.str != 0 {
-			kept = append(kept, n)
-		}
-	}
-	rt.notes = kept
+}
 
-	// A new attack on a string still ringing cuts the ringing note off
-	// (strings are monophonic).
-	truncated := 0
-	last := map[int]*rawNote{}
+// assignWind puts a wind part's notes on the instrument's single lane:
+// String 1, Fret counting semitones above the lowest note — arithmetic,
+// not a heuristic, which is why buildTrack does not mark the result
+// Inferred. A key still below the instrument after normalize's octave
+// shift is dropped (str stays 0), mirroring the fretted policy. There is
+// no ceiling to police: an SMF key stops at 127, which Validate already
+// bounds as pitch, and Span caps what the editor offers, not what a piece
+// may hold — altissimo imports as written.
+//
+// The instrument is monophonic, so simultaneous attacks cannot all sound:
+// each same-tick chord keeps its highest note — melody on top, the
+// convention arrangers write by — and the drops are counted into one
+// warning per part rather than reported note by note.
+func (im *importer) assignWind(rt *rawTrack) {
+	w := rt.wind
 	for _, n := range rt.notes {
-		if p := last[n.str]; p != nil && p.end > n.start {
-			p.end = n.start
-			truncated++
+		if n.key < w.LowSounding {
+			im.warnf("%s: dropped unplayable note (key %d) at tick %d: below the %s's lowest note",
+				rt.desc(), n.key, n.start, w.Name)
+			continue
 		}
-		last[n.str] = n
+		note := w.NoteFor(n.key)
+		n.str, n.fret = note.String, note.Fret
 	}
-	if truncated > 0 {
-		im.warnf("%s: truncated %d note(s) overlapping a later note on the same string", rt.desc(), truncated)
+	// rt.notes is sorted by (start, key), so within a same-tick chord the
+	// last playable note is the highest: each collision drops the earlier.
+	dropped := 0
+	var prev *rawNote
+	for _, n := range rt.notes {
+		if n.str == 0 {
+			continue
+		}
+		if prev != nil && prev.start == n.start {
+			prev.str = 0
+			dropped++
+		}
+		prev = n
+	}
+	if dropped > 0 {
+		im.warnf("%s: dropped %d chord note(s), keeping the highest; a %s plays one note at a time",
+			rt.desc(), dropped, w.Name)
 	}
 }
 
@@ -644,9 +727,16 @@ func (im *importer) buildTrack(rt *rawTrack, role score.TrackRole, specs []barSp
 	}
 	tr := &score.Track{
 		Name:    rt.name,
-		Tuning:  score.StandardTuning,
 		Program: program,
 		Role:    role,
+	}
+	// One representation per family: a wind track carries its instrument
+	// and no strings (Tuning nil, Capo 0), a fretted track its tuning —
+	// Validate rejects a mix.
+	if rt.wind != nil {
+		tr.Wind = rt.wind
+	} else {
+		tr.Tuning = score.StandardTuning
 	}
 	// Bucket every note edge that falls strictly inside a bar; an edge
 	// on a barline adds no boundary because the bar's own edges already
@@ -696,10 +786,12 @@ func (im *importer) buildTrack(rt *rawTrack, role score.TrackRole, specs []barSp
 			var notes []score.Note
 			for _, n := range active {
 				notes = append(notes, score.Note{
-					String:   n.str,
-					Fret:     n.fret,
-					Tied:     n.start < segStart,
-					Inferred: true,
+					String: n.str,
+					Fret:   n.fret,
+					Tied:   n.start < segStart,
+					// Inferred marks heuristic fingerings the UI renders
+					// distinctly; a wind lane is arithmetic, not a guess.
+					Inferred: rt.wind == nil,
 				})
 			}
 			sort.Slice(notes, func(i, j int) bool { return notes[i].String > notes[j].String })

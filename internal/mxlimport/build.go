@@ -71,10 +71,23 @@ func barSpecs(meters score.MeterMap, end int64) ([]barSpec, error) {
 func buildTrack(pd *partData, role score.TrackRole, specs []barSpec) *score.Track {
 	tr := &score.Track{
 		Name:    pd.name,
-		Tuning:  pd.tuning,
-		Capo:    pd.capo,
 		Program: pd.program,
 		Role:    role,
+	}
+	if pd.wind != nil {
+		// A wind track has one representation: no Tuning, no Capo
+		// (Validate rejects either alongside Wind). The file's declared
+		// program is kept even when it differs from the registry's — the
+		// file said something, so it wins — but a part classified by name
+		// alone takes the instrument's own program rather than the
+		// importer's guitar default.
+		tr.Wind = pd.wind
+		if !pd.hasProgram {
+			tr.Program = pd.wind.Program
+		}
+	} else {
+		tr.Tuning = pd.tuning
+		tr.Capo = pd.capo
 	}
 	// Bucket every note edge that falls strictly inside a bar; an edge
 	// on a barline adds no boundary because the bar's own edges already

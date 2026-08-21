@@ -39,6 +39,15 @@
 //     (string 1 = the HIGHEST-pitched string, the same convention as the
 //     score model) are used directly when present; notes without them get
 //     an inferred fingering from internal/fretting, marked Inferred.
+//   - A part whose declared MIDI program — or, failing that, whose part
+//     name — names a wind instrument the score model knows imports as a
+//     monophonic wind track: Tuning nil, every note on the single
+//     chromatic lane at sounding pitch. Chords keep only their highest
+//     note, authored <technical> fingerings are ignored, and notes below
+//     the instrument's lowest note (or past MIDI 127) are dropped — each
+//     with a warning. An explicit <staff-tuning> overrides the
+//     classification back to fretted: a real tab staff is stronger
+//     evidence than a program number.
 //   - Everything else unsupported degrades to a warning, never an error;
 //     underfull measures are padded with rests. The result always passes
 //     score.Validate.

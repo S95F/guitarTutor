@@ -107,14 +107,17 @@ func usableFingering(e *xmlNote, tuning score.Tuning, capo int) (str, fret int, 
 
 // A partData is one part's extracted content.
 type partData struct {
-	index   int // part index in the document
-	id      string
-	name    string
-	program int
-	tuning  score.Tuning
-	capo    int
-	notes   []*rawNote
-	end     int64 // end tick of the part's last measure
+	index      int // part index in the document
+	id         string
+	name       string
+	program    int
+	hasProgram bool                  // the file declared a <midi-program>
+	wind       *score.WindInstrument // non-nil: import as a monophonic wind part
+	tuning     score.Tuning
+	capo       int
+	sawTuning  bool // an explicit <staff-tuning> set the tuning
+	notes      []*rawNote
+	end        int64 // end tick of the part's last measure
 }
 
 // parsePart walks one part's measures in play order, maintaining the
@@ -133,6 +136,7 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 		pd.name = decl.PartName
 		if p := decl.midiProgram(); p >= 0 {
 			pd.program = p
+			pd.hasProgram = true
 		}
 	}
 	label := fmt.Sprintf("part %d (%s)", pi+1, xp.ID)
@@ -145,7 +149,7 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 	var open []openTie     // tie starts awaiting their stops
 	// Aggregate warning counters, reported once per part.
 	var rounded, mismatched, otherVoice, otherStaff, grace, badTie, badFing, oversized int
-	var unpitched, noPitch, badDur, badStep, strayChord, pickups, untracked int
+	var unpitched, noPitch, badDur, badStep, strayChord, pickups, untracked, authoredFing int
 
 	// setMeter records the shared bar structure's meter, and only where it
 	// actually changes. barSpecs lays the bars out from this map, so it has
@@ -249,6 +253,7 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 					sd := &e.StaffDetails[i]
 					if tun, ok, why := sd.tuning(); ok {
 						pd.tuning = tun
+						pd.sawTuning = true
 					} else if why != "" {
 						im.warnf("%s: %s; keeping the current tuning", label, why)
 					}
@@ -371,8 +376,11 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 				// The fingering is resolved before the tie so the authored
 				// string can take part in identifying the tie chain.
 				str, fret, authored, usable := usableFingering(e, pd.tuning, pd.capo)
-				if authored && !usable {
-					badFing++
+				if authored {
+					authoredFing++
+					if !usable {
+						badFing++
+					}
 				}
 				stop, tieStart, tieNum := e.tie()
 				if stop {
@@ -450,6 +458,24 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 	}
 	pd.end = measureStart
 
+	// Wind classification: the declared General MIDI program is the
+	// primary signal, the part name the fallback for files that carry no
+	// MIDI block at all. An explicit <staff-tuning> overrides both — a
+	// real tab staff, with authored string lines, is stronger evidence of
+	// a fretted instrument than a program number or a label — so the part
+	// stays fretted and the conflict is reported, never silently resolved.
+	wind := score.WindByProgram(pd.program)
+	if wind == nil {
+		wind = score.WindByName(pd.name)
+	}
+	if wind != nil {
+		if pd.sawTuning {
+			im.warnf("%s: MIDI program or part name says %s, but an explicit <staff-tuning> declares a tab staff; the tab staff wins and the part imports as fretted", label, wind.Name)
+		} else {
+			pd.wind = wind
+		}
+	}
+
 	if grace > 0 {
 		im.warnf("%s: skipped %d grace note(s) (not in the import subset)", label, grace)
 	}
@@ -483,13 +509,21 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 	if untracked > 0 {
 		im.warnf("%s: %d tie start(s) past the %d unresolved-tie limit were not tracked; their notes are separate attacks", label, untracked, maxOpenTies)
 	}
-	if badFing > 0 {
+	// A wind part has no strings to check an authored fingering against,
+	// so <technical> is not honored there at all — the pitch alone decides
+	// the lane position. One warning covers both the in-range and the
+	// out-of-range kind; the fretted-only warnings below would mislead
+	// (nothing is inferred, and the fingering never wins).
+	if pd.wind != nil && authoredFing > 0 {
+		im.warnf("%s: ignored authored <technical> string/fret on %d note(s); a %s has no strings to check them against", label, authoredFing, pd.wind.Name)
+	}
+	if pd.wind == nil && badFing > 0 {
 		im.warnf("%s: %d note(s) with out-of-range <technical> string/fret; fingering inferred instead", label, badFing)
 	}
 	if oversized > 0 {
 		im.warnf("%s: skipped %d note(s) whose duration or position rescales past the %d-tick score limit", label, oversized, int64(MaxTicks))
 	}
-	if mismatched > 0 {
+	if pd.wind == nil && mismatched > 0 {
 		im.warnf("%s: %d note(s) whose written pitch disagrees with tuning+capo+fret; the fingering wins (pitch is derived)", label, mismatched)
 	}
 	if rounded > 0 {
@@ -545,11 +579,13 @@ func (im *importer) recordTempo(measureStart, cursor, divisions int64, bpm float
 	im.tempos = append(im.tempos, score.Tempo{Tick: tick, USPerQuarter: score.USPerQuarter(bpm)})
 }
 
-// finish completes a parsed part: notes are sorted, notes without authored
-// fingering get one from internal/fretting (marked Inferred; unplayable
-// keys are dropped with a warning) placed around the fingerings the
-// authored notes at the same onset already hold, and overlapping notes on
-// the same string are truncated (strings are monophonic).
+// finish completes a parsed part. Notes are sorted, then placed: on a
+// fretted part, notes without authored fingering get one from
+// internal/fretting (marked Inferred; unplayable keys are dropped with a
+// warning) placed around the fingerings the authored notes at the same
+// onset already hold; on a wind part, finishWind computes the single-lane
+// placement instead — no heuristic runs. Overlapping notes on the same
+// string are then truncated (strings, and the wind lane, are monophonic).
 func (im *importer) finish(pd *partData) {
 	label := fmt.Sprintf("part %d (%s)", pd.index+1, pd.id)
 	sort.SliceStable(pd.notes, func(i, j int) bool {
@@ -559,6 +595,101 @@ func (im *importer) finish(pd *partData) {
 		return pd.notes[i].key < pd.notes[j].key
 	})
 
+	if pd.wind != nil {
+		im.finishWind(pd, label)
+	} else {
+		im.finishFretted(pd, label)
+	}
+
+	// A new attack on a string still ringing cuts the ringing note off.
+	// On a wind part every note sits on lane 1, so this same rule is what
+	// makes overlapping notes sequential — the one-note-per-beat shape
+	// Validate demands of a monophonic instrument.
+	truncated := 0
+	last := map[int]*rawNote{}
+	for _, n := range pd.notes {
+		if p := last[n.str]; p != nil && p.end > n.start {
+			p.end = n.start
+			truncated++
+		}
+		last[n.str] = n
+	}
+	if truncated > 0 {
+		im.warnf("%s: truncated %d note(s) overlapping a later note on the same string", label, truncated)
+	}
+	// Truncating to zero length is a dropped note, not a shortened one —
+	// two attacks on one string at the same tick, which only a file
+	// authoring the same string twice in a chord can produce. Say so.
+	collapsed := 0
+	kept := pd.notes[:0]
+	for _, n := range pd.notes {
+		if n.end > n.start {
+			kept = append(kept, n)
+			continue
+		}
+		collapsed++
+	}
+	pd.notes = kept
+	if collapsed > 0 {
+		im.warnf("%s: dropped %d note(s) left zero-length by another attack on the same string at the same tick", label, collapsed)
+	}
+}
+
+// finishWind places a wind part's notes on the instrument's single
+// chromatic lane: every note gets str 1 and fret key−LowSounding. The
+// lane is arithmetic, not a heuristic, so fretAssign never runs and
+// nothing is marked Inferred. Any authored <technical> fingering was
+// already discounted during parsing (a wind part has no strings to check
+// it against).
+//
+// A <chord> resolves to its HIGHEST key — the melody rides on top of a
+// voicing far more often than under it — and the rest of the chord is
+// dropped, counted once per part. Out-of-range notes are dropped, never
+// octave-rewritten: MusicXML pitch (written plus <transpose>) is
+// authoritative, and rewriting it would silently change the music. Below,
+// the floor is the instrument's lowest note; above, MIDI 127 is the only
+// ceiling — altissimo is real playing and imports fine.
+func (im *importer) finishWind(pd *partData, label string) {
+	w := pd.wind
+	chords := 0
+	kept := pd.notes[:0]
+	for i := 0; i < len(pd.notes); {
+		j := i
+		for j+1 < len(pd.notes) && pd.notes[j+1].start == pd.notes[i].start {
+			j++
+		}
+		if j > i {
+			chords++
+		}
+		// The sort is by start then key, so the group's last note is its
+		// highest.
+		kept = append(kept, pd.notes[j])
+		i = j + 1
+	}
+	pd.notes = kept
+	if chords > 0 {
+		im.warnf("%s: kept only the highest note of %d chord(s); a %s plays one note at a time", label, chords, w.Name)
+	}
+	kept = pd.notes[:0]
+	for _, n := range pd.notes {
+		if n.key < w.LowSounding {
+			im.warnf("%s: dropped note (key %d) at tick %d: below the %s's lowest note (key %d)", label, n.key, n.start, w.Name, w.LowSounding)
+			continue
+		}
+		if n.key > 127 {
+			im.warnf("%s: dropped note (key %d) at tick %d: past MIDI 127", label, n.key, n.start)
+			continue
+		}
+		p := w.NoteFor(n.key)
+		n.str, n.fret = p.String, p.Fret
+		kept = append(kept, n)
+	}
+	pd.notes = kept
+}
+
+// finishFretted assigns a fretted part's missing fingerings with
+// internal/fretting and drops what stays unplayable.
+func (im *importer) finishFretted(pd *partData, label string) {
 	// The fingerings an authored note already holds, per onset. A chord
 	// that mixes authored and unfingered notes used to lose a note here:
 	// the heuristic, told nothing about the authored notes, could put an
@@ -609,36 +740,6 @@ func (im *importer) finish(pd *partData) {
 			}
 		}
 		pd.notes = kept
-	}
-
-	// A new attack on a string still ringing cuts the ringing note off.
-	truncated := 0
-	last := map[int]*rawNote{}
-	for _, n := range pd.notes {
-		if p := last[n.str]; p != nil && p.end > n.start {
-			p.end = n.start
-			truncated++
-		}
-		last[n.str] = n
-	}
-	if truncated > 0 {
-		im.warnf("%s: truncated %d note(s) overlapping a later note on the same string", label, truncated)
-	}
-	// Truncating to zero length is a dropped note, not a shortened one —
-	// two attacks on one string at the same tick, which only a file
-	// authoring the same string twice in a chord can produce. Say so.
-	collapsed := 0
-	kept := pd.notes[:0]
-	for _, n := range pd.notes {
-		if n.end > n.start {
-			kept = append(kept, n)
-			continue
-		}
-		collapsed++
-	}
-	pd.notes = kept
-	if collapsed > 0 {
-		im.warnf("%s: dropped %d note(s) left zero-length by another attack on the same string at the same tick", label, collapsed)
 	}
 }
 
