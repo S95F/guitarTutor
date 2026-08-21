@@ -1,0 +1,11 @@
+\title Sax Line
+\tempo 96
+\time 4/4
+\instrument soprano sax
+// Written pitch, as a soprano sax player reads it: sounding a major
+// second lower. l = slurred, s = slide (scoop), v = vibrato.
+
+D5.8 E5.8 G5.4 A5.4l B5.8v A5.8 |
+G5.4 E5.4l D5.2v |
+r.4 D5.8 E5.8 G5.4s A5.4 |
+B5.2v ~B5.2

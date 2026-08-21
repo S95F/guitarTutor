@@ -99,7 +99,9 @@ func (ts Meter) BeatLen() int64 { return 4 * PPQ / int64(ts.Den) }
 
 // Validate checks structural invariants: sorted maps starting at tick 0,
 // bars whose beats exactly fill them, contiguous beat starts, and notes
-// with valid string and fret numbers.
+// that fit their track's instrument — valid string and fret numbers on a
+// fretted track, one note per beat on a single in-range chromatic lane on
+// a wind track.
 func (s *Score) Validate() error {
 	if len(s.Tempos) == 0 || s.Tempos[0].Tick != 0 {
 		return fmt.Errorf("tempo map must start at tick 0")
@@ -131,8 +133,18 @@ func (s *Score) Validate() error {
 		}
 	}
 	for ti, tr := range s.Tracks {
-		if len(tr.Tuning) == 0 {
+		if tr.Wind == nil && len(tr.Tuning) == 0 {
 			return fmt.Errorf("track %d (%s): no tuning", ti, tr.Name)
+		}
+		if tr.Wind != nil {
+			// One representation per track: a wind part that also carried
+			// strings or a capo would give Pitch two answers.
+			if len(tr.Tuning) != 0 {
+				return fmt.Errorf("track %d (%s): a %s has no strings, but the track carries a tuning", ti, tr.Name, tr.Wind.Name)
+			}
+			if tr.Capo != 0 {
+				return fmt.Errorf("track %d (%s): a %s has no capo", ti, tr.Name, tr.Wind.Name)
+			}
 		}
 		wantStart := int64(0)
 		for bi, bar := range tr.Bars {
@@ -148,12 +160,27 @@ func (s *Score) Validate() error {
 				if beat.Dur <= 0 {
 					return fmt.Errorf("track %d bar %d: non-positive beat duration", ti, bi)
 				}
+				if tr.Wind != nil && len(beat.Notes) > 1 {
+					return fmt.Errorf("track %d bar %d: %d notes in one beat; a %s plays one note at a time", ti, bi, len(beat.Notes), tr.Wind.Name)
+				}
 				for _, n := range beat.Notes {
-					if n.String < 1 || n.String > len(tr.Tuning) {
-						return fmt.Errorf("track %d bar %d: string %d out of range", ti, bi, n.String)
-					}
-					if n.Fret < 0 {
-						return fmt.Errorf("track %d bar %d: negative fret", ti, bi)
+					if tr.Wind != nil {
+						if n.String != 1 {
+							return fmt.Errorf("track %d bar %d: string %d on a %s, whose one lane is string 1", ti, bi, n.String, tr.Wind.Name)
+						}
+						if n.Fret < 0 {
+							return fmt.Errorf("track %d bar %d: note below the %s's lowest note", ti, bi, tr.Wind.Name)
+						}
+						if n.Tech&(TechPull|TechDead) != 0 {
+							return fmt.Errorf("track %d bar %d: pull-offs and dead notes do not exist on a %s", ti, bi, tr.Wind.Name)
+						}
+					} else {
+						if n.String < 1 || n.String > len(tr.Tuning) {
+							return fmt.Errorf("track %d bar %d: string %d out of range", ti, bi, n.String)
+						}
+						if n.Fret < 0 {
+							return fmt.Errorf("track %d bar %d: negative fret", ti, bi)
+						}
 					}
 					if k := tr.Pitch(n); k < 0 || k > 127 {
 						return fmt.Errorf("track %d bar %d: string %d fret %d sounds MIDI key %d, outside 0-127", ti, bi, n.String, n.Fret, k)

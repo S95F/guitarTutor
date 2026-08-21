@@ -3,8 +3,9 @@
 // Ticks are authoritative: every position and duration is expressed in
 // MIDI-style ticks at PPQ pulses per quarter note, and wall-clock time is
 // always derived through the TempoMap (see ROADMAP.md "Guiding principles").
-// Pitch is always derived from tuning + capo + fret, never stored, so
-// altered tunings and transposition come for free.
+// Pitch is always derived, never stored: from tuning + capo + fret on a
+// fretted track, and from the instrument's lowest note + a semitone offset
+// on a wind track — so altered tunings and transposition come for free.
 package score
 
 import "fmt"
@@ -55,13 +56,20 @@ type Track struct {
 	// Tuning holds the open-string MIDI note per string, indexed by
 	// string number - 1. String 1 is the highest-pitched string (standard
 	// tab convention), so index 0 is high E on a standard-tuned guitar.
+	// A wind track has no strings: its Tuning is nil.
 	Tuning Tuning
-	// Capo is the capo fret; it shifts every note's pitch up.
+	// Capo is the capo fret; it shifts every note's pitch up. Always 0 on
+	// a wind track.
 	Capo int
 	// Program is a General MIDI program hint for synthesis (0-127).
 	Program int
-	Role    TrackRole
-	Bars    []*Bar
+	// Wind identifies the track as a monophonic wind part — nil means a
+	// fretted instrument. A wind track's notes live on one chromatic
+	// lane: String is always 1 and Fret counts semitones above the
+	// instrument's lowest note (see WindInstrument).
+	Wind *WindInstrument
+	Role TrackRole
+	Bars []*Bar
 }
 
 // Tuning is a set of open-string MIDI notes, highest-pitched string first.
@@ -116,8 +124,16 @@ func TuningName(t Tuning) string {
 	return "altered tuning"
 }
 
-// Pitch derives a note's MIDI key from the track's tuning and capo.
-func (t *Track) Pitch(n Note) int { return t.Tuning[n.String-1] + t.Capo + n.Fret }
+// Pitch derives a note's sounding MIDI key: from the track's tuning and
+// capo on a fretted track, from the instrument's lowest note on a wind
+// track. Wind pitch is sounding (concert) pitch — the written pitch a
+// player reads is a display concern, reached through WindInstrument.
+func (t *Track) Pitch(n Note) int {
+	if t.Wind != nil {
+		return t.Wind.LowSounding + n.Fret
+	}
+	return t.Tuning[n.String-1] + t.Capo + n.Fret
+}
 
 // A Bar is one measure. Start and the meter are denormalized onto the bar
 // (they are derivable from the maps) because every consumer needs them.
@@ -148,6 +164,14 @@ const (
 	TechBend                          // bend
 	TechVibrato                       // vibrato
 	TechDead                          // dead/muted note (x)
+
+	// TechSlur marks a wind note slurred from its predecessor: the pitch
+	// changes without a fresh attack (no new tongue). It is deliberately
+	// the same bit as TechHammer — both mean exactly that to the engine's
+	// articulation, and one bit with two instrument-appropriate names
+	// beats two bits with one meaning. TechPull and TechDead never appear
+	// on wind tracks (Validate refuses them).
+	TechSlur = TechHammer
 )
 
 // A Note is one string+fret event within a beat.

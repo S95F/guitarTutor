@@ -47,6 +47,13 @@ type parser struct {
 	sticky int64        // sticky beat duration in ticks (initially a quarter)
 	sawBar bool         // any bar begun anywhere in the piece
 
+	// Whether the current track stated these explicitly, so \instrument
+	// can tell an authored \program from the default it would otherwise
+	// replace, and can refuse to follow string directives.
+	progSet   bool
+	tuningSet bool
+	capoSet   bool
+
 	pendingTempo     *float64 // \tempo awaiting the next bar, in BPM
 	pendingTempoTick int64    // piece tick where the pending \tempo takes effect
 	pendingMeter     *[2]int  // \time awaiting the next bar, as {num, den}
@@ -120,7 +127,8 @@ func (p *parser) ensureTrack() *score.Track {
 }
 
 // newTrack appends a track with the format's defaults: standard E
-// tuning, no capo, steel-string acoustic program, user role.
+// tuning, no capo, steel-string acoustic program, user role. \instrument
+// swaps the string defaults out again for a wind part.
 func (p *parser) newTrack(name string) *score.Track {
 	tr := &score.Track{
 		Name:    name,
@@ -128,6 +136,7 @@ func (p *parser) newTrack(name string) *score.Track {
 		Program: defaultProgram,
 	}
 	p.score.Tracks = append(p.score.Tracks, tr)
+	p.progSet, p.tuningSet, p.capoSet = false, false, false
 	return tr
 }
 
@@ -262,6 +271,9 @@ func (p *parser) beatWord(tied bool) error {
 // also carry their own "~". start is the beat's source position.
 func (p *parser) beatChord(tied bool, start pos) error {
 	p.ensureTrack()
+	if w := p.track.Wind; w != nil {
+		return p.errAt(start, "chord on a %s, which plays one note at a time", w.Name)
+	}
 	p.sc.next() // consume "("
 	var notes []score.Note
 	seen := map[int]bool{} // string numbers already used in this chord
@@ -333,9 +345,12 @@ func (p *parser) beatChord(tied bool, start pos) error {
 	return p.addBeat(start, dur, notes...)
 }
 
-// noteCore parses "fret.string" at the token cursor, checking the fret
-// and string ranges against the current track.
+// noteCore parses one note at the token cursor: "fret.string" on a
+// fretted track, a written pitch name on a wind track.
 func (p *parser) noteCore(t *tokScan, tied bool) (score.Note, error) {
+	if w := p.track.Wind; w != nil {
+		return p.windNote(t, w, tied)
+	}
 	fp := t.pos()
 	fret, ok := t.uint()
 	if !ok {
@@ -364,6 +379,29 @@ func (p *parser) noteCore(t *tokScan, tied bool) (score.Note, error) {
 			key, p.track.Tuning[str-1], p.track.Capo, fret)
 	}
 	return score.Note{String: str, Fret: fret, Tied: tied}, nil
+}
+
+// windNote parses a written pitch name ("D5", "Bb4", "F#5") at the token
+// cursor — the note a wind player reads — and converts it through the
+// instrument's transposition onto the track's one chromatic lane:
+// String 1, Fret counting semitones above the instrument's lowest note.
+// The instrument's Span is deliberately not enforced here: notes above
+// the standard range are altissimo, which is hard, not unwritable.
+func (p *parser) windNote(t *tokScan, w *score.WindInstrument, tied bool) (score.Note, error) {
+	np := t.pos()
+	written, ok := t.pitch()
+	if !ok {
+		return score.Note{}, p.errAt(np, "malformed beat %q: a %s note is a written pitch name like %s", t.tok, w.Name, pitchName(w.Written(w.LowSounding)))
+	}
+	name := t.tok[:t.i]
+	sounding := w.Sounding(written)
+	if sounding < w.LowSounding {
+		return score.Note{}, p.errAt(np, "%s is below the %s's lowest note, %s", name, w.Name, pitchName(w.Written(w.LowSounding)))
+	}
+	if sounding > 127 {
+		return score.Note{}, p.errAt(np, "%s sounds MIDI key %d, above 127", name, sounding)
+	}
+	return score.Note{String: 1, Fret: sounding - w.LowSounding, Tied: tied}, nil
 }
 
 // duration parses ".N" (plain), ".N." (dotted), or ".Nt" (triplet) at
@@ -404,13 +442,21 @@ func (p *parser) duration(t *tokScan) (int64, error) {
 }
 
 // techniques parses the technique letters that end a beat token, or-ing
-// them into the note's bitmask.
+// them into the note's bitmask. The letters are the current track's
+// instrument family's: a wind part slurs and scoops where a guitar
+// hammers and mutes, and accepting a letter the instrument cannot play
+// would be writing down something nobody can do.
 func (p *parser) techniques(t *tokScan, n *score.Note) error {
+	wind := p.track.Wind != nil
 	for t.i < len(t.tok) {
-		tech, ok := techFor(t.tok[t.i])
+		tech, ok := techFor(t.tok[t.i], wind)
 		if !ok {
 			r, _ := utf8.DecodeRuneInString(t.tok[t.i:])
-			return p.errAt(t.pos(), "unknown technique %q (valid: h p s b v x)", string(r))
+			valid := "h p s b v x"
+			if wind {
+				valid = "l s b v"
+			}
+			return p.errAt(t.pos(), "unknown technique %q (valid: %s)", string(r), valid)
 		}
 		n.Tech |= tech
 		t.i++
@@ -418,8 +464,23 @@ func (p *parser) techniques(t *tokScan, n *score.Note) error {
 	return nil
 }
 
-// techFor maps a technique letter to its score.Technique bit.
-func techFor(c byte) (score.Technique, bool) {
+// techFor maps a technique letter to its score.Technique bit, in the
+// current instrument family's alphabet. Both alphabets are mirrored by
+// write.go's techString tables — the four lists must stay in step.
+func techFor(c byte, wind bool) (score.Technique, bool) {
+	if wind {
+		switch c {
+		case 'l':
+			return score.TechSlur, true
+		case 's':
+			return score.TechSlide, true
+		case 'b':
+			return score.TechBend, true
+		case 'v':
+			return score.TechVibrato, true
+		}
+		return 0, false
+	}
 	switch c {
 	case 'h':
 		return score.TechHammer, true
@@ -505,10 +566,40 @@ func (p *parser) directive() error {
 		p.sticky = score.Quarter
 		return nil
 
+	case "instrument":
+		if err := p.trackDirective(tp, `\instrument`); err != nil {
+			return err
+		}
+		iname := p.sc.restOfLine()
+		if iname == "" {
+			return p.errAt(tp, `\instrument requires an instrument name`)
+		}
+		w := score.WindByName(iname)
+		if w == nil {
+			return p.errAt(tp, "unknown instrument %q (this app knows: %s)", iname, strings.Join(score.WindNames(), ", "))
+		}
+		if p.track.Wind != nil {
+			return p.errAt(tp, "the track is already a %s", p.track.Wind.Name)
+		}
+		if p.tuningSet || p.capoSet {
+			return p.errAt(tp, `\instrument cannot follow \tuning or \capo: a %s has no strings`, w.Name)
+		}
+		p.track.Wind = w
+		p.track.Tuning = nil
+		p.track.Capo = 0
+		if !p.progSet {
+			p.track.Program = w.Program
+		}
+		return nil
+
 	case "tuning":
 		if err := p.trackDirective(tp, `\tuning`); err != nil {
 			return err
 		}
+		if w := p.track.Wind; w != nil {
+			return p.errAt(tp, `\tuning on a %s, which has no strings`, w.Name)
+		}
+		p.tuningSet = true
 		args := p.sc.args()
 		if len(args) == 0 {
 			return p.errAt(tp, `\tuning requires at least one note`)
@@ -530,6 +621,10 @@ func (p *parser) directive() error {
 		if err := p.trackDirective(tp, `\capo`); err != nil {
 			return err
 		}
+		if w := p.track.Wind; w != nil {
+			return p.errAt(tp, `\capo on a %s, which has no capo`, w.Name)
+		}
+		p.capoSet = true
 		arg, err := p.oneArg(tp, name)
 		if err != nil {
 			return err
@@ -545,6 +640,7 @@ func (p *parser) directive() error {
 		if err := p.trackDirective(tp, `\program`); err != nil {
 			return err
 		}
+		p.progSet = true
 		arg, err := p.oneArg(tp, name)
 		if err != nil {
 			return err
@@ -756,6 +852,60 @@ func (t *tokScan) uint() (int, bool) {
 		return 0, false // overflow
 	}
 	return n, true
+}
+
+// pitch consumes a scientific pitch name at the cursor — a letter A-G in
+// either case, an optional # or b, and an octave (middle C = C4 = MIDI
+// 60) — and returns its MIDI key. Unlike parsePitch it does not accept a
+// bare MIDI number: inside a beat token digits are frets and durations,
+// and a number that meant a pitch on one track and a fret on another
+// would be a trap.
+func (t *tokScan) pitch() (int, bool) {
+	if t.i >= len(t.tok) {
+		return 0, false
+	}
+	c := t.tok[t.i]
+	if c >= 'a' && c <= 'g' {
+		c -= 'a' - 'A'
+	}
+	var base int
+	switch c {
+	case 'C':
+		base = 0
+	case 'D':
+		base = 2
+	case 'E':
+		base = 4
+	case 'F':
+		base = 5
+	case 'G':
+		base = 7
+	case 'A':
+		base = 9
+	case 'B':
+		base = 11
+	default:
+		return 0, false
+	}
+	t.i++
+	acc := 0
+	if t.i < len(t.tok) {
+		switch t.tok[t.i] {
+		case '#':
+			acc, t.i = 1, t.i+1
+		case 'b':
+			acc, t.i = -1, t.i+1
+		}
+	}
+	oct, ok := t.uint()
+	if !ok {
+		return 0, false
+	}
+	key := (oct+1)*12 + base + acc
+	if key < 0 || key > 127 {
+		return 0, false
+	}
+	return key, true
 }
 
 // rest returns the unconsumed remainder of the token.

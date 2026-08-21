@@ -17,6 +17,7 @@ import (
 var gtabFixtures = []string{
 	"../../../testdata/fixture_riff.gtab",
 	"../../../testdata/fixture_rich.gtab",
+	"../../../testdata/fixture_sax.gtab",
 }
 
 // parseFixture reads and parses one fixture, failing the test if it does

@@ -88,6 +88,7 @@ type writer struct {
 	sc  *score.Score
 	b   strings.Builder
 	ctx string // the bar being written, for error messages
+	tr  *score.Track // the track being written, for its instrument
 
 	sticky int64
 
@@ -150,6 +151,7 @@ func (w *writer) header() error {
 
 // track writes one track: its header directives, then its bars.
 func (w *writer) track(i int, tr *score.Track) error {
+	w.tr = tr
 	w.b.WriteString("\n")
 	// Where the track's own directives begin, so the blank line that
 	// separates them from its bars is only written when there are any: an
@@ -171,7 +173,11 @@ func (w *writer) track(i int, tr *score.Track) error {
 		}
 		fmt.Fprintf(&w.b, "\\track %s\n", name)
 	}
-	if !sameTuning(tr.Tuning, score.StandardTuning) {
+	if tr.Wind != nil {
+		// A wind track's pitch reference is its instrument; Validate has
+		// already refused one carrying a tuning or a capo.
+		fmt.Fprintf(&w.b, "\\instrument %s\n", tr.Wind.Name)
+	} else if !sameTuning(tr.Tuning, score.StandardTuning) {
 		// The file lists open strings low to high; the model stores the
 		// highest-pitched string first.
 		names := make([]string, len(tr.Tuning))
@@ -189,7 +195,14 @@ func (w *writer) track(i int, tr *score.Track) error {
 		}
 		fmt.Fprintf(&w.b, "\\capo %d\n", tr.Capo)
 	}
-	if tr.Program != defaultProgram {
+	// The program a track's instrument implies is the one worth leaving
+	// out: for a fretted track the format's steel-string default, for a
+	// wind track the instrument's own.
+	trackDefaultProgram := defaultProgram
+	if tr.Wind != nil {
+		trackDefaultProgram = tr.Wind.Program
+	}
+	if tr.Program != trackDefaultProgram {
 		if tr.Program < 0 || tr.Program > 127 {
 			return fmt.Errorf("gtab: track %d: program %d is outside 0-127", i+1, tr.Program)
 		}
@@ -288,7 +301,7 @@ func (w *writer) beat(bt *score.Beat) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return s + dur + techString(n.Tech), nil
+		return s + dur + techString(n.Tech, w.tr.Wind != nil), nil
 	}
 
 	// A chord every note of which is tied is written with one "~" in front
@@ -316,7 +329,7 @@ func (w *writer) beat(bt *score.Beat) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		parts = append(parts, s+techString(n.Tech))
+		parts = append(parts, s+techString(n.Tech, false))
 	}
 	prefix := "("
 	if allTied {
@@ -327,10 +340,22 @@ func (w *writer) beat(bt *score.Beat) (string, error) {
 	return prefix + strings.Join(parts, " ") + ")" + dur, nil
 }
 
-// noteToken renders a note's tie marker, fret and string — everything but
+// noteToken renders a note's tie marker and pitch — "fret.string" on a
+// fretted track, a written pitch name on a wind track — everything but
 // its duration and techniques, which sit in different places for a chord
 // than for a lone note.
 func (w *writer) noteToken(n score.Note) (string, error) {
+	if wind := w.tr.Wind; wind != nil {
+		written := wind.Written(w.tr.Pitch(n))
+		if written < 0 || written > 127 {
+			return "", fmt.Errorf("gtab: %s: the note's written pitch is MIDI key %d, which no note name can hold", w.ctx, written)
+		}
+		s := pitchName(written)
+		if n.Tied {
+			s = "~" + s
+		}
+		return s, nil
+	}
 	if n.Fret < 0 || n.Fret > maxFret {
 		return "", fmt.Errorf("gtab: %s: fret %d is outside 0-%d", w.ctx, n.Fret, maxFret)
 	}
@@ -341,11 +366,12 @@ func (w *writer) noteToken(n score.Note) (string, error) {
 	return s, nil
 }
 
-// techString renders a note's techniques in the format's own letter
-// order, so the same set of bits always writes the same way.
-func techString(t score.Technique) string {
-	var b strings.Builder
-	for _, e := range []struct {
+// techString renders a note's techniques in the instrument family's own
+// letter order, so the same set of bits always writes the same way. Both
+// tables mirror the parser's techFor alphabets — the four lists must stay
+// in step.
+func techString(t score.Technique, wind bool) string {
+	table := []struct {
 		bit  score.Technique
 		char byte
 	}{
@@ -355,7 +381,20 @@ func techString(t score.Technique) string {
 		{score.TechBend, 'b'},
 		{score.TechVibrato, 'v'},
 		{score.TechDead, 'x'},
-	} {
+	}
+	if wind {
+		table = []struct {
+			bit  score.Technique
+			char byte
+		}{
+			{score.TechSlur, 'l'},
+			{score.TechSlide, 's'},
+			{score.TechBend, 'b'},
+			{score.TechVibrato, 'v'},
+		}
+	}
+	var b strings.Builder
+	for _, e := range table {
 		if t&e.bit != 0 {
 			b.WriteByte(e.char)
 		}
