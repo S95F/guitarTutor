@@ -59,7 +59,7 @@ Lightweight decision records for musicTutor. Each records what was chosen, what 
 
 **Consequences:** A WAV fixture corpus of real recorded guitar (per technique, per pickup) is built *before* any threshold tuning. Octave-error guards for distorted signals; docs recommend a clean/DI signal for scoring. Ubisoft's Rocksmith-era detection patents are sidestepped by implementing chord verification from the published chroma-template literature (Oudre et al.), which predates them as prior art.
 
-**Amendment (D8, winds):** the monophonic core was the right long bet — a wind part flows through the untouched f0 path. What became per-instrument is the configuration: `pitch.ConfigForKeys` fits the search range to the scored track's compass (the guitar default's 1500 Hz ceiling sits three semitones over a soprano sax's top E6), and a wind session wires no strum callback at all — no chords to verify, and breath noise must not claim the palm-mute deadline credit. The onset thresholds remain tuned on pick attacks; soft same-pitch tonguing that never opens an 8 dB gap can merge two notes into one, which is a documented gap awaiting real recordings, not a claim.
+**Amendment (D8, winds):** the monophonic core was the right long bet — a wind part flows through the untouched f0 path. What became per-instrument is the configuration: `pitch.ConfigForKeys` fits the search range to the scored track's compass (the guitar default's 1500 Hz ceiling sits three semitones over a soprano sax's top E6), and a wind session wires no strum callback at all — no chords to verify, and breath noise must not claim the palm-mute deadline credit. The onset thresholds were tuned on pick attacks; wind configs since gained a third trigger beside the level edge and the spectral flux — a dip-recovery path that reads a ≥ 5 dB dip below the smoothed level recovering within ~8 hops as a re-articulation — so soft same-pitch tonguing splits instead of merging. Its numbers are measured against the reed voice and stay provisional until real recordings exist.
 
 ## D5 — Product scope: practice player first, detection second
 
@@ -109,12 +109,13 @@ Gamification was rejected as a retention funnel, and **that judgment stands** �
 
 **What the player sees:** written pitch everywhere. A soprano sax player fingering a written D5 is told D5 by the practice view, the editor's text, and the tuner, while the synth sounds and the microphone hears the concert C5 underneath. Teaching a transposing player concert names would be technically true and pedagogically wrong.
 
-**Scope honestly drawn (what did NOT land with D8):**
+**Scope honestly drawn (what did NOT land with D8, and what closed since):**
 
-- The notation grid cannot hold a wind part; wind pieces open in the editor's **text view**, which round-trips them completely. The refusal names the instrument and the fallback.
-- Guitar Pro wind parts are not imported (their per-note warnings are the evidence trail for the pitch properties real files use); MIDI and MusicXML wind parts are.
-- MusicXML slurs are not yet mapped to `TechSlur` — imported wind lines arrive tongued.
-- Every wind detection number is synthesis-validated only (the round trip scores 14/14 on the reed voice); real sax recordings — mic bleed, breath noise, soft tonguing — are the same validation gap D4 has always named for guitar, and the corpus has no wind category yet.
+- ~~The notation grid cannot hold a wind part; wind pieces open in the editor's **text view**.~~ *Closed:* the grid grew a wind mode — a fixed pitch ladder at the instrument's compass (the same written-pitch reading the practice view teaches), note-letter entry with semitone/octave arrows, the wind mark set on the toolbar — and every new piece or track now starts with an instrument picker. The text view went back to being a view.
+- ~~Guitar Pro wind parts are not imported.~~ *Closed:* clean-room `ConcertPitch`/`TransposedPitch` reading, with the instrument resolved structurally (declared GM program, or the consistent written-minus-concert transposition plus range — never the track's name) and any authored tuning or fingering vetoing the wind path. Ambiguity keeps the skip-with-warnings behavior, so the per-note warnings remain the evidence trail for what real files carry.
+- ~~MusicXML slurs are not yet mapped to `TechSlur`.~~ *Closed:* slur start/stop elements now arrive as the slur bit, surviving the range filter and chord collapse.
+- ~~Soft same-pitch tonguing can merge into one detection.~~ *Closed for synthesis:* wind detector configs arm a dip-recovery onset path (a ≥ 5 dB dip below the smoothed level recovering within ~8 hops is a re-articulation), catching the soft strokes whose spectral flux never fires. The thresholds are measured against the reed voice and stay provisional.
+- Every wind detection number is still synthesis-validated only (the round trip scores 14/14 on the reed voice); real sax recordings — mic bleed, breath noise, soft tonguing — are the same validation gap D4 has always named for guitar. The corpus harness now has a wind category with a filename-is-the-expectation contract (docs/TESTDATA.md), skipped while it is empty; the recordings themselves remain the open item.
 
 **Rejected:**
 - **Pitch-storing wind notes** — forks the model's one invariant; see above.

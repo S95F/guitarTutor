@@ -58,9 +58,10 @@ musicTutor aims to fill it with the practice loop every musician converges on �
 **The multi-instrument turn — monophonic winds (core landed)**
 
 - A wind instrument registry — soprano/alto/tenor/baritone sax, flute, clarinet, trumpet — carrying each horn's range, written transposition, and General MIDI program
-- Wind parts in `.gtab` (written-pitch notes, `\instrument`, slurs), from MIDI/MusicXML imports, on a built-in sustained reed voice, drawn as a pitch ladder of the names the player actually reads
-- Detection fitted per instrument; a held long tone can never be force-missed by a decay assumption
-- Still open: real-recording validation (everything is synthesis so far), wind parts in the notation editor (the text view carries them today), Guitar Pro wind parts
+- Wind parts in `.gtab` (written-pitch notes, `\instrument`, slurs), from MIDI, MusicXML and Guitar Pro imports, on a built-in sustained reed voice, drawn as a pitch ladder of the names the player actually reads
+- A wind notation editor: every new piece and new track asks what it will be played on, and a horn part gets the same pitch ladder as the practice view — type A–G to place a note, arrows move it by semitone or octave
+- Detection fitted per instrument — a held long tone can never be force-missed by a decay assumption, and soft same-pitch tonguing splits on the breath's dip instead of merging
+- Still open: real-recording validation (everything is synthesis so far; the test harness is ready for recordings)
 
 **Later (Phase 6 and beyond)**
 
@@ -163,7 +164,7 @@ Pieces are saved as `.gtab` — the small, git-diffable [text format](docs/TEXTF
 
 **F2** swaps the notation for the raw `.gtab` text, parsed as you type, with a legend beside it explaining every piece of the format — so the escape hatch does not require having read the format documentation first. That is where the parts of the format the toolbar has no button for live: a General MIDI program, a backing-track flag, an unusual tuning, a comment to yourself.
 
-**Wind parts are written here too, as text.** `\instrument soprano sax` at the top of a track, then the notes as the pitch names you read — `D5.8 E5.8 G5.4l` — with `l` for a slur where a guitarist would hammer on ([the format page](docs/TEXTFORMAT.md) has the whole grammar). The notation grid is a strings-by-frets surface and cannot hold a wind part yet, so wind pieces open straight into this text view, which round-trips them completely.
+**Wind parts get their own grid.** A new piece (or a new track) first asks what it will be played on; choose a horn and the strings-by-frets surface becomes a pitch ladder — the same written-pitch reading the practice view teaches, with a line at every octave's C. Type **A–G** to place a note nearest the one before it, **↑/↓** to move it by a semitone (an octave with shift), **l** for a slur where a guitarist would hammer on. The text view spells the same part as `\instrument soprano sax` and pitch-name beats — `D5.8 E5.8 G5.4l` ([the format page](docs/TEXTFORMAT.md) has the whole grammar).
 
 Bars stay exactly full, across every track at once — the editor refuses an edit that would overflow a bar rather than spilling it into the next one, and says what would not fit.
 

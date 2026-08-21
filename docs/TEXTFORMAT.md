@@ -142,9 +142,10 @@ whether a track is backing, an arbitrary tuning, a wind instrument, a
 comment explaining a passage to yourself.
 **F2** in the editor shows this text instead, parsed as you type, with a
 legend beside it covering everything on this page in one column. Neither
-view is the real one; both are the same piece. A wind piece opens
-straight into the text view — the notation grid is a strings-by-frets
-surface and cannot hold one yet.
+view is the real one; both are the same piece. A wind piece gets a grid
+of its own — a pitch ladder in written pitch, notes typed as the letters
+A–G — and its text view spells the same part in this format's wind
+grammar.
 
 ## Semantics
 
