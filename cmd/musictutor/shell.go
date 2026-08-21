@@ -20,7 +20,6 @@ import (
 	"github.com/S95F/musicTutor/internal/engine"
 	"github.com/S95F/musicTutor/internal/live"
 	"github.com/S95F/musicTutor/internal/score"
-	"github.com/S95F/musicTutor/internal/score/textfmt"
 	"github.com/S95F/musicTutor/internal/ui"
 )
 
@@ -92,40 +91,14 @@ func (o *shellOpener) showEditor(sc *score.Score, path string) {
 		err error
 	)
 	if sc == nil {
-		ed = ui.NewEditor(o.shell)
+		// A blank piece starts with the instrument question — the one
+		// choice that has to come before anything is written.
+		ed = ui.NewEditorChoosing(o.shell)
 	} else if ed, err = ui.NewEditorFor(o.shell, sc, path); err != nil {
-		// A wind piece cannot open on the grid yet — the grid is a
-		// strings-by-frets surface — but its text is fully editable, so
-		// it opens in the text view instead of dead-ending: from its own
-		// file when it has one, from a fresh serialization when it
-		// arrived through an importer.
-		if hasWindTrack(sc) {
-			if strings.EqualFold(filepath.Ext(path), ".gtab") {
-				if src, rerr := os.ReadFile(path); rerr == nil {
-					o.showTextEditor(src, path)
-					return
-				}
-			}
-			if src, ferr := textfmt.Format(sc); ferr == nil {
-				o.showTextEditor(src, "")
-				return
-			}
-		}
 		fmt.Fprintln(os.Stderr, "musictutor: cannot edit that piece:", err)
 		return
 	}
 	o.installEditor(ed)
-}
-
-// hasWindTrack reports whether any track is a wind part — the pieces the
-// notation grid cannot hold yet.
-func hasWindTrack(sc *score.Score) bool {
-	for _, tr := range sc.Tracks {
-		if tr.Wind != nil {
-			return true
-		}
-	}
-	return false
 }
 
 // showTextEditor opens the editor straight into its text view on raw

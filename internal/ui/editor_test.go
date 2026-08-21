@@ -799,10 +799,10 @@ func TestEditorUndoRedoAreOnTheToolbar(t *testing.T) {
 
 func TestEditorHotspotsAreInsideTheWindow(t *testing.T) {
 	e := newTestEditor()
-	if err := e.doc.AddTrack("Rhythm"); err != nil {
+	if err := e.doc.AddTrack("Rhythm", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.doc.AddTrack("Bass"); err != nil {
+	if err := e.doc.AddTrack("Bass", nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, h := range e.hotspots() {

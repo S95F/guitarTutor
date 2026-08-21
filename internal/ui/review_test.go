@@ -67,7 +67,7 @@ func TestDisabledControlsStillNameThemselves(t *testing.T) {
 func TestPieceRowKeepsItsSettings(t *testing.T) {
 	e := newTestEditor()
 	for i := 0; i < 12; i++ {
-		if err := e.doc.AddTrack("A track with a long name"); err != nil {
+		if err := e.doc.AddTrack("A track with a long name", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -88,11 +88,16 @@ func TestPieceRowKeepsItsSettings(t *testing.T) {
 			t.Errorf("piece control %d ends at %.0f, past the file row at %.0f", i, r.x+r.w, limit)
 		}
 	}
-	// And the keyboard reaches it now.
+	// And the keyboard reaches it now: shift+A asks which instrument, and
+	// answering adds the track.
 	before := len(e.doc.Score().Tracks)
 	pressMod(t, e, ebiten.KeyA, mods{shift: true})
+	if e.picker == nil || e.picker.purpose != pickAddTrack {
+		t.Fatal("shift+A did not open the instrument picker for the new track")
+	}
+	e.applyPick(0) // guitar
 	if got := len(e.doc.Score().Tracks); got != before+1 {
-		t.Errorf("shift+A left %d tracks, want %d", got, before+1)
+		t.Errorf("shift+A then guitar left %d tracks, want %d", got, before+1)
 	}
 }
 
@@ -121,7 +126,7 @@ func TestEditorHeaderTitleYieldsToTheStatus(t *testing.T) {
 // most people never learning it.
 func TestBackingTrackIsVisibleOnTheRow(t *testing.T) {
 	e := newTestEditor()
-	if err := e.doc.AddTrack("Rhythm"); err != nil {
+	if err := e.doc.AddTrack("Rhythm", nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.doc.SetRole(1); err != nil { // score.RoleBacking

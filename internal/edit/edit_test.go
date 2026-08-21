@@ -264,7 +264,7 @@ func TestUndoIsNotAliased(t *testing.T) {
 
 func TestBarsMoveTogetherAcrossTracks(t *testing.T) {
 	d := New(NewOptions{})
-	if err := d.AddTrack("Rhythm"); err != nil {
+	if err := d.AddTrack("Rhythm", nil); err != nil {
 		t.Fatalf("AddTrack: %v", err)
 	}
 	if got := len(d.Score().Tracks); got != 2 {
@@ -458,11 +458,9 @@ func TestOpenSquaresUpARaggedPiece(t *testing.T) {
 	}
 }
 
-// TestOpenAcceptsWindPieces: the DOCUMENT takes a wind piece — the text
-// view edits and saves through it — even though the notation grid cannot
-// draw one (that refusal lives in ui.NewEditorFor, at the grid's own
-// door). The document must square up, report its instrument, and write
-// back out unchanged.
+// TestOpenAcceptsWindPieces: the document takes a wind piece — the grid
+// and the text view both edit and save through it. It must square up,
+// report its instrument, and write back out unchanged.
 func TestOpenAcceptsWindPieces(t *testing.T) {
 	sc, err := textfmt.Parse([]byte("\\instrument soprano sax\nD5.4 E5.4 G5.2"), "sax")
 	if err != nil {
@@ -477,6 +475,75 @@ func TestOpenAcceptsWindPieces(t *testing.T) {
 	}
 	barFull(t, d)
 	saveable(t, d)
+}
+
+// TestWindPitchOps: the wind-track editing verbs — SetWindPitch in the
+// player's written pitch, NudgePitch by semitones, WindReference walking
+// back for the nearest note — and their refusals at the nameable range's
+// two ends. The written/sounding conversion happens in these verbs, at
+// the edge; the model stores offsets from the horn's lowest note.
+func TestWindPitchOps(t *testing.T) {
+	w := score.WindByName("soprano sax")
+	d := New(NewOptions{Wind: w})
+
+	// An empty piece's reference is the middle of the horn.
+	if got, want := d.WindReference(), w.LowSounding+w.Span/2; got != want {
+		t.Errorf("empty WindReference = %d, want the mid-range %d", got, want)
+	}
+
+	// Written D5 on a Bb soprano sounds C5: offset 16 from the low Ab3.
+	if err := d.SetWindPitch(74); err != nil {
+		t.Fatalf("SetWindPitch(74): %v", err)
+	}
+	n, ok := d.NoteAt(1)
+	if !ok || n.String != 1 || n.Fret != 16 {
+		t.Fatalf("SetWindPitch left %+v ok=%v, want String 1 Fret 16", n, ok)
+	}
+	if got := d.WindReference(); got != w.LowSounding+16 {
+		t.Errorf("WindReference = %d, want the note under the cursor (%d)", got, w.LowSounding+16)
+	}
+
+	// Retyping replaces, keeping the marks a correction should not reset.
+	if err := d.ToggleTech(score.TechSlur); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetWindPitch(76); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ = d.NoteAt(1); n.Fret != 18 || n.Tech&score.TechSlur == 0 {
+		t.Errorf("retyping the pitch gave %+v, want Fret 18 with its slur kept", n)
+	}
+
+	// Nudges are the same fret arithmetic.
+	if err := d.NudgePitch(-12); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ = d.NoteAt(1); n.Fret != 6 {
+		t.Errorf("NudgePitch(-12) left Fret %d, want 6", n.Fret)
+	}
+	if err := d.NudgePitch(-7); err == nil {
+		t.Error("NudgePitch below the horn's lowest note was not refused")
+	}
+
+	// Both verbs refuse a written pitch past what a note name can hold.
+	if err := d.SetWindPitch(128); err == nil {
+		t.Error("SetWindPitch(128) was not refused")
+	}
+	if err := d.SetWindPitch(58); err != nil {
+		t.Fatalf("SetWindPitch at the horn's bottom: %v", err)
+	}
+	if err := d.SetWindPitch(57); err == nil {
+		t.Error("SetWindPitch below the horn's lowest note was not refused")
+	}
+
+	// And on a fretted track the verbs say to use the fret keys.
+	g := New(NewOptions{})
+	if err := g.SetWindPitch(74); err == nil {
+		t.Error("SetWindPitch on a guitar track was not refused")
+	}
+	if err := g.NudgePitch(1); err == nil {
+		t.Error("NudgePitch on a guitar track was not refused")
+	}
 }
 
 func TestOpenTheRichFixture(t *testing.T) {
@@ -619,7 +686,7 @@ func TestDeletingTheLastTrackIsRefused(t *testing.T) {
 	if err := d.DeleteTrack(); err == nil {
 		t.Fatal("the only track was deleted")
 	}
-	if err := d.AddTrack("Second"); err != nil {
+	if err := d.AddTrack("Second", nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.DeleteTrack(); err != nil {

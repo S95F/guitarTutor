@@ -63,7 +63,10 @@ type NewOptions struct {
 	BPM      float64
 	Num, Den int
 	Tuning   score.Tuning
-	Bars     int
+	// Wind makes the piece a wind part on that instrument instead of a
+	// fretted one; Tuning is then ignored (a wind track has none).
+	Wind *score.WindInstrument
+	Bars int
 }
 
 // New starts a fresh piece: one track of empty bars in the requested
@@ -82,7 +85,7 @@ func New(opts NewOptions) *Doc {
 	default:
 		opts.Den = 4
 	}
-	if len(opts.Tuning) == 0 {
+	if opts.Wind == nil && len(opts.Tuning) == 0 {
 		opts.Tuning = append(score.Tuning(nil), score.StandardTuning...)
 	}
 	if opts.Bars < 1 {
@@ -93,9 +96,12 @@ func New(opts NewOptions) *Doc {
 		Tempos: score.TempoMap{{Tick: 0, USPerQuarter: score.USPerQuarter(opts.BPM)}},
 		Meters: score.MeterMap{{Tick: 0, Num: opts.Num, Den: opts.Den}},
 	}
-	tr := &score.Track{
-		Tuning:  append(score.Tuning(nil), opts.Tuning...),
-		Program: textfmt.DefaultProgram,
+	tr := &score.Track{Program: textfmt.DefaultProgram}
+	if opts.Wind != nil {
+		tr.Wind = opts.Wind
+		tr.Program = opts.Wind.Program
+	} else {
+		tr.Tuning = append(score.Tuning(nil), opts.Tuning...)
 	}
 	sc.Tracks = append(sc.Tracks, tr)
 	for i := 0; i < opts.Bars; i++ {
@@ -103,8 +109,18 @@ func New(opts NewOptions) *Doc {
 		fillBar(bar)
 	}
 	d := &Doc{sc: sc, dur: score.Quarter}
-	d.cur = Cursor{Str: len(tr.Tuning)} // the low string, where riffs start
+	// The low string, where riffs start; a wind part has one lane.
+	d.cur = Cursor{Str: laneCount(tr)}
 	return d
+}
+
+// laneCount is how many lanes a track's notes live on: its strings, or
+// the wind track's one.
+func laneCount(tr *score.Track) int {
+	if tr.Wind != nil {
+		return 1
+	}
+	return len(tr.Tuning)
 }
 
 // Open takes an existing score into the editor. The score is copied, so
@@ -131,7 +147,7 @@ func Open(sc *score.Score) (*Doc, error) {
 	if err := d.squareUp(); err != nil {
 		return nil, err
 	}
-	d.cur = Cursor{Str: len(d.Track().Tuning)}
+	d.cur = Cursor{Str: laneCount(d.Track())}
 	d.clampCursor()
 	return d, nil
 }
@@ -145,9 +161,8 @@ func Open(sc *score.Score) (*Doc, error) {
 func (d *Doc) Score() *score.Score { return d.sc }
 
 // Wind returns the first wind instrument among the piece's tracks, or
-// nil. The editor asks because the notation grid is a strings-by-frets
-// surface: a piece with a wind part lives in the text view, which this
-// document serves just as well.
+// nil — a quick "does this piece involve a horn at all", where Track().Wind
+// answers for the track actually under the cursor.
 func (d *Doc) Wind() *score.WindInstrument {
 	for _, tr := range d.sc.Tracks {
 		if tr.Wind != nil {
@@ -352,7 +367,7 @@ func (d *Doc) clampCursor() {
 	if d.cur.Str < 1 {
 		d.cur.Str = 1
 	}
-	if n := len(tr.Tuning); d.cur.Str > n {
+	if n := laneCount(tr); d.cur.Str > n {
 		d.cur.Str = n
 	}
 }

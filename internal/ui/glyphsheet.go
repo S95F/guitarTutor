@@ -72,6 +72,8 @@ var glyphSpecimens = []struct {
 	{glyphAddTrack, "add track"},
 	{glyphTuning, "tuning"},
 	{glyphCapo, "capo"},
+	{glyphWind, "wind instrument"},
+	{glyphSlur, "slur"},
 	{glyphTempo, "tempo"},
 	{glyphTitle, "title"},
 

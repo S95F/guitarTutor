@@ -260,6 +260,25 @@ func drawGlyph(dst *ebiten.Image, id glyphID, box rect, col color.RGBA) {
 			x := 0.175 + float64(i)*0.13
 			g.line(x, 0.26, x, 0.90, wHair)
 		}
+	case glyphSlur:
+		// A slur is the hammer-on's arc without its letter: two notes
+		// under one breath, neither re-tongued. Flat rather than rising —
+		// a slur says "connected", not "which way".
+		drawSlurredPair(g, 0.72, 0.72)
+	case glyphWind:
+		// A horn, reduced to what reads at sixteen pixels: the conical
+		// bore rising to a flared bell, with a mouthpiece nub at the thin
+		// end. One heavy sweep plus a hairline survives the raster the
+		// way the tuning glyph's nut does.
+		g.moveTo(0.10, 0.78)
+		g.quadTo(0.55, 0.70, 0.72, 0.40)
+		g.stroke(wHeavy)
+		g.moveTo(0.72, 0.40)
+		g.lineTo(0.62, 0.16)
+		g.moveTo(0.72, 0.40)
+		g.lineTo(0.92, 0.28)
+		g.stroke(wStem)
+		g.line(0.06, 0.84, 0.14, 0.72, wStem)
 	case glyphCapo:
 		// A capo: the bar clamped across the strings, and the strings it
 		// crosses. The bar is the heavy element, as it is on the guitar.

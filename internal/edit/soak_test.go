@@ -132,7 +132,7 @@ func applyRandomOp(d *Doc, rng *rand.Rand, durations []struct {
 		case 1:
 			return "Redo", nilIf(d.Redo())
 		case 2:
-			return "AddTrack", d.AddTrack(fmt.Sprintf("Track %d", rng.Intn(9)))
+			return "AddTrack", d.AddTrack(fmt.Sprintf("Track %d", rng.Intn(9)), nil)
 		default:
 			return "DeleteTrack", d.DeleteTrack()
 		}

@@ -247,16 +247,19 @@ func (d *Doc) SetTuning(tuning score.Tuning) error {
 }
 
 // AddTrack appends a track of empty bars on the same grid and moves the
-// cursor to it.
-func (d *Doc) AddTrack(name string) error {
+// cursor to it: a standard-tuned guitar when wind is nil, that wind
+// instrument otherwise.
+func (d *Doc) AddTrack(name string, wind *score.WindInstrument) error {
 	if hasLineBreak(name) {
 		return fmt.Errorf("a track name has to be one line")
 	}
 	err := d.mutate(func() error {
-		tr := &score.Track{
-			Name:    name,
-			Tuning:  append(score.Tuning(nil), score.StandardTuning...),
-			Program: textfmt.DefaultProgram,
+		tr := &score.Track{Name: name, Program: textfmt.DefaultProgram}
+		if wind != nil {
+			tr.Wind = wind
+			tr.Program = wind.Program
+		} else {
+			tr.Tuning = append(score.Tuning(nil), score.StandardTuning...)
 		}
 		for _, ref := range d.sc.Tracks[0].Bars {
 			fillBar(tr.AppendBar(ref.Num, ref.Den))
@@ -270,7 +273,7 @@ func (d *Doc) AddTrack(name string) error {
 	}
 	d.track = len(d.sc.Tracks) - 1
 	d.cur.Bar, d.cur.Beat = 0, 0
-	d.cur.Str = len(d.Track().Tuning)
+	d.cur.Str = laneCount(d.Track())
 	d.clampCursor()
 	return nil
 }

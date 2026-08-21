@@ -112,6 +112,11 @@ const (
 	glyphCapo
 	glyphTempo
 	glyphTitle
+	// Wind parts: the instrument chip's horn, and the slur that is their
+	// legato (an arc with no letter — the letters H and P belong to the
+	// fretted gestures).
+	glyphWind
+	glyphSlur
 
 	// The start screen's actions.
 	glyphFolder

@@ -136,6 +136,10 @@ type Editor struct {
 	// leaving is the "you have unsaved changes" prompt.
 	leaving bool
 
+	// picker is the open instrument choice (a new piece, a new track), or
+	// nil.
+	picker *edPicker
+
 	// practicePending remembers that a save was asked for BY shift+P, so
 	// the dialog's answer can finish with the practice it promised — the
 	// same shape as a save asked for on the way out finishing the leaving.
@@ -159,6 +163,16 @@ func NewEditor(sh *Shell) *Editor {
 	return &Editor{sh: sh, doc: edit.New(edit.NewOptions{})}
 }
 
+// NewEditorChoosing starts a blank piece with the instrument picker up, so
+// the first thing a new piece asks is what it will be played on. The
+// document underneath is the guitar default until the picker answers;
+// cancelling keeps it.
+func NewEditorChoosing(sh *Shell) *Editor {
+	e := NewEditor(sh)
+	e.openInstrumentPicker(pickNewPiece)
+	return e
+}
+
 // NewEditorFor opens an existing piece for editing. path is where Save
 // will write; pass "" for a piece that has no file yet (an imported one,
 // say, which must be saved as .gtab before it can be written at all).
@@ -166,13 +180,6 @@ func NewEditorFor(sh *Shell, sc *score.Score, path string) (*Editor, error) {
 	doc, err := edit.Open(sc)
 	if err != nil {
 		return nil, err
-	}
-	// The grid is a strings-by-frets surface; a wind part has neither.
-	// Refusing here, by name, is what routes a wind piece to the text
-	// view (the caller's fallback), where the same document is fully
-	// editable and saveable.
-	if w := doc.Wind(); w != nil {
-		return nil, fmt.Errorf("the notation editor cannot edit a %s part yet — the text view is where wind parts are written", w.Name)
 	}
 	// Only a .gtab file can be written back; anything else has to be saved
 	// under a new name, so the path is deliberately dropped rather than
@@ -280,6 +287,10 @@ func (e *Editor) Update() error {
 	e.ptr = readPointer()
 	e.drainDialog()
 
+	if e.picker != nil {
+		e.updatePicker()
+		return nil
+	}
 	if e.leaving {
 		return e.updateLeavePrompt()
 	}
@@ -340,6 +351,9 @@ func (e *Editor) Draw(screen *ebiten.Image) {
 		title, rows := e.helpTable()
 		drawHelpOverlay(screen, title, rows, editorHelpFootnote)
 	}
+	if e.picker != nil {
+		e.drawPicker(screen)
+	}
 }
 
 // helpTable is what the overlay behind ? shows: the keys of the view the
@@ -394,6 +408,9 @@ func (e *Editor) statusLine() string {
 // against what they can hear needs the app to say which note it is.
 func (e *Editor) cursorPitch() string {
 	tr := e.doc.Track()
+	if tr.Wind != nil {
+		return e.windCursorPitch()
+	}
 	str := e.doc.Cursor().Str
 	label := fmt.Sprintf("%s string", edStringName(tr, str))
 	n, ok := e.doc.NoteAt(str)
@@ -441,7 +458,9 @@ func edPitchName(key int) string {
 // modalUp reports whether something is covering the editor: a one-line
 // prompt, the unsaved-changes question, or the key list. While one is,
 // the chrome underneath is inert.
-func (e *Editor) modalUp() bool { return e.entry != nil || e.leaving || e.helpOpen }
+func (e *Editor) modalUp() bool {
+	return e.entry != nil || e.leaving || e.helpOpen || e.picker != nil
+}
 
 // --- the grid ---------------------------------------------------------
 
@@ -455,7 +474,7 @@ func (e *Editor) updateGrid() error {
 	}
 	// A key may have opened an entry, the text view or the leave prompt;
 	// the click that follows belongs to whatever is showing next frame.
-	if e.entry != nil || e.text != nil || e.leaving || e.helpOpen {
+	if e.entry != nil || e.text != nil || e.leaving || e.helpOpen || e.picker != nil {
 		return nil
 	}
 	e.handleMouse()
@@ -520,7 +539,7 @@ func edBeatX(box edBarBox, bar *score.Bar, bt *score.Beat) float64 {
 
 // systemHeight is one row of bars, top to bottom.
 func (e *Editor) systemHeight() float64 {
-	n := len(e.doc.Track().Tuning)
+	n := e.gridLines()
 	return edSysPadTop + float64(n-1)*edStringGap + edSysPadBottom + edSysGap
 }
 
@@ -579,7 +598,7 @@ func (e *Editor) drawGrid(dst *ebiten.Image) {
 	systems := e.layoutSystems()
 	e.clampScroll(systems)
 	tr := e.doc.Track()
-	nStr := len(tr.Tuning)
+	nStr := e.gridLines()
 	cur := e.doc.Cursor()
 	h := e.systemHeight()
 
@@ -596,13 +615,19 @@ func (e *Editor) drawGrid(dst *ebiten.Image) {
 		for _, b := range sys.bars {
 			w = b.x + b.w
 		}
-		for s := 0; s < nStr; s++ {
-			y := float32(strTop + float64(s)*edStringGap)
-			vector.StrokeLine(screen, edGridX, y, float32(edGridX+w), y, 1, colString, false)
-			// The string's own note, in the margin. It is the tuning's, so
-			// a drop-D piece says D at the bottom without anyone asking.
-			name := edStringName(tr, s+1)
-			drawTextSmall(screen, name, edGridX-10-textWSmall(name), float64(y)-7, colDim)
+		if tr.Wind != nil {
+			// A wind system's lines are the pitch ladder's octave Cs, not
+			// strings; see editorwind.go.
+			drawWindSystemLines(screen, edWindLadderFor(tr.Wind), strTop, w)
+		} else {
+			for s := 0; s < nStr; s++ {
+				y := float32(strTop + float64(s)*edStringGap)
+				vector.StrokeLine(screen, edGridX, y, float32(edGridX+w), y, 1, colString, false)
+				// The string's own note, in the margin. It is the tuning's, so
+				// a drop-D piece says D at the bottom without anyone asking.
+				name := edStringName(tr, s+1)
+				drawTextSmall(screen, name, edGridX-10-textWSmall(name), float64(y)-7, colDim)
+			}
 		}
 		rhythmY := strTop + float64(nStr-1)*edStringGap + 12
 		for _, box := range sys.bars {
@@ -664,15 +689,47 @@ func (e *Editor) drawBar(screen *ebiten.Image, tr *score.Track, box edBarBox, st
 	}
 	var marks []pendingMark
 
+	// The wind band's vertical axis; nil on a fretted track.
+	var ladder *edWindLadder
+	if tr.Wind != nil {
+		l := edWindLadderFor(tr.Wind)
+		ladder = &l
+	}
+	// noteY is where a note draws: its string's line, or its written
+	// pitch on the ladder.
+	noteY := func(n score.Note) float64 {
+		if ladder != nil {
+			return ladder.y(tr.Wind.Written(tr.Pitch(n)), strTop)
+		}
+		return strTop + float64(n.String-1)*edStringGap
+	}
+	// cellY is where the lit cursor cell sits when the beat is EMPTY: the
+	// cursor's string, or the pitch a typed letter would land nearest —
+	// the cell is the promise of where the next note goes, and on a
+	// ladder that place is a pitch, not a lane.
+	cellY := func() float64 {
+		if ladder != nil {
+			return ladder.y(e.windEntryWritten(), strTop)
+		}
+		return strTop + float64(cur.Str-1)*edStringGap
+	}
+
 	for bi, bt := range bar.Beats {
 		bx := edGridX + edBeatX(box, bar, bt)
 		onCursor := box.index == cur.Bar && bi == cur.Beat
 		if onCursor {
-			// The cursor: a caret down the whole beat, and a lit cell on the
-			// string the next fret typed will land on.
+			// The cursor: a caret down the whole beat, and a lit cell where
+			// the next note typed will land.
 			vector.StrokeLine(screen, float32(bx-4), float32(strTop-8),
 				float32(bx-4), float32(strTop+float64(nStr-1)*edStringGap+8), 1, colEdCaret, false)
-			drawCursorCell(screen, bx, strTop, cur.Str)
+			y := cellY()
+			if len(bt.Notes) > 0 {
+				y = noteY(bt.Notes[0])
+				if ladder == nil {
+					y = strTop + float64(cur.Str-1)*edStringGap
+				}
+			}
+			drawCursorCellAt(screen, bx, y)
 		}
 		// A note draws its own background so the string line does not run
 		// through the digits — and on the cursor's own cell that background
@@ -706,14 +763,18 @@ func (e *Editor) drawBar(screen *ebiten.Image, tr *score.Track, box edBarBox, st
 			// block, which reads as two cursors. The cell is simply laid
 			// down again: there is no note under it to cover.
 			if onCursor {
-				drawCursorCell(screen, bx, strTop, cur.Str)
+				drawCursorCellAt(screen, bx, cellY())
 			}
 			continue
 		}
 		for _, n := range bt.Notes {
-			ny := strTop + float64(n.String-1)*edStringGap
+			ny := noteY(n)
 			label := strconv.Itoa(n.Fret)
-			if n.Tech&score.TechDead != 0 {
+			if ladder != nil {
+				// A wind note's glyph is the written name its player reads,
+				// exactly as the practice view draws it.
+				label = edPitchName(tr.Wind.Written(tr.Pitch(n)))
+			} else if n.Tech&score.TechDead != 0 {
 				label = "x"
 			}
 			// A tie is an arc back to the note it holds, which is how it is
@@ -734,8 +795,12 @@ func (e *Editor) drawBar(screen *ebiten.Image, tr *score.Track, box edBarBox, st
 			w := float32(textWMono(label))
 			vector.DrawFilledRect(screen, float32(bx-2), float32(ny-9), w+4, 18, bg(n.String), false)
 			drawTextMono(screen, label, bx, ny-9, col)
-			if s := techSuffix(n.Tech); s != "" {
-				marks = append(marks, pendingMark{s, bx + float64(w) + 3, ny - 9})
+			suffix := techSuffix(n.Tech)
+			if ladder != nil {
+				suffix = windTechSuffix(n.Tech)
+			}
+			if suffix != "" {
+				marks = append(marks, pendingMark{suffix, bx + float64(w) + 3, ny - 9})
 			}
 			if n.String < edMaxStrings {
 				lastX[n.String], lastBeat[n.String] = bx, bi
@@ -849,6 +914,9 @@ func (e *Editor) drawFirstSteps(screen *ebiten.Image) {
 		return // no room for it without running into the status line
 	}
 	lines, tail := firstStepsContent()
+	if e.doc.Track().Wind != nil {
+		lines, tail = windFirstStepsContent()
+	}
 	drawText(screen, "Writing a piece", edGridX, y, colInferred)
 	for i, l := range lines {
 		ly := y + 26 + float64(i)*22
@@ -896,10 +964,9 @@ func (e *Editor) barMarking(index int, bar *score.Bar) (meter, tempo string) {
 	return meter, tempo
 }
 
-// drawCursorCell lights the cell the next fret typed will land in: the
-// beat at bx, on the cursor's string.
-func drawCursorCell(dst *ebiten.Image, bx, strTop float64, str int) {
-	cy := strTop + float64(str-1)*edStringGap
+// drawCursorCellAt lights the cell the next note typed will land in: the
+// beat at bx, at the line (a string's, or a ladder pitch's) at cy.
+func drawCursorCellAt(dst *ebiten.Image, bx, cy float64) {
 	vector.DrawFilledRect(dst, float32(bx-5), float32(cy-10), 28, 20, colEdCursor, false)
 }
 
@@ -978,13 +1045,16 @@ func (e *Editor) clickGrid(px, py float64) bool {
 	}
 	sys := systems[si]
 	strTop := edGridTop + float64(si)*h + edSysPadTop - e.scroll
-	nStr := len(e.doc.Track().Tuning)
-	str := int((py-strTop+edStringGap/2)/edStringGap) + 1
-	if str < 1 {
-		str = 1
-	}
-	if str > nStr {
-		str = nStr
+	str := 1
+	if e.doc.Track().Wind == nil {
+		nStr := len(e.doc.Track().Tuning)
+		str = int((py-strTop+edStringGap/2)/edStringGap) + 1
+		if str < 1 {
+			str = 1
+		}
+		if str > nStr {
+			str = nStr
+		}
 	}
 
 	// The bar whose box contains the click, or the last one on the system
@@ -1026,6 +1096,8 @@ var editorKeys = []ebiten.Key{
 	ebiten.KeySpace,
 	ebiten.KeyR, ebiten.KeyN, ebiten.KeyH, ebiten.KeyP, ebiten.KeyS, ebiten.KeyB, ebiten.KeyA,
 	ebiten.KeyV, ebiten.KeyX, ebiten.KeyT, ebiten.KeyU, ebiten.KeyM, ebiten.KeyZ, ebiten.KeyY,
+	// The wind lane's note letters and its slur; inert on a fretted track.
+	ebiten.KeyC, ebiten.KeyD, ebiten.KeyE, ebiten.KeyF, ebiten.KeyG, ebiten.KeyL,
 	ebiten.KeyBracketLeft, ebiten.KeyBracketRight, ebiten.KeyPeriod, ebiten.KeyBackquote,
 	ebiten.KeyTab, ebiten.KeyF1, ebiten.KeyF2, ebiten.KeySlash, ebiten.KeyEscape,
 }
@@ -1075,7 +1147,7 @@ func (e *Editor) handleKeys() error {
 		if err := e.handleKey(k, m); err != nil {
 			return err
 		}
-		if e.entry != nil || e.text != nil || e.leaving || e.helpOpen {
+		if e.entry != nil || e.text != nil || e.leaving || e.helpOpen || e.picker != nil {
 			return nil
 		}
 	}
@@ -1086,7 +1158,12 @@ func (e *Editor) handleKeys() error {
 // handleKey applies one key press. It returns errQuit when the user
 // leaves the editor.
 func (e *Editor) handleKey(k ebiten.Key, m mods) error {
+	wind := e.doc.Track().Wind != nil
 	if digit, ok := digitOf(k); ok {
+		if wind {
+			e.report(fmt.Errorf("a wind part takes note names — A to G puts one down, ↑ and ↓ move it"))
+			return nil
+		}
 		e.typeFret(digit)
 		return nil
 	}
@@ -1124,9 +1201,19 @@ func (e *Editor) handleKey(k ebiten.Key, m mods) error {
 	case ebiten.KeyRight:
 		e.doc.MoveBeat(1)
 	case ebiten.KeyUp:
-		e.doc.MoveString(-1)
+		if wind {
+			// Up raises the pitch — a semitone, an octave with shift — on
+			// the one lane a wind part has; there is no string to choose.
+			e.report(e.doc.NudgePitch(nudgeStep(m)))
+		} else {
+			e.doc.MoveString(-1)
+		}
 	case ebiten.KeyDown:
-		e.doc.MoveString(1)
+		if wind {
+			e.report(e.doc.NudgePitch(-nudgeStep(m)))
+		} else {
+			e.doc.MoveString(1)
+		}
 	case ebiten.KeyPageUp:
 		e.doc.MoveBar(-1)
 	case ebiten.KeyPageDown:
@@ -1165,10 +1252,16 @@ func (e *Editor) handleKey(k ebiten.Key, m mods) error {
 		e.report(e.doc.ToggleTie())
 
 	case ebiten.KeyH:
-		e.report(e.doc.ToggleTech(score.TechHammer))
+		if wind {
+			e.report(fmt.Errorf("no hammer-ons on a %s — l marks a slur", e.doc.Track().Wind.Name))
+		} else {
+			e.report(e.doc.ToggleTech(score.TechHammer))
+		}
 	case ebiten.KeyP:
 		if m.shift {
 			e.saveAndPractice()
+		} else if wind {
+			e.report(fmt.Errorf("no pull-offs on a %s — l marks a slur", e.doc.Track().Wind.Name))
 		} else {
 			e.report(e.doc.ToggleTech(score.TechPull))
 		}
@@ -1177,13 +1270,33 @@ func (e *Editor) handleKey(k ebiten.Key, m mods) error {
 	case ebiten.KeyB:
 		if m.shift {
 			e.openEntry(edEntryTempo)
+		} else if wind {
+			// B is the note, not the bend: a wind part's letters are its
+			// pitches, and the bend mark keeps its toolbar button.
+			e.typeNoteLetter(edNoteClasses[k])
 		} else {
 			e.report(e.doc.ToggleTech(score.TechBend))
 		}
 	case ebiten.KeyV:
 		e.report(e.doc.ToggleTech(score.TechVibrato))
 	case ebiten.KeyX:
-		e.report(e.doc.ToggleTech(score.TechDead))
+		if wind {
+			e.report(fmt.Errorf("no dead notes on a %s — R makes the beat a rest", e.doc.Track().Wind.Name))
+		} else {
+			e.report(e.doc.ToggleTech(score.TechDead))
+		}
+	case ebiten.KeyL:
+		if wind {
+			e.report(e.doc.ToggleTech(score.TechSlur))
+		}
+	case ebiten.KeyC, ebiten.KeyD, ebiten.KeyE, ebiten.KeyG:
+		if wind {
+			e.typeNoteLetter(edNoteClasses[k])
+		}
+	case ebiten.KeyF:
+		if wind && !m.shift {
+			e.typeNoteLetter(edNoteClasses[k])
+		}
 
 	case ebiten.KeyN:
 		if m.shift {
@@ -1197,13 +1310,19 @@ func (e *Editor) handleKey(k ebiten.Key, m mods) error {
 		}
 	case ebiten.KeyU:
 		if m.shift {
-			e.cycleTuning()
+			if wind {
+				e.report(fmt.Errorf("a %s has no tuning to cycle", e.doc.Track().Wind.Name))
+			} else {
+				e.cycleTuning()
+			}
 		}
 	case ebiten.KeyA:
 		if m.shift {
 			// Adding a track had no key at all, and its control is the one
 			// the piece row runs out of room for first.
-			e.report(e.doc.AddTrack(fmt.Sprintf("Track %d", len(e.doc.Score().Tracks)+1)))
+			e.openInstrumentPicker(pickAddTrack)
+		} else if wind {
+			e.typeNoteLetter(edNoteClasses[k])
 		}
 	case ebiten.KeyTab:
 		e.stepTrack(m.shift)
@@ -1213,6 +1332,15 @@ func (e *Editor) handleKey(k ebiten.Key, m mods) error {
 		e.helpOpen = true
 	}
 	return nil
+}
+
+// nudgeStep is how far the arrow keys move a wind note: a semitone, an
+// octave with shift.
+func nudgeStep(m mods) int {
+	if m.shift {
+		return 12
+	}
+	return 1
 }
 
 // digitOf maps a number key — top row or numpad — to its value.
@@ -1736,6 +1864,9 @@ func (e *Editor) drawLeavePrompt(screen *ebiten.Image) {
 const edPracticeWhat = "Save the piece and open it for practice"
 
 func (e *Editor) editorBindings() []helpBinding {
+	if e.doc.Track().Wind != nil {
+		return e.windBindings()
+	}
 	return []helpBinding{
 		{Group: "notes", Keys: fmt.Sprintf("0-%d", textfmt.MaxFret), Hint: "0-9 fret", Desc: "Type a fret onto the cursor's string; two digits within a moment make one number"},
 		{Group: "notes", Keys: "del / R", Hint: "R rest", Desc: "Clear the note on this string, or make the whole beat a rest"},

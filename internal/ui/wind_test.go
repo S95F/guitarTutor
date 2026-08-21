@@ -6,7 +6,6 @@ package ui
 // track with no strings at all.
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/S95F/musicTutor/internal/engine"
@@ -133,26 +132,27 @@ func TestWindVerdictKeying(t *testing.T) {
 	}
 }
 
-// TestNewEditorForRefusesWindByName: the notation grid cannot hold a wind
-// part, and the refusal must name the instrument and the fallback so the
-// caller can route the piece to the text view.
-func TestNewEditorForRefusesWindByName(t *testing.T) {
+// TestNewEditorForAcceptsWind: a wind piece opens straight onto the
+// pitch-ladder grid, the same front door a fretted piece uses — the
+// text-view detour the first wind release shipped is gone.
+func TestNewEditorForAcceptsWind(t *testing.T) {
 	sc := newAppWind(t, 1).sc
-	if _, err := NewEditorFor(nil, sc, ""); err == nil {
-		t.Fatal("NewEditorFor accepted a wind piece the grid cannot draw")
-	} else {
-		for _, want := range []string{"soprano sax", "text view"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("refusal %q does not mention %q", err, want)
-			}
-		}
+	e, err := NewEditorFor(nil, sc, "")
+	if err != nil {
+		t.Fatalf("NewEditorFor refused a wind piece: %v", err)
+	}
+	if w := e.doc.Wind(); w == nil || w.Name != "soprano sax" {
+		t.Fatalf("the opened document's instrument = %v, want the soprano sax", w)
+	}
+	if e.text != nil {
+		t.Error("a wind piece opened into the text view; the grid is its editor now")
 	}
 }
 
-// TestWindTextPaneIsTheWholeEditor: a wind piece in the text view can run
-// file actions (applyTextThen) and toggle F2 without ever landing on the
-// grid, and Escape leaves cleanly when the text is still exactly the file.
-func TestWindTextPaneIsTheWholeEditor(t *testing.T) {
+// TestWindTextViewRoundTrips: a wind piece can still visit the raw text
+// (F2 both ways), and file actions taken there return to the grid exactly
+// as a fretted piece's do — the pane is a view again, not the editor.
+func TestWindTextViewRoundTrips(t *testing.T) {
 	src := "\\instrument soprano sax\nD5.4 E5.4 G5.2 |\n"
 	e := NewEditorForText(nil, []byte(src), "sax.gtab")
 
@@ -161,8 +161,8 @@ func TestWindTextPaneIsTheWholeEditor(t *testing.T) {
 	if !acted {
 		t.Fatal("applyTextThen never ran the action on a valid wind text")
 	}
-	if e.text == nil {
-		t.Fatal("applyTextThen closed the text view; a wind piece has no other editor")
+	if e.text != nil {
+		t.Fatal("applyTextThen held the text view open; the grid edits wind parts now")
 	}
 	if w := e.doc.Wind(); w == nil {
 		t.Fatal("the applied document lost its instrument")
@@ -170,15 +170,10 @@ func TestWindTextPaneIsTheWholeEditor(t *testing.T) {
 
 	e.toggleText()
 	if e.text == nil {
-		t.Fatal("F2 closed the text view on a wind piece")
+		t.Fatal("F2 would not show a wind piece's text")
 	}
-	if msg, _ := e.message(); !strings.Contains(msg, "soprano sax") {
-		t.Errorf("staying in the text view said %q, want it to name the instrument", msg)
-	}
-
-	// The text is exactly the file's own, so nothing is unsaved: Escape
-	// leaves, no prompt.
-	if err := e.escapeText(); err != errQuit {
-		t.Errorf("escapeText = %v, want errQuit (nothing typed, nothing to lose)", err)
+	e.toggleText()
+	if e.text != nil {
+		t.Fatal("F2 would not bring a wind piece back to the grid")
 	}
 }

@@ -157,14 +157,6 @@ func (e *Editor) toggleText() {
 	if !e.applyText() {
 		return
 	}
-	// A wind piece applies fine — the document takes it — but the grid
-	// cannot draw it, so the text view stays: it is the whole editor for
-	// a wind part, and closing it would land on a surface with nothing
-	// on it.
-	if w := e.doc.Wind(); w != nil {
-		e.report(fmt.Errorf("the notation view cannot show a %s part yet — this text is its editor", w.Name))
-		return
-	}
 	e.text = nil
 }
 
@@ -223,16 +215,12 @@ func (e *Editor) markDirtyFromText() {
 // ctrl+S and the toolbar's save and practice controls all go through it,
 // so none of them can act on the document the on-screen text has
 // diverged from. Text that will not parse keeps the view open with the
-// parser's complaint and does nothing else. A fretted piece returns to
-// the notation on the way; a wind piece stays in the text view, which is
-// its whole editor, and the action runs there.
+// parser's complaint and does nothing else.
 func (e *Editor) applyTextThen(act func()) {
 	if !e.applyText() {
 		return
 	}
-	if e.doc.Wind() == nil {
-		e.text = nil
-	}
+	e.text = nil
 	act()
 }
 
@@ -246,13 +234,6 @@ func (e *Editor) applyTextThen(act func()) {
 // hostage to a parse error they did not make protects nothing.
 func (e *Editor) escapeText() error {
 	if e.applyText() {
-		// A wind piece has no grid to go back to — for it, Escape means
-		// leaving the editor, through the same unsaved-work prompt any
-		// leave goes through. Holding the view open would trap the user
-		// in the one view the piece has.
-		if e.doc.Wind() != nil {
-			return e.leave()
-		}
 		e.text = nil
 		return nil
 	}
@@ -568,9 +549,7 @@ var gtLegend = []struct{ example, means string }{
 	{"\\capo 2", "capo fret"},
 	{"\\track", "starts another part"},
 	// The directives the text view is the ONLY place to set. A legend
-	// that omits them makes the one control for them undiscoverable —
-	// \instrument doubly so, since it is also the only way to write a
-	// wind part at all.
+	// that omits them makes the one control for them undiscoverable.
 	{"\\instrument", "a wind part: soprano sax, flute…"},
 	{"\\backing", "this part is accompaniment, not yours"},
 	{"\\program 25", "instrument voice (General MIDI)"},
@@ -584,8 +563,7 @@ const gtLegendCol = 84.0
 // Legend spacing. Tightened twice now, each time the format grew: first
 // when \backing and \program joined (the text view is the only place
 // either can be set), again when the wind rows did (\instrument, the
-// written-pitch note form, the slur letter — the text view is the only
-// place a wind part can be written at all). The whole list still has to
+// written-pitch note form, the slur letter). The whole list still has to
 // fit beside the text without scrolling.
 const (
 	gtLegendTop    = 34.0 // first row, under the column's own heading

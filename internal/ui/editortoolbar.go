@@ -172,11 +172,17 @@ func (e *Editor) historyButtons() []edButton {
 }
 
 // toolbarGroups is the whole first row, in the order the work happens:
-// choose a length, type a note, mark it, then shape the bar.
+// choose a length, type a note, mark it, then shape the bar. The marks
+// group is the edited track's instrument family's — a wind part slurs
+// and scoops where a guitar hammers and mutes.
 func (e *Editor) toolbarGroups() []edGroup {
+	marks := e.noteButtons()
+	if e.doc.Track().Wind != nil {
+		marks = e.windNoteButtons()
+	}
 	groups := []edGroup{
 		{caption: "NOTE LENGTH", buttons: e.noteValueButtons()},
-		{caption: "ON THIS NOTE", buttons: e.noteButtons()},
+		{caption: "ON THIS NOTE", buttons: marks},
 		{caption: "THIS BAR", buttons: e.beatButtons()},
 		{caption: "HISTORY", buttons: e.historyButtons()},
 	}
@@ -233,16 +239,27 @@ func (e *Editor) pieceButtons() []edButton {
 	}
 	out = append(out,
 		edButton{id: "addtrack", glyph: glyphAddTrack, name: "Add another track", key: "shift+A",
-			act: func() {
-				e.report(e.doc.AddTrack(fmt.Sprintf("Track %d", len(e.doc.Score().Tracks)+1)))
-			}},
-		edButton{id: "tuning", glyph: glyphTuning, name: "Tuning for this track", key: "shift+U",
-			label: e.tuningName(), act: e.cycleTuning},
-		// The capo sits beside the tuning it shifts. Without this chip a
-		// piece with a capo rendered exactly like one without, and putting
-		// one on meant knowing the text format's directive.
-		edButton{id: "capo", glyph: glyphCapo, name: "Capo for this track",
-			label: e.capoLabel(), act: func() { e.openEntry(edEntryCapo) }},
+			act: func() { e.openInstrumentPicker(pickAddTrack) }})
+	if w := e.doc.Track().Wind; w != nil {
+		// A wind track's pitch reference is its instrument, so the chip
+		// that says what the track IS replaces the tuning and capo chips a
+		// wind part has no use for. It is a fact, not a control: changing
+		// a track's instrument under its notes would re-pitch music the
+		// user already wrote, so another instrument means another track.
+		out = append(out,
+			edButton{id: "instrument", glyph: glyphWind, name: "This track's instrument", label: w.Name,
+				disabled: true, why: "chosen when the track is made — add a track for another instrument"})
+	} else {
+		out = append(out,
+			edButton{id: "tuning", glyph: glyphTuning, name: "Tuning for this track", key: "shift+U",
+				label: e.tuningName(), act: e.cycleTuning},
+			// The capo sits beside the tuning it shifts. Without this chip a
+			// piece with a capo rendered exactly like one without, and putting
+			// one on meant knowing the text format's directive.
+			edButton{id: "capo", glyph: glyphCapo, name: "Capo for this track",
+				label: e.capoLabel(), act: func() { e.openEntry(edEntryCapo) }})
+	}
+	out = append(out,
 		edButton{id: "meter", glyph: glyphNone, name: "Time signature from this bar on", key: "shift+M",
 			label: fmt.Sprintf("%d/%d", e.doc.Bar().Num, e.doc.Bar().Den),
 			act:   func() { e.openEntry(edEntryMeter) }},

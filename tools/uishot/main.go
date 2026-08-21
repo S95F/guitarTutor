@@ -8,8 +8,8 @@
 //
 //	go run ./tools/uishot -screen practice -o practice.png
 //
-// screens: start, start-bare, settings, editor, editor-new, editor-text,
-// editor-help, practice, practice-live, help, tuner
+// screens: start, start-bare, settings, editor, editor-new, editor-pick,
+// editor-text, editor-help, practice, practice-live, help, tuner
 package main
 
 import (
@@ -47,7 +47,7 @@ const (
 )
 
 func main() {
-	which := flag.String("screen", "practice", "glyphs, start, start-bare, settings, editor, editor-new, editor-text, editor-help, practice, practice-live, help or tuner")
+	which := flag.String("screen", "practice", "glyphs, start, start-bare, settings, editor, editor-new, editor-pick, editor-text, editor-help, practice, practice-live, help or tuner")
 	out := flag.String("o", "shot.png", "output PNG")
 	piece := flag.String("piece", "testdata/fixture_riff.gtab", "piece for the practice screens")
 	hover := flag.String("hover", "", "pin the cursor at x,y so hover states and tooltips are drawn")
@@ -123,6 +123,13 @@ func build(which, piece string) (ui.Screen, error) {
 		ed.SetPractice(func(string) {})
 		return ed, nil
 
+	case "editor-pick":
+		// A new piece as it actually opens: the instrument question first.
+		ed := ui.NewEditorChoosing(nil)
+		ed.SetSaveDialog(func(string) {})
+		ed.SetPractice(func(string) {})
+		return ed, nil
+
 	case "editor", "editor-text", "editor-help":
 		s, err := textfmt.ParseFile(piece)
 		if err != nil {
@@ -130,18 +137,6 @@ func build(which, piece string) (ui.Screen, error) {
 		}
 		ed, err := ui.NewEditorFor(nil, s, piece)
 		if err != nil {
-			// A wind piece cannot open on the grid; the app routes it to
-			// the text view, and the -text screenshot follows it there.
-			if which == "editor-text" {
-				src, rerr := os.ReadFile(piece)
-				if rerr != nil {
-					return nil, err
-				}
-				ted := ui.NewEditorForText(nil, src, piece)
-				ted.SetSaveDialog(func(string) {})
-				ted.SetPractice(func(string) {})
-				return ted, nil
-			}
 			return nil, err
 		}
 		ed.SetSaveDialog(func(string) {})

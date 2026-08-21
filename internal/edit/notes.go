@@ -43,6 +43,97 @@ func (d *Doc) SetFret(fret int) error {
 	})
 }
 
+// SetWindPitch puts a note at the cursor of a wind track, given the
+// WRITTEN pitch its player reads (the model stores the sounding offset;
+// the conversion happens here, at the edge, like everywhere else). A note
+// already in the beat is replaced, keeping its tie and techniques —
+// retyping a pitch is a correction, not a reset.
+func (d *Doc) SetWindPitch(written int) error {
+	w := d.Track().Wind
+	if w == nil {
+		return fmt.Errorf("this track has strings; type a fret instead")
+	}
+	if low := w.Written(w.LowSounding); written < low {
+		return fmt.Errorf("%s is below the %s's lowest note, %s", noteName(written), w.Name, noteName(low))
+	}
+	if written > 127 {
+		// The sounding pitch would fit MIDI, but the written one has no
+		// note name, so the piece could never be saved.
+		return fmt.Errorf("%s is past the top of what a note name can hold", noteName(127))
+	}
+	n := w.NoteFor(w.Sounding(written))
+	return d.mutate(func() error {
+		bt := d.Beat()
+		if len(bt.Notes) > 0 {
+			bt.Notes[0].Fret = n.Fret
+			return nil
+		}
+		// Typing onto a rest gives the note the length the palette is set
+		// to, not the length of the silence it replaced (see SetFret).
+		bt.Dur = d.dur
+		bt.Notes = append(bt.Notes, n)
+		return d.refitCurrentBar(-1)
+	})
+}
+
+// NudgePitch moves the wind note under the cursor by delta semitones —
+// the chromatic step the arrow keys make, an octave with shift.
+func (d *Doc) NudgePitch(delta int) error {
+	w := d.Track().Wind
+	if w == nil {
+		return fmt.Errorf("this track has strings; arrows choose the string instead")
+	}
+	bt := d.Beat()
+	if len(bt.Notes) == 0 {
+		return fmt.Errorf("put a note here first (A-G), then move it")
+	}
+	fret := bt.Notes[0].Fret + delta
+	if fret < 0 {
+		return fmt.Errorf("that is below the %s's lowest note, %s", w.Name, noteName(w.Written(w.LowSounding)))
+	}
+	if written := w.Written(w.LowSounding + fret); written > 127 {
+		return fmt.Errorf("that is past the top of what a note name can hold")
+	}
+	return d.mutate(func() error {
+		d.Beat().Notes[0].Fret = fret
+		return nil
+	})
+}
+
+// WindReference is the sounding key a freshly typed note letter lands
+// nearest to: the note under the cursor, else the closest note before it,
+// else the middle of the instrument's standard range. It is what makes
+// typing "D" after a G5 give the D beside that G rather than one at the
+// bottom of the horn.
+func (d *Doc) WindReference() int {
+	w := d.Track().Wind
+	if w == nil {
+		return 0
+	}
+	tr := d.Track()
+	c := d.cur
+	for bar := c.Bar; bar >= 0; bar-- {
+		beats := tr.Bars[bar].Beats
+		start := len(beats) - 1
+		if bar == c.Bar {
+			start = c.Beat
+		}
+		for bi := start; bi >= 0; bi-- {
+			if ns := beats[bi].Notes; len(ns) > 0 {
+				return tr.Pitch(ns[0])
+			}
+		}
+	}
+	return w.LowSounding + w.Span/2
+}
+
+// noteName spells a MIDI key in scientific pitch, sharps only — the same
+// one-spelling-per-pitch convention the text format writes with.
+func noteName(key int) string {
+	names := [12]string{"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"}
+	return fmt.Sprintf("%s%d", names[((key%12)+12)%12], key/12-1)
+}
+
 // ClearNote removes the note on the cursor's string. A beat left with no
 // notes is a rest, which is what the bar's padding is made of, so clearing
 // the last note of a trailing beat lets it merge back into the padding.

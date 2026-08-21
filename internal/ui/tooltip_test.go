@@ -228,7 +228,7 @@ func TestTooltipIsSuppressedByAModal(t *testing.T) {
 func TestToolbarLayoutMatchesWhatIsDrawn(t *testing.T) {
 	e := newTestEditor()
 	for i := 0; i < 6; i++ {
-		if err := e.doc.AddTrack("Track"); err != nil {
+		if err := e.doc.AddTrack("Track", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
