@@ -76,3 +76,23 @@ type Articulator interface {
 	// behave exactly as NoteOn(spec.Key, spec.Velocity) does.
 	NoteOnSpec(spec NoteSpec)
 }
+
+// A ContinuationReporter is an Articulator that can REFUSE a continuation
+// while the note it was asked to continue from is still sounding: told to
+// slide or hammer across an interval its mechanism cannot reach (the
+// SoundFont voice past its bend range), it attacks the note afresh instead,
+// and NoteOnSpec alone cannot say which happened. The caller has to know —
+// an engine that suppressed the From note's release on the assumption of a
+// takeover would otherwise leave a refused origin sounding forever, with no
+// scheduled NoteOff left to stop it. Implementing this is optional: the
+// built-in voices only ever fall back to a fresh attack when nothing is
+// sounding at From any more, so for them the assumption is already true.
+type ContinuationReporter interface {
+	Articulator
+	// NoteOnSpecReport sounds spec exactly as NoteOnSpec does, and reports
+	// whether a continuation Attack took over the voice of the note at
+	// From. false means the note was attacked afresh (or not at all): the
+	// From note was not taken over, and if it is still sounding it still
+	// owes whoever scheduled it a release.
+	NoteOnSpecReport(spec NoteSpec) (continued bool)
+}

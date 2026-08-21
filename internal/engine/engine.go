@@ -92,7 +92,12 @@ type Engine struct {
 	// artic is the same voice again where it can sound a NoteSpec, and nil
 	// where it cannot. Which one a voice is never changes, so the question
 	// is asked once here rather than on every note.
-	artic     []synth.Articulator
+	artic []synth.Articulator
+	// articRep is the voice once more where it can also REPORT a refused
+	// continuation (synth.ContinuationReporter); nil elsewhere. soundEvent
+	// needs the answer to know whether the From note's suppressed release
+	// is still owed.
+	articRep  []synth.ContinuationReporter
 	muted     []bool // one per track
 	userTrack []bool // one per track: Role == score.RoleUser
 
@@ -223,11 +228,13 @@ func New(sc *score.Score, opts Options) *Engine {
 	}
 	e.voices = make([]synth.Voice, len(sc.Tracks))
 	e.artic = make([]synth.Articulator, len(sc.Tracks))
+	e.articRep = make([]synth.ContinuationReporter, len(sc.Tracks))
 	e.muted = make([]bool, len(sc.Tracks))
 	e.userTrack = make([]bool, len(sc.Tracks))
 	for i, tr := range sc.Tracks {
 		e.voices[i] = opts.Voices(sr, tr.Program)
 		e.artic[i], _ = e.voices[i].(synth.Articulator)
+		e.articRep[i], _ = e.voices[i].(synth.ContinuationReporter)
 		e.userTrack[i] = tr.Role == score.RoleUser
 	}
 	e.active = make([]activeNote, 0, len(e.events)+1)

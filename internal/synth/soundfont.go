@@ -120,8 +120,9 @@ type soundFontVoice struct {
 }
 
 var (
-	_ Voice       = (*soundFontVoice)(nil)
-	_ Articulator = (*soundFontVoice)(nil)
+	_ Voice                = (*soundFontVoice)(nil)
+	_ Articulator          = (*soundFontVoice)(nil)
+	_ ContinuationReporter = (*soundFontVoice)(nil)
 )
 
 // sfChannels is the melodic MIDI channel of each slot: every channel but 9,
@@ -194,8 +195,16 @@ func (v *soundFontVoice) NoteOn(key int, velocity float64) {
 // time for a slide — so the sample is never re-struck. Everything else
 // takes a fresh channel and a fresh attack.
 func (v *soundFontVoice) NoteOnSpec(spec NoteSpec) {
+	v.NoteOnSpecReport(spec)
+}
+
+// NoteOnSpecReport is NoteOnSpec with the ContinuationReporter answer: true
+// only when the note took over its From note's channel. A refused takeover
+// (continuation's bend-range fallback) and a plain attack both report
+// false, telling the engine the From note, if any, was not released here.
+func (v *soundFontVoice) NoteOnSpecReport(spec NoteSpec) bool {
 	if spec.Velocity <= 0 {
-		return
+		return false
 	}
 	if s := v.continuation(spec); s != nil {
 		// The bend rides on the key the channel was STRUCK at, which on a
@@ -215,7 +224,7 @@ func (v *soundFontVoice) NoteOnSpec(spec NoteSpec) {
 		v.counter++
 		v.setSlotVibrato(s, spec.Vibrato)
 		v.pushBend(s)
-		return
+		return true
 	}
 
 	mv := int32(spec.Velocity*127 + 0.5)
@@ -236,6 +245,7 @@ func (v *soundFontVoice) NoteOnSpec(spec NoteSpec) {
 	s.age = v.counter
 	v.counter++
 	v.ms.NoteOn(s.ch, s.key, mv)
+	return false
 }
 
 // continuation returns the slot a slid or hammered note should take over,

@@ -311,11 +311,28 @@ func (e *Engine) soundEvent(ev *score.NoteEvent) {
 			spec.Attack, spec.From, prev = attack, e.active[i].key, i
 		}
 	}
-	artic.NoteOnSpec(spec)
+	continued := true
+	if rep := e.articRep[ev.Track]; rep != nil {
+		continued = rep.NoteOnSpecReport(spec)
+	} else {
+		// A voice that cannot report is taken at its interface's word: a
+		// continuation it was asked for is a continuation it performed.
+		// The built-in voices only fall back to a fresh attack when the
+		// From note has already gone silent on its own, so the suppressed
+		// release below suppresses nothing audible.
+		artic.NoteOnSpec(spec)
+	}
 	if prev >= 0 {
-		// The string was already ringing and still is: the same entry now
-		// stands for the new note, so its release is scheduled once, at
-		// the new note's end.
+		if !continued {
+			// The voice refused the takeover — a slide past its bend
+			// range attacks afresh rather than sounding the wrong pitch —
+			// so the origin note is still sounding, and the release that
+			// continuedAt suppressed (or that the rewrite below would
+			// drop) is owed NOW, where the takeover would have ended it.
+			e.voices[ev.Track].NoteOff(spec.From)
+		}
+		// The entry the origin note held now stands for the new note, so
+		// its release is scheduled once, at the new note's end.
 		e.active[prev].key, e.active[prev].end = ev.Key, ev.End
 		return
 	}

@@ -291,6 +291,27 @@ func TestSoundFontChainedSlideArrives(t *testing.T) {
 	}
 }
 
+// TestSoundFontNoteOnSpecReport pins the ContinuationReporter contract the
+// engine's release bookkeeping depends on: true exactly when the From
+// note's channel was taken over, false for a plain attack and for the
+// bend-range refusal — the case where the engine must release the origin
+// itself or nothing ever will.
+func TestSoundFontNoteOnSpecReport(t *testing.T) {
+	v := tinySoundFontVoice(t)
+	if v.NoteOnSpecReport(NoteSpec{Key: 60, Velocity: 0.9}) {
+		t.Error("a plain attack reported as a continuation")
+	}
+	if !v.NoteOnSpecReport(NoteSpec{Key: 64, Velocity: 0.9, Attack: AttackLegato, From: 60}) {
+		t.Error("an in-range takeover reported as a fresh attack")
+	}
+	if v.NoteOnSpecReport(NoteSpec{Key: 80, Velocity: 0.9, Attack: AttackLegato, From: 64}) {
+		t.Error("a refused takeover (20 semitones from the struck key) reported as a continuation")
+	}
+	if v.NoteOnSpecReport(NoteSpec{Key: 62, Velocity: 0, Attack: AttackLegato, From: 80}) {
+		t.Error("an ignored zero-velocity note reported as a continuation")
+	}
+}
+
 // TestSoundFontLegatoBeyondBendRangeReattacks: a chain that walks further
 // from the struck key than the channel's bend range can reach must fall
 // back to a fresh attack — the documented policy (continuation): attacking
