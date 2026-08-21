@@ -86,8 +86,10 @@ func (d *Doc) insertBarAt(at int) []int64 {
 		if src >= len(tr.Bars) {
 			src = len(tr.Bars) - 1
 		}
+		// Inserted empty; rebuildWith's refit pass lays the rests, and a
+		// meter no rests can fill (a model-valid 1/5, say) is reported
+		// there — and rolled back — rather than panicking here.
 		bar := &score.Bar{Num: tr.Bars[src].Num, Den: tr.Bars[src].Den}
-		fillBar(bar)
 		tr.Bars = append(tr.Bars, nil)
 		copy(tr.Bars[at+1:], tr.Bars[at:])
 		tr.Bars[at] = bar
@@ -165,6 +167,9 @@ func (d *Doc) SetTitle(title string) error {
 	if hasLineBreak(title) {
 		return fmt.Errorf("a title has to be one line")
 	}
+	if hasComment(title) {
+		return fmt.Errorf(`a title cannot contain "//", which starts a comment in the file`)
+	}
 	return d.mutate(func() error {
 		d.sc.Title = title
 		return nil
@@ -177,6 +182,9 @@ func (d *Doc) SetTrackName(name string) error {
 	if hasLineBreak(name) {
 		return fmt.Errorf("a track name has to be one line")
 	}
+	if hasComment(name) {
+		return fmt.Errorf(`a track name cannot contain "//", which starts a comment in the file`)
+	}
 	return d.mutate(func() error {
 		d.Track().Name = name
 		return nil
@@ -185,6 +193,11 @@ func (d *Doc) SetTrackName(name string) error {
 
 // SetCapo moves the capo on the track being edited.
 func (d *Doc) SetCapo(fret int) error {
+	if w := d.Track().Wind; w != nil {
+		// score.Validate refuses a capo on a wind track, so accepting one
+		// here would leave a piece that can never be saved.
+		return fmt.Errorf("a %s has no capo", w.Name)
+	}
 	if fret < 0 || fret > textfmt.MaxFret {
 		return fmt.Errorf("a capo has to be at fret 0-%d, not %d", textfmt.MaxFret, fret)
 	}
@@ -226,6 +239,11 @@ func (d *Doc) SetRole(role score.TrackRole) error {
 // written on, is refused — the notes are the user's work and a re-tune is
 // not a licence to lose them.
 func (d *Doc) SetTuning(tuning score.Tuning) error {
+	if w := d.Track().Wind; w != nil {
+		// score.Validate refuses a tuning on a wind track, so accepting one
+		// here would leave a piece that can never be saved.
+		return fmt.Errorf("a %s has no strings to tune", w.Name)
+	}
 	if len(tuning) == 0 {
 		return fmt.Errorf("a track needs at least one string")
 	}
@@ -253,6 +271,9 @@ func (d *Doc) AddTrack(name string, wind *score.WindInstrument) error {
 	if hasLineBreak(name) {
 		return fmt.Errorf("a track name has to be one line")
 	}
+	if hasComment(name) {
+		return fmt.Errorf(`a track name cannot contain "//", which starts a comment in the file`)
+	}
 	err := d.mutate(func() error {
 		tr := &score.Track{Name: name, Program: textfmt.DefaultProgram}
 		if wind != nil {
@@ -261,8 +282,13 @@ func (d *Doc) AddTrack(name string, wind *score.WindInstrument) error {
 		} else {
 			tr.Tuning = append(score.Tuning(nil), score.StandardTuning...)
 		}
-		for _, ref := range d.sc.Tracks[0].Bars {
-			fillBar(tr.AppendBar(ref.Num, ref.Den))
+		for bi, ref := range d.sc.Tracks[0].Bars {
+			bar := tr.AppendBar(ref.Num, ref.Den)
+			// A meter no rests can fill (a model-valid 1/5, say) refuses
+			// the whole track rather than panicking in fillBar.
+			if err := refit(bar, -1); err != nil {
+				return fmt.Errorf("bar %d of the new track: %w", bi+1, err)
+			}
 		}
 		retick(tr)
 		d.sc.Tracks = append(d.sc.Tracks, tr)
@@ -382,6 +408,17 @@ func checkPitches(tr *score.Track) error {
 func hasLineBreak(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] == '\n' || s[i] == '\r' {
+			return true
+		}
+	}
+	return false
+}
+
+// hasComment reports whether text holds "//", which would start a comment
+// in the file and silently truncate the directive that carries it.
+func hasComment(s string) bool {
+	for i := 0; i+1 < len(s); i++ {
+		if s[i] == '/' && s[i+1] == '/' {
 			return true
 		}
 	}

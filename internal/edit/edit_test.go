@@ -1,6 +1,7 @@
 package edit
 
 import (
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -543,6 +544,135 @@ func TestWindPitchOps(t *testing.T) {
 	}
 	if err := g.NudgePitch(1); err == nil {
 		t.Error("NudgePitch on a guitar track was not refused")
+	}
+}
+
+// TestWindRefusesFrettedVerbs: the fretted verbs on a wind track are
+// refusals, not crashes or corruption. SetFret used to index the wind
+// track's nil tuning (a panic); SetCapo, SetTuning and the pull-off and
+// dead-note marks used to succeed and leave a piece score.Validate
+// refuses — one that could never be saved.
+func TestWindRefusesFrettedVerbs(t *testing.T) {
+	d := New(NewOptions{Wind: score.WindByName("soprano sax")})
+	if err := d.SetWindPitch(74); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetFret(0); err == nil {
+		t.Error("SetFret on a wind track was not refused")
+	}
+	if err := d.SetCapo(2); err == nil {
+		t.Error("SetCapo on a wind track was not refused")
+	}
+	if err := d.SetTuning(score.StandardTuning); err == nil {
+		t.Error("SetTuning on a wind track was not refused")
+	}
+	if err := d.ToggleTech(score.TechPull); err == nil {
+		t.Error("a pull-off on a wind track was not refused")
+	}
+	if err := d.ToggleTech(score.TechDead); err == nil {
+		t.Error("a dead note on a wind track was not refused")
+	}
+	// The wind marks themselves still work, slur included — the bit it
+	// shares with TechHammer must not be caught in the pull/dead refusal.
+	if err := d.ToggleTech(score.TechSlur); err != nil {
+		t.Errorf("ToggleTech(TechSlur): %v", err)
+	}
+	if err := d.ToggleTech(score.TechVibrato); err != nil {
+		t.Errorf("ToggleTech(TechVibrato): %v", err)
+	}
+	barFull(t, d)
+	saveable(t, d)
+}
+
+// TestNewClampsNaNTempo: NaN slips through plain range comparisons (every
+// comparison with NaN is false), and used to reach score.USPerQuarter and
+// come back as a tempo map that can never validate or save. Like every
+// other out-of-range option, it takes the format's default instead.
+func TestNewClampsNaNTempo(t *testing.T) {
+	d := New(NewOptions{BPM: math.NaN()})
+	if got := d.TempoAtCursor(); got != textfmt.DefaultBPM {
+		t.Errorf("got %g BPM, want the default %g", got, float64(textfmt.DefaultBPM))
+	}
+	barFull(t, d)
+	saveable(t, d)
+}
+
+// TestTitleAndTrackNameRefuseCommentStarter: "//" starts a comment in the
+// file, so a title or track name holding it would save fine and read back
+// truncated — a piece that quietly changes on the way to disk. Refused at
+// typing time, like a line break.
+func TestTitleAndTrackNameRefuseCommentStarter(t *testing.T) {
+	d := New(NewOptions{Title: "Test"})
+	if err := d.SetTitle("AC//DC"); err == nil {
+		t.Error(`a title containing "//" was accepted`)
+	}
+	if got := d.Score().Title; got != "Test" {
+		t.Errorf("the refused title stuck: %q", got)
+	}
+	if err := d.SetTrackName("Riff // solo intro"); err == nil {
+		t.Error(`a track name containing "//" was accepted`)
+	}
+	if err := d.AddTrack("B // C", nil); err == nil {
+		t.Error(`AddTrack with "//" in the name was accepted`)
+	}
+	if got := len(d.Score().Tracks); got != 1 {
+		t.Errorf("the refused AddTrack left %d tracks, want 1", got)
+	}
+	saveable(t, d)
+}
+
+// TestExoticMeterRefusesInsteadOfPanicking: score.Validate allows meters
+// the format cannot spell or fill — 1/5 makes a 768-tick bar that no
+// combination of writable rests reaches. Squaring up a ragged piece,
+// appending a bar, and adding a track all have to invent rests; each used
+// to panic in fillBar on such a piece, and must refuse with a message
+// instead.
+func TestExoticMeterRefusesInsteadOfPanicking(t *testing.T) {
+	fifths := func(trackBars ...int) *score.Score {
+		sc := &score.Score{
+			Title:  "Fifths",
+			Tempos: score.TempoMap{{Tick: 0, USPerQuarter: score.USPerQuarter(120)}},
+			Meters: score.MeterMap{{Tick: 0, Num: 1, Den: 5}},
+		}
+		for _, bars := range trackBars {
+			tr := &score.Track{Tuning: append(score.Tuning(nil), score.StandardTuning...), Program: textfmt.DefaultProgram}
+			for b := 0; b < bars; b++ {
+				tr.AppendBar(1, 5).AddBeat(768, score.Note{String: 6, Fret: 0})
+			}
+			sc.Tracks = append(sc.Tracks, tr)
+		}
+		return sc
+	}
+
+	// Ragged: squaring up must pad the short track, which cannot be done.
+	ragged := fifths(2, 1)
+	if err := ragged.Validate(); err != nil {
+		t.Fatalf("the fixture should be model-valid: %v", err)
+	}
+	if _, err := Open(ragged); err == nil {
+		t.Error("Open squared up a piece whose meter no rests can fill")
+	}
+
+	// Square: opens fine (nothing to pad), and the operations that would
+	// have to invent rests refuse rather than crash.
+	d, err := Open(fifths(1))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := d.AppendBar(); err == nil {
+		t.Error("AppendBar invented a bar of rests no note length fills")
+	}
+	if err := d.AddTrack("Second", nil); err == nil {
+		t.Error("AddTrack invented a bar of rests no note length fills")
+	}
+	if got := d.BarCount(); got != 1 {
+		t.Errorf("the refusals changed the piece: %d bars, want 1", got)
+	}
+	if got := len(d.Score().Tracks); got != 1 {
+		t.Errorf("the refusals changed the piece: %d tracks, want 1", got)
+	}
+	if err := d.Score().Validate(); err != nil {
+		t.Errorf("the refusals left an invalid piece: %v", err)
 	}
 }
 

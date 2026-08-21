@@ -8,7 +8,7 @@ package textfmt
 // round trip on every fixture in the tree.
 //
 // The format is smaller than the model, and this is where that shows.
-// Four things a *score.Score can hold cannot be written down:
+// Six things a *score.Score can hold cannot be written down:
 //
 //   - a beat whose duration is not a plain, dotted, or triplet note value
 //     (an importer that quantised to something else, most often);
@@ -19,6 +19,10 @@ package textfmt
 //     pitch fits, but a transposing instrument reads above what it
 //     sounds, and no note name reaches that high. (The importers drop
 //     such notes with a warning, so only a hand-built score can hold one.)
+//   - a meter \time cannot spell — a numerator past 64, or a denominator
+//     that is not one of 1 2 4 8 16 32;
+//   - a title or track name holding a line break or "//", which would
+//     end the directive or start a comment mid-name.
 //
 // Each is reported as an error naming the bar, rather than written out as
 // something Parse would reject or — worse — read back as a different
@@ -109,6 +113,14 @@ type writer struct {
 }
 
 func (w *writer) run() error {
+	// Every meter that will be written must be one \time can spell, or the
+	// output would be text the parser rejects. parseTimeSig is the judge of
+	// that, so the check cannot drift from what the parser accepts.
+	for _, m := range w.sc.Meters {
+		if _, _, ok := parseTimeSig(fmt.Sprintf("%d/%d", m.Num, m.Den)); !ok {
+			return fmt.Errorf("gtab: the %d/%d time signature at tick %d is not one \\time can write (n/d with n 1-64 and d one of 1 2 4 8 16 32)", m.Num, m.Den, m.Tick)
+		}
+	}
 	if err := w.header(); err != nil {
 		return err
 	}
@@ -140,6 +152,9 @@ func (w *writer) header() error {
 	if title := strings.TrimSpace(w.sc.Title); title != "" {
 		if strings.ContainsAny(title, "\r\n") {
 			return fmt.Errorf("gtab: the title contains a line break, which \\title cannot hold")
+		}
+		if strings.Contains(title, "//") {
+			return fmt.Errorf(`gtab: the title contains "//", which \title cannot hold (it would start a comment)`)
 		}
 		fmt.Fprintf(&w.b, "\\title %s\n", title)
 	}
@@ -174,6 +189,9 @@ func (w *writer) track(i int, tr *score.Track) error {
 	if strings.TrimSpace(name) != "" {
 		if strings.ContainsAny(name, "\r\n") {
 			return fmt.Errorf("gtab: track %d: the name contains a line break, which \\track cannot hold", i+1)
+		}
+		if strings.Contains(name, "//") {
+			return fmt.Errorf(`gtab: track %d: the name contains "//", which \track cannot hold (it would start a comment)`, i+1)
 		}
 		fmt.Fprintf(&w.b, "\\track %s\n", name)
 	}

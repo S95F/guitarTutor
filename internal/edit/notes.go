@@ -12,6 +12,12 @@ import (
 // keeping its tie and techniques — retyping a fret is a correction, not a
 // reset.
 func (d *Doc) SetFret(fret int) error {
+	if w := d.Track().Wind; w != nil {
+		// The mirror of SetWindPitch's refusal on a fretted track — a wind
+		// track has no strings for a fret to land on, and indexing its nil
+		// tuning would be a crash, not a refusal.
+		return fmt.Errorf("a %s takes note names (A-G), not fret numbers", w.Name)
+	}
 	if fret < 0 || fret > textfmt.MaxFret {
 		return fmt.Errorf("fret %d is outside 0-%d", fret, textfmt.MaxFret)
 	}
@@ -250,6 +256,11 @@ func (d *Doc) ToggleTie() error {
 
 // ToggleTech turns one technique on or off for the note under the cursor.
 func (d *Doc) ToggleTech(t score.Technique) error {
+	if w := d.Track().Wind; w != nil && t&(score.TechPull|score.TechDead) != 0 {
+		// score.Validate refuses these bits on a wind track, so accepting
+		// the toggle would leave a piece that can never be saved.
+		return fmt.Errorf("pull-offs and dead notes do not exist on a %s", w.Name)
+	}
 	str := d.cur.Str
 	return d.mutate(func() error {
 		bt := d.Beat()

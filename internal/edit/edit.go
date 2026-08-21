@@ -74,7 +74,11 @@ type NewOptions struct {
 // defaults, so New(NewOptions{}) is a valid four-bar 4/4 piece in standard
 // tuning at 120 BPM.
 func New(opts NewOptions) *Doc {
-	if opts.BPM < 1 || opts.BPM > 1000 {
+	// The negated range form also rejects NaN (every comparison with NaN
+	// is false), which the two plain comparisons would let through into
+	// score.USPerQuarter — and from there into a tempo map that can never
+	// validate or save.
+	if !(opts.BPM >= 1 && opts.BPM <= 1000) {
 		opts.BPM = textfmt.DefaultBPM
 	}
 	if opts.Num < 1 || opts.Num > 64 {
@@ -398,7 +402,10 @@ func (d *Doc) squareUp() error {
 				start = last.Start + last.Len()
 			}
 			m := d.sc.Meters.At(start)
-			fillBar(tr.AppendBar(m.Num, m.Den))
+			// Appended empty; the refit pass below lays its rests, and a
+			// meter no rests can fill (a model-valid 1/5, say) is reported
+			// there rather than panicking here.
+			tr.AppendBar(m.Num, m.Den)
 		}
 	}
 	for ti, tr := range d.sc.Tracks {

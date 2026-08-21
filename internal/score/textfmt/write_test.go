@@ -305,6 +305,60 @@ func TestFormatRefusesWhatItCannotWrite(t *testing.T) {
 	})
 }
 
+// TestFormatRefusesCommentStarter: "//" starts a comment, so a title or
+// track name holding it would be written out fine and read back truncated
+// — or, led by "//", as a \title with no text at all, which does not parse.
+// Both are refused rather than written as a different piece.
+func TestFormatRefusesCommentStarter(t *testing.T) {
+	sc := parseFixture(t, gtabFixtures[0])
+	sc.Title = "AC//DC"
+	if _, err := Format(sc); err == nil || !strings.Contains(err.Error(), `"//"`) {
+		t.Errorf("title: got %v, want an error naming the comment starter", err)
+	}
+	sc.Title = "Fixture Riff"
+	sc.Tracks[0].Name = "Riff // solo intro"
+	if _, err := Format(sc); err == nil || !strings.Contains(err.Error(), `"//"`) {
+		t.Errorf("track name: got %v, want an error naming the comment starter", err)
+	}
+}
+
+// TestFormatRefusesUnspellableMeter: score.Validate allows any meter that
+// keeps the tick grid, but \time only spells n/d with n 1-64 and d a power
+// of two up to 32 — writing 4/3 or 65/4 would be output the parser
+// rejects, a file that can never be reopened.
+func TestFormatRefusesUnspellableMeter(t *testing.T) {
+	build := func(num, den int, beat int64) *score.Score {
+		sc := &score.Score{
+			Title:  "T",
+			Tempos: score.TempoMap{{Tick: 0, USPerQuarter: score.USPerQuarter(120)}},
+			Meters: score.MeterMap{{Tick: 0, Num: num, Den: den}},
+		}
+		tr := &score.Track{Tuning: append(score.Tuning(nil), score.StandardTuning...), Program: defaultProgram}
+		sc.Tracks = append(sc.Tracks, tr)
+		bar := tr.AppendBar(num, den)
+		for filled := int64(0); filled < bar.Len(); filled += beat {
+			bar.AddBeat(beat, score.Note{String: 6, Fret: 0})
+		}
+		return sc
+	}
+	// 4/3: four third-notes, each the length of one half-note triplet.
+	sc := build(4, 3, score.Triplet(score.Half))
+	if err := sc.Validate(); err != nil {
+		t.Fatalf("the 4/3 piece should be model-valid: %v", err)
+	}
+	if _, err := Format(sc); err == nil || !strings.Contains(err.Error(), "time signature") {
+		t.Errorf("4/3: got %v, want an error naming the time signature", err)
+	}
+	// 65/4: one quarter more than \time's widest numerator.
+	sc = build(65, 4, score.Quarter)
+	if err := sc.Validate(); err != nil {
+		t.Fatalf("the 65/4 piece should be model-valid: %v", err)
+	}
+	if _, err := Format(sc); err == nil || !strings.Contains(err.Error(), "time signature") {
+		t.Errorf("65/4: got %v, want an error naming the time signature", err)
+	}
+}
+
 // TestFormatNamesLaterTracks checks that a nameless second track is given
 // one. \track needs a name to exist, and without this the track's bars
 // would be appended to its predecessor — a silently different piece.
