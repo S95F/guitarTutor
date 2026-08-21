@@ -12,27 +12,20 @@ import (
 	"github.com/S95F/musicTutor/internal/score"
 )
 
-// canonical is the fixture riff's exact flattened event table (see
-// docs/TEXTFORMAT.md and ROADMAP Phase 0): Start/End in PPQ-960 ticks,
-// derived MIDI key, and — because .gp carries authored fingering — the
-// exact string and fret, in Events() order. The string column pins the
-// GP-to-score string-numbering conversion (GP counts 0 = lowest string;
-// we count 1 = highest), the likeliest bug in this package.
 var canonical = []struct {
 	start, end int64
 	key        int
 	str, fret  int
 }{
-	// Bar 1: eight eighth notes on strings 6 and 5, as authored.
+
 	{0, 480, 40, 6, 0}, {480, 960, 43, 6, 3}, {960, 1440, 50, 5, 5}, {1440, 1920, 40, 6, 0},
 	{1920, 2400, 43, 6, 3}, {2400, 2880, 50, 5, 5}, {2880, 3360, 43, 6, 3}, {3360, 3840, 40, 6, 0},
-	// Bar 2: quarter, quarter, half — all on string 5.
+
 	{3840, 4800, 47, 5, 2}, {4800, 5760, 45, 5, 0}, {5760, 7680, 47, 5, 2},
-	// Bar 3: E5 power chord (strings 6/5/4, frets 0/2/2), rest, quarter.
+
 	{7680, 9600, 40, 6, 0}, {7680, 9600, 47, 5, 2}, {7680, 9600, 52, 4, 2},
 	{10560, 11520, 43, 6, 3},
-	// Bar 4: whole-note low E, authored as two tied halves and merged
-	// back into one event by score.Events (the round-trip invariant).
+
 	{11520, 15360, 40, 6, 0},
 }
 
@@ -88,7 +81,6 @@ func TestImportFixtureRiff(t *testing.T) {
 		}
 	}
 
-	// .gp fingering is authored, never heuristic.
 	for _, tr := range s.Tracks {
 		for _, bar := range tr.Bars {
 			for _, beat := range bar.Beats {
@@ -102,8 +94,6 @@ func TestImportFixtureRiff(t *testing.T) {
 	}
 }
 
-// buildGP zips entries (name, content pairs in order) into an in-memory
-// .gp archive.
 func buildGP(t *testing.T, entries ...[2]string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -123,15 +113,10 @@ func buildGP(t *testing.T, entries ...[2]string) []byte {
 	return buf.Bytes()
 }
 
-// gpifDoc wraps GPIF body fragments in the document frame: one track in
-// standard tuning and a 120 BPM tick-0 tempo automation.
 func gpifDoc(masterBars, bars, voices, beats, notes, rhythms string) string {
 	return gpifDocTracks("0", trackXML(0, "G", ""), masterBars, bars, voices, beats, notes, rhythms)
 }
 
-// gpifDocTracks is gpifDoc with a caller-supplied <Tracks> block and
-// master-track id list, for the multi-track cases (percussion filtering
-// and the filtered-index bug).
 func gpifDocTracks(masterTracks, tracks, masterBars, bars, voices, beats, notes, rhythms string) string {
 	return `<?xml version="1.0" encoding="UTF-8"?>
 <GPIF>
@@ -153,8 +138,6 @@ func gpifDocTracks(masterTracks, tracks, masterBars, bars, voices, beats, notes,
 </GPIF>`
 }
 
-// trackXML emits a standard-tuning <Track>; extra is spliced in ahead of
-// the staves, for the elements that mark a track as a drum kit.
 func trackXML(id int, name, extra string) string {
 	return `<Track id="` + itoa(id) + `">
       <Name>` + name + `</Name>` + extra + `
@@ -165,7 +148,6 @@ func trackXML(id int, name, extra string) string {
     </Track>`
 }
 
-// note emits a GPIF note with the given id, GP string (0 = lowest), and fret.
 func noteXML(id, gpString, fret int, extra string) string {
 	return `<Note id="` + itoa(id) + `"><Properties>` +
 		`<Property name="String"><String>` + itoa(gpString) + `</String></Property>` +
@@ -206,8 +188,6 @@ func hasWarning(warns []string, substr string) bool {
 	return false
 }
 
-// TestSecondVoiceWarning: a bar whose second voice holds beats imports
-// the first voice only, with a warning.
 func TestSecondVoiceWarning(t *testing.T) {
 	doc := gpifDoc(
 		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`,
@@ -234,7 +214,6 @@ func TestSecondVoiceWarning(t *testing.T) {
 	}
 }
 
-// TestStructuralErrors: only structurally unreadable files error.
 func TestStructuralErrors(t *testing.T) {
 	if _, _, err := Import([]byte("this is not a zip archive")); err == nil {
 		t.Error("garbage bytes: want an error")
@@ -254,9 +233,6 @@ func TestStructuralErrors(t *testing.T) {
 	}
 }
 
-// TestPermissive: unknown XML elements, unknown note properties, and
-// extra archive entries never fail an import — the unknown note property
-// warns, everything else is ignored.
 func TestPermissive(t *testing.T) {
 	doc := gpifDoc(
 		`<MasterBar><Time>4/4</Time><SomeNewMasterBarThing x="1"/><Bars>0</Bars></MasterBar>`,
@@ -266,7 +242,7 @@ func TestPermissive(t *testing.T) {
 		noteXML(0, 0, 0, `<InstrumentArticulation>0</InstrumentArticulation>`),
 		`<Rhythm id="0"><NoteValue>Whole</NoteValue></Rhythm>`,
 	)
-	// Splice an unknown note property in (a bend carried as properties).
+
 	doc = strings.Replace(doc,
 		`<Property name="Fret"><Fret>0</Fret></Property>`,
 		`<Property name="Fret"><Fret>0</Fret></Property><Property name="Bended"><Enable /></Property>`,
@@ -287,15 +263,13 @@ func TestPermissive(t *testing.T) {
 	}
 }
 
-// TestBarPadAndTruncate: underfull bars gain a trailing rest, overfull
-// bars are truncated, both with warnings, and the result validates.
 func TestBarPadAndTruncate(t *testing.T) {
 	doc := gpifDoc(
 		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`+
 			`<MasterBar><Time>4/4</Time><Bars>1</Bars></MasterBar>`,
 		`<Bar id="0"><Voices>0 -1 -1 -1</Voices></Bar>`+
 			`<Bar id="1"><Voices>1 -1 -1 -1</Voices></Bar>`,
-		// Bar 1: a lone quarter (underfull). Bar 2: half then whole (overfull).
+
 		`<Voice id="0"><Beats>0</Beats></Voice><Voice id="1"><Beats>1 2</Beats></Voice>`,
 		`<Beat id="0"><Rhythm ref="0" /><Notes>0</Notes></Beat>`+
 			`<Beat id="1"><Rhythm ref="1" /><Notes>1</Notes></Beat>`+
@@ -323,9 +297,9 @@ func TestBarPadAndTruncate(t *testing.T) {
 		start, end int64
 		key        int
 	}{
-		{0, 960, 40},            // the lone quarter
-		{3840, 5760, 43},        // the half
-		{5760, 3840 + 3840, 45}, // the whole, truncated to the bar end
+		{0, 960, 40},
+		{3840, 5760, 43},
+		{5760, 3840 + 3840, 45},
 	}
 	if len(evs) != len(want) {
 		t.Fatalf("got %d events, want %d: %+v", len(evs), len(want), evs)
@@ -338,9 +312,6 @@ func TestBarPadAndTruncate(t *testing.T) {
 	}
 }
 
-// TestRhythmMath: augmentation dots and primary tuplets shape durations.
-// One 4/4 bar: dotted quarter + eighth + three quarter-note triplets =
-// 1440 + 480 + 3*640 = 3840 ticks exactly.
 func TestRhythmMath(t *testing.T) {
 	doc := gpifDoc(
 		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`,
@@ -377,8 +348,6 @@ func TestRhythmMath(t *testing.T) {
 	}
 }
 
-// TestTempoUnitsAndPosition: a mid-bar automation in half-note units
-// lands at the right tick with the right quarter-note BPM.
 func TestTempoUnitsAndPosition(t *testing.T) {
 	doc := gpifDoc(
 		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`+
@@ -389,8 +358,7 @@ func TestTempoUnitsAndPosition(t *testing.T) {
 		noteXML(0, 0, 0, ""),
 		`<Rhythm id="0"><NoteValue>Whole</NoteValue></Rhythm>`,
 	)
-	// 60 BPM counted in half notes = 120 quarter-note BPM, halfway
-	// through bar 2: tick 3840 + 1920 = 5760.
+
 	doc = strings.Replace(doc, `</Automations>`,
 		`<Automation><Type>Tempo</Type><Bar>1</Bar><Position>0.5</Position><Value>60 4</Value></Automation></Automations>`, 1)
 	s, _, err := importDoc(t, doc)
@@ -411,11 +379,6 @@ func TestTempoUnitsAndPosition(t *testing.T) {
 	}
 }
 
-// TestHostileDotCount: the AugmentationDot count attribute is attacker
-// controlled — a huge count must not wedge the import (the old loop
-// iterated count times), and negative or implausibly large counts are
-// clamped to 3 with a warning. count=3 is the legitimate maximum and
-// imports without a dot warning.
 func TestHostileDotCount(t *testing.T) {
 	doc := gpifDoc(
 		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`+
@@ -468,8 +431,7 @@ func TestHostileDotCount(t *testing.T) {
 	if hasWarning(res.warns, "dot count 3") {
 		t.Errorf("warnings = %v, count=3 is legitimate and must not warn", res.warns)
 	}
-	// A triple-dotted quarter is 960+480+240+120 = 1800 ticks; the
-	// hostile counts clamp to the same duration.
+
 	evs := res.s.Events()
 	want := []struct{ start, end int64 }{{0, 1800}, {3840, 5640}, {7680, 9480}}
 	if len(evs) != len(want) {
@@ -482,9 +444,6 @@ func TestHostileDotCount(t *testing.T) {
 	}
 }
 
-// bombGP zips the given deflate stream into a Content/score.gpif entry
-// whose header claims `claimed` uncompressed bytes. CreateRaw writes the
-// header fields verbatim, so claimed is free to lie about the stream.
 func bombGP(t *testing.T, compressed []byte, crc uint32, claimed uint64) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -508,11 +467,8 @@ func bombGP(t *testing.T, compressed []byte, crc uint32, claimed uint64) []byte 
 	return buf.Bytes()
 }
 
-// TestZipBombRejected: a small archive whose score.gpif inflates past
-// the 64 MiB cap errors out instead of ballooning memory, whether the
-// zip header admits the size or lies about it.
 func TestZipBombRejected(t *testing.T) {
-	// Deflate 65 MiB of zeros — just past the cap — into ~65 KB.
+
 	const bombSize = 65 << 20
 	chunk := make([]byte, 64<<10)
 	var comp bytes.Buffer
@@ -534,8 +490,6 @@ func TestZipBombRejected(t *testing.T) {
 		t.Fatalf("test bomb is %d bytes compressed, want under 1 MiB", comp.Len())
 	}
 
-	// Honest header: the declared size alone is over the cap, and the
-	// import must say so without decompressing anything.
 	start := time.Now()
 	_, _, err = Import(bombGP(t, comp.Bytes(), crc.Sum32(), bombSize))
 	if err == nil || !strings.Contains(err.Error(), "zip bomb") {
@@ -545,19 +499,12 @@ func TestZipBombRejected(t *testing.T) {
 		t.Errorf("honest bomb took %v to reject, want a fast failure", elapsed)
 	}
 
-	// Forged header: claims 1 KiB but the stream inflates to 65 MiB.
-	// The header must not be trusted alone — the read has to stay
-	// bounded and fail, whether the zip layer or the importer's
-	// LimitReader cap notices first.
 	_, _, err = Import(bombGP(t, comp.Bytes(), crc.Sum32(), 1024))
 	if err == nil {
 		t.Error("forged-header bomb: import succeeded, want an error")
 	}
 }
 
-// TestHostileTempoPosition: tempo automation positions of -1, NaN, and
-// 1e18 must warn and clamp — never produce a negative or overflowed
-// tick that unsorts the tempo map and fails the whole import.
 func TestHostileTempoPosition(t *testing.T) {
 	doc := gpifDoc(
 		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`+
@@ -587,8 +534,7 @@ func TestHostileTempoPosition(t *testing.T) {
 	if !hasWarning(warns, "not a number") {
 		t.Errorf("warnings = %v, want a NaN position warning", warns)
 	}
-	// Position -1 clamps to the bar 1 start (tick 0, overriding the
-	// frame's 120 there), NaN to the bar 2 start, 1e18 to the bar 3 end.
+
 	want := score.TempoMap{
 		{Tick: 0, USPerQuarter: score.USPerQuarter(100)},
 		{Tick: 3840, USPerQuarter: score.USPerQuarter(90)},
@@ -604,9 +550,6 @@ func TestHostileTempoPosition(t *testing.T) {
 	}
 }
 
-// TestAbsurdTempoSkipped: a BPM so large it rounds to zero microseconds
-// per quarter (and a NaN BPM) is skipped with a warning instead of
-// planting an invalid tempo that fails validation.
 func TestAbsurdTempoSkipped(t *testing.T) {
 	doc := gpifDoc(
 		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`,
@@ -635,9 +578,6 @@ func TestAbsurdTempoSkipped(t *testing.T) {
 	}
 }
 
-// TestImportTuningTooManyStrings: a Tuning property declaring 30 strings
-// is past the 25-string limit — warned, and standard tuning assumed —
-// because an absurd tuning passes Validate and then chokes tab rendering.
 func TestImportTuningTooManyStrings(t *testing.T) {
 	doc := gpifDoc(
 		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`,
@@ -670,11 +610,6 @@ func TestImportTuningTooManyStrings(t *testing.T) {
 	}
 }
 
-// TestImportHugeTimeSignatureRejected: a numerator that is a multiple of
-// 2^56 used to wrap the bar-length multiplication to exactly zero,
-// making every bar zero-length while still passing Validate. This is a
-// structural absurdity — not a droppable note — so the import must fail,
-// naming the limit.
 func TestImportHugeTimeSignatureRejected(t *testing.T) {
 	doc := gpifDoc(
 		`<MasterBar><Time>72057594037927936/1</Time><Bars>0</Bars></MasterBar>`,
@@ -690,10 +625,6 @@ func TestImportHugeTimeSignatureRejected(t *testing.T) {
 	}
 }
 
-// TestImportOutOfRangeFretDropped: one fret-64 note must not make the
-// final Validate reject the whole score ("string 1 fret 64 sounds MIDI
-// key 128, outside 0-127") — the note drops with a warning and the rest
-// of the file imports intact.
 func TestImportOutOfRangeFretDropped(t *testing.T) {
 	doc := gpifDoc(
 		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`,
@@ -720,14 +651,13 @@ func TestImportOutOfRangeFretDropped(t *testing.T) {
 	}
 }
 
-// TestCapoAndTuning: a capo and a drop-D tuning shift derived pitches.
 func TestCapoAndTuning(t *testing.T) {
 	doc := gpifDoc(
 		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`,
 		`<Bar id="0"><Voices>0 -1 -1 -1</Voices></Bar>`,
 		`<Voice id="0"><Beats>0</Beats></Voice>`,
 		`<Beat id="0"><Rhythm ref="0" /><Notes>0</Notes></Beat>`,
-		noteXML(0, 0, 0, ""), // open lowest string
+		noteXML(0, 0, 0, ""),
 		`<Rhythm id="0"><NoteValue>Whole</NoteValue></Rhythm>`,
 	)
 	doc = strings.Replace(doc, `<Pitches>40 45 50 55 59 64</Pitches>`, `<Pitches>38 45 50 55 59 64</Pitches>`, 1)
@@ -747,15 +677,11 @@ func TestCapoAndTuning(t *testing.T) {
 		t.Errorf("Tuning = %v, want drop D low string (38) and high E (64)", tr.Tuning)
 	}
 	evs := s.Events()
-	if len(evs) != 1 || evs[0].Key != 40 { // 38 open + capo 2
+	if len(evs) != 1 || evs[0].Key != 40 {
 		t.Fatalf("events = %+v, want one note at key 40 (drop D + capo 2)", evs)
 	}
 }
 
-// percNoteXML emits a GPIF percussion note. A drum hit is spelled with
-// Element/Variation — which kit piece, which articulation — and never
-// with String/Fret, which is precisely why the pitched conversion path
-// cannot map one.
 func percNoteXML(id, element int) string {
 	return `<Note id="` + itoa(id) + `"><Properties>` +
 		`<Property name="Element"><Element>` + itoa(element) + `</Element></Property>` +
@@ -763,9 +689,6 @@ func percNoteXML(id, element int) string {
 		`</Properties></Note>`
 }
 
-// percussionDoc builds a two-track document: track 1 is a drum kit marked
-// by mark, holding four hits, and track 2 is a guitar holding one whole
-// note at fret 5 on the low E.
 func percussionDoc(mark string) string {
 	return gpifDocTracks("0 1",
 		trackXML(0, "Drums", mark)+trackXML(1, "G", ""),
@@ -784,7 +707,6 @@ func percussionDoc(mark string) string {
 			`<Rhythm id="1"><NoteValue>Whole</NoteValue></Rhythm>`)
 }
 
-// trackNames lists a score's track names, for failure messages.
 func trackNames(s *score.Score) []string {
 	var names []string
 	for _, tr := range s.Tracks {
@@ -793,13 +715,6 @@ func trackNames(s *score.Score) []string {
 	return names
 }
 
-// TestPercussionTrackSkipped (audit G1): a drum track must not be run
-// through the pitched string/fret path. That path can map nothing, so
-// every hit became a rest — with one warning PER NOTE — and because the
-// drums were the file's first track the resulting empty part was handed
-// to the user as the thing to practise. The track must be dropped
-// instead, with exactly one warning naming it, leaving the guitar as
-// RoleUser.
 func TestPercussionTrackSkipped(t *testing.T) {
 	s, warns, err := importDoc(t, percussionDoc(`<InstrumentSet><Name>Drumkit</Name><Type>drumKit</Type></InstrumentSet>`))
 	if err != nil {
@@ -825,16 +740,13 @@ func TestPercussionTrackSkipped(t *testing.T) {
 	if hasWarning(warns, "String/Fret") {
 		t.Errorf("warnings = %v, want no per-note String/Fret complaints", warns)
 	}
-	// The guitar's own music survives intact: low E (40) at fret 5.
+
 	evs := s.Events()
 	if len(evs) != 1 || evs[0].Key != 45 || evs[0].String != 6 || evs[0].Fret != 5 {
 		t.Fatalf("events = %+v, want the guitar's single whole note (key 45, string 6 fret 5)", evs)
 	}
 }
 
-// TestPercussionMarkers (audit G1): GPIF flags a drum kit in more than
-// one place depending on the writing version, and every marker must be
-// honoured — while an ordinary fretted track must not be mistaken for one.
 func TestPercussionMarkers(t *testing.T) {
 	tests := []struct {
 		name string
@@ -869,9 +781,6 @@ func TestPercussionMarkers(t *testing.T) {
 	}
 }
 
-// TestAllPercussionTracksError (audit G1): a file that is nothing but
-// drums has no part this importer can teach. It must say so rather than
-// hand back a score of silence.
 func TestAllPercussionTracksError(t *testing.T) {
 	doc := gpifDocTracks("0",
 		trackXML(0, "Drums", `<InstrumentSet><Type>drumKit</Type></InstrumentSet>`),
@@ -890,14 +799,6 @@ func TestAllPercussionTracksError(t *testing.T) {
 	}
 }
 
-// threeTrackBarsDoc builds a three-slot document whose middle slot is
-// filtered out: the master track lists three tracks, each master bar
-// lists three bar ids, and the three bars carry frets 1, 3 and 7 so a
-// track reading the wrong slot is immediately visible.
-//
-// middleID is the master-track id in the middle slot (either one that
-// resolves to nothing, or a percussion track's), and middleTrack the
-// <Track> element backing it, if any.
 func threeTrackBarsDoc(middleID, middleTrack string) string {
 	return gpifDocTracks("0 "+middleID+" 2",
 		trackXML(0, "A", "")+middleTrack+trackXML(2, "B", ""),
@@ -915,9 +816,6 @@ func threeTrackBarsDoc(middleID, middleTrack string) string {
 		`<Rhythm id="0"><NoteValue>Whole</NoteValue></Rhythm>`)
 }
 
-// assertOwnBars checks that the two surviving tracks kept the bars
-// belonging to their own slots (frets 1 and 7), not the filtered middle
-// slot's (fret 3).
 func assertOwnBars(t *testing.T, s *score.Score) {
 	t.Helper()
 	if len(s.Tracks) != 2 {
@@ -943,13 +841,8 @@ func assertOwnBars(t *testing.T, s *score.Score) {
 	}
 }
 
-// TestFilteredTrackKeepsItsOwnBars (audit G2): <MasterBar><Bars> is
-// indexed by the ORIGINAL track order, but the lookup used the track's
-// index in the filtered slice. Drop the middle track and every later
-// track silently reads a preceding slot's bars — here B would be taught
-// the missing track's fret 3 instead of its own fret 7.
 func TestFilteredTrackKeepsItsOwnBars(t *testing.T) {
-	// The master track's middle slot references id 99, which does not exist.
+
 	s, warns, err := importDoc(t, threeTrackBarsDoc("99", ""))
 	if err != nil {
 		t.Fatalf("Import: %v", err)
@@ -960,10 +853,6 @@ func TestFilteredTrackKeepsItsOwnBars(t *testing.T) {
 	assertOwnBars(t, s)
 }
 
-// TestPercussionFilterKeepsLaterTrackBars (audit G1 + G2): dropping
-// percussion is the filtering that makes the G2 index mismatch common, so
-// the two fixes are pinned together — a drum track between two guitars
-// must not shift the second guitar onto the drums' bars.
 func TestPercussionFilterKeepsLaterTrackBars(t *testing.T) {
 	drums := trackXML(1, "Drums", `<InstrumentSet><Type>drumKit</Type></InstrumentSet>`)
 	s, warns, err := importDoc(t, threeTrackBarsDoc("1", drums))
@@ -979,11 +868,6 @@ func TestPercussionFilterKeepsLaterTrackBars(t *testing.T) {
 	}
 }
 
-// TestHostileTuplet: a PrimaryTuplet denominator of 1e18 overflowed
-// dur*int64(den), wrapping the beat to a length of roughly 7.7e17 ticks
-// that fillBar then truncated to the bar — the note came out wrong and
-// only an unrelated "overfill" warning mentioned it at all. Implausible
-// tuplets must be rejected by name, leaving the plain note value.
 func TestHostileTuplet(t *testing.T) {
 	doc := gpifDoc(
 		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`,
@@ -1009,15 +893,6 @@ func TestHostileTuplet(t *testing.T) {
 	}
 }
 
-// TestPitchedInstrumentsAreNotPercussion is the fix-verification
-// regression for the percussion filter. Detecting kits by substring
-// deleted every pitched instrument whose name merely contains the word:
-// General MIDI has Steel Drums (115), Percussive Organ (18) and Melodic
-// Tom, GPIF's own family for tuned mallets is literally
-// "pitchedPercussion", and refs like "perc-vibraphone" are ordinary
-// fretted-renderable parts. Each vanished from the score with a warning
-// claiming it was drums — the player opened a file and their part was
-// simply gone.
 func TestPitchedInstrumentsAreNotPercussion(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1046,8 +921,6 @@ func TestPitchedInstrumentsAreNotPercussion(t *testing.T) {
 	}
 }
 
-// countWarnings counts the warnings containing substr, for the cases
-// where "exactly one aggregate warning" is itself the contract.
 func countWarnings(warns []string, substr string) int {
 	n := 0
 	for _, w := range warns {
@@ -1058,36 +931,21 @@ func countWarnings(warns []string, substr string) int {
 	return n
 }
 
-// pitchPropXML emits one GP7+ pitch property (ConcertPitch or
-// TransposedPitch): a spelled step, an accidental ("", "#", "b", "x",
-// "bb"), and a scientific octave (C4 = MIDI 60).
 func pitchPropXML(name, step, accidental string, octave int) string {
 	return `<Property name="` + name + `"><Pitch><Step>` + step + `</Step>` +
 		`<Accidental>` + accidental + `</Accidental>` +
 		`<Octave>` + itoa(octave) + `</Octave></Pitch></Property>`
 }
 
-// windNoteXML emits a GP7+ non-fretted note: pitch properties only,
-// no String/Fret.
 func windNoteXML(id int, props, extra string) string {
 	return `<Note id="` + itoa(id) + `"><Properties>` + props + `</Properties>` + extra + `</Note>`
 }
 
-// windTrackXML emits a <Track> with no Tuning property — the shape GP
-// gives a non-fretted staff; extra carries GeneralMidi or other markers.
 func windTrackXML(id int, name, extra string) string {
 	return `<Track id="` + itoa(id) + `"><Name>` + name + `</Name>` + extra +
 		`<Staves><Staff><Properties></Properties></Staff></Staves></Track>`
 }
 
-// TestImportWindSopranoSax: a track with no Tuning property, a
-// GeneralMidi program of 64, and ConcertPitch/TransposedPitch notes (the
-// soprano sax's +2 written delta) imports as the soprano sax — no
-// strings, no capo, every note on lane 1 at Fret = key − LowSounding,
-// nothing Inferred, and no warnings. Key 92 sits above the standard Span
-// (56+32 = 88) and its lane fret (36) above maxImportFret: altissimo is
-// real and the fretboard cap must not apply to a wind lane. Bar 2 is two
-// tied halves that score.Events merges back into one event.
 func TestImportWindSopranoSax(t *testing.T) {
 	doc := gpifDocTracks("0",
 		windTrackXML(0, "Sax", `<GeneralMidi><Program>64</Program></GeneralMidi>`),
@@ -1102,9 +960,7 @@ func TestImportWindSopranoSax(t *testing.T) {
 			`<Beat id="3"><Rhythm ref="0" /><Notes>3</Notes></Beat>`+
 			`<Beat id="4"><Rhythm ref="1" /><Notes>4</Notes></Beat>`+
 			`<Beat id="5"><Rhythm ref="1" /><Notes>5</Notes></Beat>`,
-		// G#3 (56), Ab4 (68), Cbb5 (70, exercising "bb"), G#6 (92,
-		// altissimo), then the tied Ab4 pair; every written pitch is the
-		// concert pitch plus 2.
+
 		windNoteXML(0, pitchPropXML("ConcertPitch", "G", "#", 3)+pitchPropXML("TransposedPitch", "A", "#", 3), "")+
 			windNoteXML(1, pitchPropXML("ConcertPitch", "A", "b", 4)+pitchPropXML("TransposedPitch", "B", "b", 4), "")+
 			windNoteXML(2, pitchPropXML("ConcertPitch", "C", "bb", 5)+pitchPropXML("TransposedPitch", "C", "", 5), "")+
@@ -1145,7 +1001,7 @@ func TestImportWindSopranoSax(t *testing.T) {
 		key        int
 	}{
 		{0, 960, 56}, {960, 1920, 68}, {1920, 2880, 70}, {2880, 3840, 92},
-		{3840, 7680, 68}, // the tied halves, merged back by Events
+		{3840, 7680, 68},
 	}
 	if len(evs) != len(want) {
 		t.Fatalf("got %d events %+v, want %d", len(evs), evs, len(want))
@@ -1172,11 +1028,6 @@ func TestImportWindSopranoSax(t *testing.T) {
 	}
 }
 
-// TestImportWindDeltaResolvesClarinet: with no GeneralMidi program the
-// transposition delta plus the note range must pick the instrument, and
-// only when they pick exactly one. Delta +2 alone fits the soprano sax,
-// the clarinet, and the trumpet; a note at D3 (50) sits below the sax
-// (56) and the trumpet (52), leaving the clarinet as the single match.
 func TestImportWindDeltaResolvesClarinet(t *testing.T) {
 	doc := gpifDocTracks("0",
 		windTrackXML(0, "Horn", ""),
@@ -1212,10 +1063,6 @@ func TestImportWindDeltaResolvesClarinet(t *testing.T) {
 	}
 }
 
-// TestImportWindChordKeepsHighest: a beat listing three notes cannot all
-// sound on a monophonic instrument; the highest sounding note survives —
-// melody on top — with one aggregate warning, not one per dropped note.
-// The top note is spelled Fx4 (double sharp), exercising "x".
 func TestImportWindChordKeepsHighest(t *testing.T) {
 	doc := gpifDocTracks("0",
 		windTrackXML(0, "Sax", `<GeneralMidi><Program>64</Program></GeneralMidi>`),
@@ -1244,11 +1091,6 @@ func TestImportWindChordKeepsHighest(t *testing.T) {
 	}
 }
 
-// TestImportWindRangeDrops: below the instrument a note is dropped, never
-// octave-rewritten; above, the ceiling is the WRITTEN pitch — G9 (127)
-// sounds fine but a soprano sax player would read 129, which has no MIDI
-// note name, so the text format could never save it. Each drop warns and
-// the surviving note imports intact.
 func TestImportWindRangeDrops(t *testing.T) {
 	doc := gpifDocTracks("0",
 		windTrackXML(0, "Sax", `<GeneralMidi><Program>64</Program></GeneralMidi>`),
@@ -1258,9 +1100,9 @@ func TestImportWindRangeDrops(t *testing.T) {
 		`<Beat id="0"><Rhythm ref="0" /><Notes>0</Notes></Beat>`+
 			`<Beat id="1"><Rhythm ref="0" /><Notes>1</Notes></Beat>`+
 			`<Beat id="2"><Rhythm ref="1" /><Notes>2</Notes></Beat>`,
-		windNoteXML(0, pitchPropXML("ConcertPitch", "D", "", 3), "")+ // 50, below 56
-			windNoteXML(1, pitchPropXML("ConcertPitch", "G", "", 9), "")+ // 127, written 129
-			windNoteXML(2, pitchPropXML("ConcertPitch", "A", "b", 4), ""), // 68, fine
+		windNoteXML(0, pitchPropXML("ConcertPitch", "D", "", 3), "")+
+			windNoteXML(1, pitchPropXML("ConcertPitch", "G", "", 9), "")+
+			windNoteXML(2, pitchPropXML("ConcertPitch", "A", "b", 4), ""),
 		`<Rhythm id="0"><NoteValue>Quarter</NoteValue></Rhythm>`+
 			`<Rhythm id="1"><NoteValue>Half</NoteValue></Rhythm>`,
 	)
@@ -1286,11 +1128,6 @@ func TestImportWindRangeDrops(t *testing.T) {
 	}
 }
 
-// TestImportWindTransposeMismatchWarns: the chosen instrument comes from
-// the declared program; a TransposedPitch that contradicts its
-// transposition is reported once per track and the concert pitch wins —
-// the model stores sounding pitch, and the written pitch is only
-// evidence.
 func TestImportWindTransposeMismatchWarns(t *testing.T) {
 	doc := gpifDocTracks("0",
 		windTrackXML(0, "Sax", `<GeneralMidi><Program>64</Program></GeneralMidi>`),
@@ -1298,7 +1135,7 @@ func TestImportWindTransposeMismatchWarns(t *testing.T) {
 		`<Bar id="0"><Voices>0 -1 -1 -1</Voices></Bar>`,
 		`<Voice id="0"><Beats>0</Beats></Voice>`,
 		`<Beat id="0"><Rhythm ref="0" /><Notes>0</Notes></Beat>`,
-		// Ab4 concert (68) but C5 written (72): a +4 delta on a +2 horn.
+
 		windNoteXML(0, pitchPropXML("ConcertPitch", "A", "b", 4)+pitchPropXML("TransposedPitch", "C", "", 5), ""),
 		`<Rhythm id="0"><NoteValue>Whole</NoteValue></Rhythm>`,
 	)
@@ -1316,11 +1153,6 @@ func TestImportWindTransposeMismatchWarns(t *testing.T) {
 	}
 }
 
-// TestImportTuningAndPitchStaysFretted: a Tuning property is a fretted
-// track's signature, and destroying a tab is worse than importing
-// nothing — pitch properties on its notes must never flip the track to
-// wind, whether they ride alongside the authored fingering or stand
-// alone.
 func TestImportTuningAndPitchStaysFretted(t *testing.T) {
 	frame := func(notes string) string {
 		return gpifDoc(
@@ -1333,8 +1165,7 @@ func TestImportTuningAndPitchStaysFretted(t *testing.T) {
 		)
 	}
 	t.Run("pitch alongside authored fingering", func(t *testing.T) {
-		// Low E string fret 5 sounds A2 (45); the pitch properties
-		// restate it and are redundant — the import stays clean.
+
 		doc := frame(`<Note id="0"><Properties>` +
 			`<Property name="String"><String>0</String></Property>` +
 			`<Property name="Fret"><Fret>5</Fret></Property>` +
@@ -1384,11 +1215,6 @@ func TestImportTuningAndPitchStaysFretted(t *testing.T) {
 	})
 }
 
-// TestImportWindAmbiguousSkipped: a wind candidate whose instrument
-// cannot be pinned to exactly one registry entry keeps today's behavior
-// — the notes skip with per-note warnings and the standard-tuning
-// fallback stands — plus exactly one aggregate warning naming the
-// evidence that was missing. Guessing is never on the table.
 func TestImportWindAmbiguousSkipped(t *testing.T) {
 	buildDoc := func(trackExtra string, noteProps []string) string {
 		rhythm := `<Rhythm id="0"><NoteValue>Whole</NoteValue></Rhythm>`
@@ -1473,10 +1299,6 @@ func TestImportWindAmbiguousSkipped(t *testing.T) {
 	}
 }
 
-// TestImportWindBandMixed: a guitar and a sax in one file keep their own
-// families and their own bars — classification evidence from one track's
-// notes must not leak into the other, and the wind track's bar lookup
-// still runs on the original track index.
 func TestImportWindBandMixed(t *testing.T) {
 	doc := gpifDocTracks("0 1",
 		trackXML(0, "G", "")+windTrackXML(1, "Sax", `<GeneralMidi><Program>64</Program></GeneralMidi>`),
@@ -1520,9 +1342,6 @@ func TestImportWindBandMixed(t *testing.T) {
 	}
 }
 
-// TestBadTuningWarnsOnce: a Tuning property that fails to parse must warn
-// about the bad tuning and assume standard — and must NOT also claim the
-// track had "no tuning property", which would be false.
 func TestBadTuningWarnsOnce(t *testing.T) {
 	doc := gpifDocTracks("0",
 		`<Track id="0"><Name>G</Name>
@@ -1550,8 +1369,7 @@ func TestBadTuningWarnsOnce(t *testing.T) {
 	if hasWarning(warns, "no tuning property") {
 		t.Errorf("warnings = %v; the track HAS a tuning property (a bad one), so the no-tuning warning lies", warns)
 	}
-	// The recovery itself is unchanged: standard tuning, and the note
-	// (GP string 0 = lowest = string 6) derives low E.
+
 	tr := s.Tracks[0]
 	if !tr.Tuning.Equal(score.StandardTuning) {
 		t.Errorf("Tuning = %v, want standard", tr.Tuning)

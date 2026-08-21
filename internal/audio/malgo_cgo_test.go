@@ -11,14 +11,6 @@ import (
 	"github.com/gen2brain/malgo"
 )
 
-// These tests are the hardware-gated tier: they need a real audio backend
-// (context init succeeds) and, for the duplex tests, at least one capture
-// and one playback endpoint. On a deviceless CI runner they skip — except
-// TestMalgoNullBackend, which runs the same full open/start/stop path on
-// miniaudio's device-free null backend and should pass anywhere.
-
-// newHardwareBackend initializes the real platform backend, skipping the
-// test when none is available (headless CI).
 func newHardwareBackend(t *testing.T) *malgoBackend {
 	t.Helper()
 	b, err := newMalgoBackend()
@@ -29,18 +21,12 @@ func newHardwareBackend(t *testing.T) *malgoBackend {
 	return b
 }
 
-// duplexStats is what runDuplex measured over a stream run.
 type duplexStats struct {
-	frames     int64 // total frames delivered to the handler
-	mismatches int64 // callbacks where len(in), len(outL), len(outR) disagreed
-	stops      int64 // asynchronous stop notifications observed
+	frames     int64
+	mismatches int64
+	stops      int64
 }
 
-// runDuplex opens a duplex stream on b, runs it for d, and returns the
-// stats. The handler counts frames, verifies the length contract, and
-// plays a quiet 220 Hz sine so a locally listening developer can tell the
-// stream is really live. Open failures skip (devices can be absent or
-// exclusively claimed); everything after a successful open is asserted.
 func runDuplex(t *testing.T, b *malgoBackend, cfg StreamConfig, d time.Duration) duplexStats {
 	t.Helper()
 
@@ -103,16 +89,12 @@ func runDuplex(t *testing.T, b *malgoBackend, cfg StreamConfig, d time.Duration)
 	return stats
 }
 
-// checkDuplexStats asserts what every healthy run must show: real frame
-// flow, the length contract intact, and no spurious async-stop reports
-// from the test's own Stop/Close calls.
 func checkDuplexStats(t *testing.T, stats duplexStats, d time.Duration, sampleRate int) {
 	t.Helper()
 	if stats.frames == 0 {
 		t.Error("handler saw 0 frames; the callback never ran")
 	}
-	// Expect roughly d worth of frames; allow a factor-4 cushion for
-	// startup latency and scheduler jitter rather than a tight bound.
+
 	min := int64(float64(sampleRate) * d.Seconds() / 4)
 	if stats.frames < min {
 		t.Errorf("handler saw %d frames over %v at %d Hz, want at least %d", stats.frames, d, sampleRate, min)
@@ -145,8 +127,6 @@ func TestMalgoBackendHardware(t *testing.T) {
 		t.Logf("playback: %q default=%v id=%s…", d.Name, d.Default, truncate(d.ID, 24))
 	}
 
-	// Every enumerated ID must survive the decode the device picker will
-	// eventually feed back through OpenDuplex.
 	for _, d := range append(append([]DeviceInfo{}, capture...), playback...) {
 		if d.Name == "" {
 			t.Errorf("device %s has an empty name", d.ID)
@@ -168,9 +148,6 @@ func TestMalgoDuplexHardware(t *testing.T) {
 	checkDuplexStats(t, stats, 300*time.Millisecond, DefaultSampleRate)
 }
 
-// TestMalgoDuplexExplicitDevices feeds the default devices' own enumerated
-// IDs back through StreamConfig, exercising the hex decode path against
-// real identifiers instead of the empty "use default" fast path.
 func TestMalgoDuplexExplicitDevices(t *testing.T) {
 	b := newHardwareBackend(t)
 	capture, playback, err := b.Devices()
@@ -195,17 +172,10 @@ func TestMalgoDuplexExplicitDevices(t *testing.T) {
 	checkDuplexStats(t, stats, 300*time.Millisecond, DefaultSampleRate)
 }
 
-// TestMalgoNullBackend runs the whole context → enumerate → duplex path on
-// miniaudio's null backend, which needs no audio hardware: this is the
-// tier that still exercises the real malgo plumbing on a deviceless CI
-// runner. The null backend is timer-driven, so frames flow in real time.
-// (malgoBackendNull, not malgo.BackendNull — see its doc comment for the
-// upstream enum mismatch.)
 func TestMalgoNullBackend(t *testing.T) {
 	b, err := newMalgoBackendFrom([]malgo.Backend{malgoBackendNull})
 	if err != nil {
-		// The null backend should initialize everywhere; treat failure
-		// as an environment oddity, not a code bug.
+
 		t.Skipf("null backend unavailable: %v", err)
 	}
 	t.Cleanup(b.close)
@@ -220,7 +190,6 @@ func TestMalgoNullBackend(t *testing.T) {
 	}
 	t.Logf("null backend devices: %d capture, %d playback", len(capture), len(playback))
 
-	// Invalid stored IDs must fail fast, before any device is touched.
 	if _, err := b.OpenDuplex(StreamConfig{CaptureDevice: "not-hex"}, func(in, outL, outR []float32) {}); err == nil {
 		t.Error("OpenDuplex with invalid capture ID succeeded, want error")
 	}
@@ -229,9 +198,6 @@ func TestMalgoNullBackend(t *testing.T) {
 	checkDuplexStats(t, stats, 300*time.Millisecond, DefaultSampleRate)
 }
 
-// TestAvailable exercises the package entry point the app uses. It cannot
-// assert non-nil (deviceless CI), but when a backend comes back it must be
-// the miniaudio one, and repeated calls must return the same instance.
 func TestAvailable(t *testing.T) {
 	b := Available()
 	if b == nil {
@@ -246,7 +212,6 @@ func TestAvailable(t *testing.T) {
 	t.Logf("Available backend: %s", b.Name())
 }
 
-// truncate shortens s for log lines.
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s

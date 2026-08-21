@@ -9,7 +9,6 @@ import (
 	"github.com/S95F/musicTutor/internal/score"
 )
 
-// single wraps a melodic line as one-key beats.
 func single(keys ...int) [][]int {
 	beats := make([][]int, len(keys))
 	for i, k := range keys {
@@ -19,8 +18,7 @@ func single(keys ...int) [][]int {
 }
 
 func TestPentatonicLowPosition(t *testing.T) {
-	// An ascending E minor pentatonic line must map to the obvious
-	// open-position fingering.
+
 	keys := []int{40, 43, 45, 47, 50, 52, 55, 57, 59, 62, 64, 67}
 	want := []Position{
 		{6, 0}, {6, 3}, {5, 0}, {5, 2}, {4, 0}, {4, 2},
@@ -39,8 +37,7 @@ func TestPentatonicLowPosition(t *testing.T) {
 }
 
 func TestPowerChordFingering(t *testing.T) {
-	// The canonical riff's bar-3 chord: E5 = keys 40,47,52 must land on
-	// strings 6/5/4 at frets 0/2/2 in standard tuning.
+
 	got, unp := Assign([][]int{{40, 47, 52}}, score.StandardTuning, 0)
 	if len(unp) != 0 {
 		t.Fatalf("unplayable = %v, want none", unp)
@@ -80,8 +77,7 @@ func TestUnplayable(t *testing.T) {
 }
 
 func TestChordDistinctStrings(t *testing.T) {
-	// Two notes that can only live on string 6: the second must be
-	// reported, not doubled onto the same string.
+
 	got, unp := Assign([][]int{{40, 40}}, score.StandardTuning, 0)
 	if got[0][0] != (Position{String: 6, Fret: 0}) {
 		t.Errorf("first note = %v, want 6/0", got[0][0])
@@ -95,7 +91,7 @@ func TestChordDistinctStrings(t *testing.T) {
 }
 
 func TestAssignStable(t *testing.T) {
-	// Same input, same output: the heuristic must be deterministic.
+
 	beats := [][]int{
 		{40, 47, 52}, {43}, {50, 57}, {}, {45, 52, 57, 61, 64}, {40}, {64, 67},
 	}
@@ -109,12 +105,6 @@ func TestAssignStable(t *testing.T) {
 	}
 }
 
-// TestAssignPathologicalWideStaff is the search-budget acceptance test: a
-// 15-note chord over a 40-string tuning has ~5e22 joint fingerings, which
-// the pre-budget exhaustive search would chew on for years. With the node
-// budget, Assign must return promptly — every string is open here, so the
-// capped search still finds plenty of legal candidates and no note is
-// lost or doubled onto a taken string.
 func TestAssignPathologicalWideStaff(t *testing.T) {
 	tuning := make(score.Tuning, 40)
 	for i := range tuning {
@@ -144,12 +134,6 @@ func TestAssignPathologicalWideStaff(t *testing.T) {
 	}
 }
 
-// TestAssignBudgetFallsBackGreedy: on 25 identical strings the chord
-// {45,46,50,51,55,56} spans frets 5-16 in every joint fingering, so all
-// ~1.3e8 leaves fail the span rule and, uncapped, the search would grind
-// through every one of them finding nothing. The budget must cut it short
-// and the greedy fallback must still place every note, deterministically,
-// on pairwise-distinct strings.
 func TestAssignBudgetFallsBackGreedy(t *testing.T) {
 	tuning := make(score.Tuning, 25)
 	for i := range tuning {
@@ -180,17 +164,12 @@ func TestAssignBudgetFallsBackGreedy(t *testing.T) {
 	}
 }
 
-// TestAssignManyStringsDistinct guards the taken-string bitmask width:
-// with a 32-bit mask, string numbers of 32 and above shifted to a zero
-// bit, so a two-note chord playable only on strings 32 and 33 doubled
-// both notes onto string 32. The mask is 64-bit now and the notes must
-// land on distinct strings.
 func TestAssignManyStringsDistinct(t *testing.T) {
 	tuning := make(score.Tuning, 33)
 	for i := range tuning {
-		tuning[i] = 120 // strings 1-31: far too high for key 40
+		tuning[i] = 120
 	}
-	tuning[31], tuning[32] = 40, 40 // strings 32 and 33: the only options
+	tuning[31], tuning[32] = 40, 40
 	got, unp := Assign([][]int{{40, 40}}, tuning, 0)
 	if len(unp) != 0 {
 		t.Fatalf("unplayable = %v, want none", unp)
@@ -205,8 +184,7 @@ func TestAssignManyStringsDistinct(t *testing.T) {
 }
 
 func TestCapoShiftsRange(t *testing.T) {
-	// With a capo at 2 the lowest sounding note is F#2 (42); key 41 is
-	// unplayable and key 42 is the open sixth string.
+
 	got, unp := Assign([][]int{{41}, {42}}, score.StandardTuning, 2)
 	if len(unp) != 1 || unp[0].Key != 41 {
 		t.Fatalf("unplayable = %v, want one report for key 41", unp)
@@ -216,14 +194,6 @@ func TestCapoShiftsRange(t *testing.T) {
 	}
 }
 
-// TestAssignWideTuningJointFingering is the regression test for the B4
-// verification follow-up: a legitimate 14-string tuning — inside the
-// import cap, an instrument the cap's own comment calls real — with an
-// 8-note chord whose only legal joint fingering sits at high frets. With
-// the span rule checked only at the leaves, the fret-ascending search
-// burned its whole node budget in low-fret subtrees and the greedy
-// fallback falsely dropped a note as "no free string in chord"; interior
-// span pruning finds the joint fingering in milliseconds.
 func TestAssignWideTuningJointFingering(t *testing.T) {
 	tuning := score.Tuning{69, 64, 59, 54, 50, 46, 42, 40, 37, 34, 30, 27, 22, 18}
 	keys := []int{55, 64, 42, 51, 65, 53, 62, 63}
@@ -264,10 +234,6 @@ func TestAssignWideTuningJointFingering(t *testing.T) {
 	}
 }
 
-// TestAssignEmptyTuning: an instrument with no strings places nothing and
-// says so. mxlimport used to screen this case out before calling (it built
-// a sub-tuning of the free strings, which could come out empty); the check
-// belongs here, where the panic would be.
 func TestAssignEmptyTuning(t *testing.T) {
 	got, unp := Assign([][]int{{40, 64}}, score.Tuning{}, 0)
 	if len(unp) != 2 {
@@ -285,11 +251,6 @@ func TestAssignEmptyTuning(t *testing.T) {
 	}
 }
 
-// TestAssignWithFixedHoldsHandPosition: a chord authored at the 12th fret
-// with one note left unfingered. Judged on its own, key 67's cheapest
-// position is string 1 fret 3 — playable, but nine frets from the hand
-// already holding the chord, which no guitarist would write. Given the
-// authored positions, the search stays inside their span.
 func TestAssignWithFixedHoldsHandPosition(t *testing.T) {
 	fixed := [][]Position{{{String: 6, Fret: 12}, {String: 5, Fret: 12}}}
 	got, unp := AssignWith([][]int{{67}}, fixed, score.StandardTuning, 0)
@@ -299,16 +260,13 @@ func TestAssignWithFixedHoldsHandPosition(t *testing.T) {
 	if got[0][0] != (Position{String: 3, Fret: 12}) {
 		t.Errorf("key 67 beside a 12th-fret shape = %v, want 3/12", got[0][0])
 	}
-	// The contrast that motivates the context argument.
+
 	bare, _ := Assign([][]int{{67}}, score.StandardTuning, 0)
 	if bare[0][0] != (Position{String: 1, Fret: 3}) {
 		t.Errorf("key 67 alone = %v, want 1/3 (the position the context has to override)", bare[0][0])
 	}
 }
 
-// TestAssignWithFixedHoldsItsStrings: a fixed position keeps its string
-// even when it is open and so implies no hand position at all. Handing the
-// same string to another note is how the mixed-chord bug lost notes.
 func TestAssignWithFixedHoldsItsStrings(t *testing.T) {
 	fixed := [][]Position{{{String: 1, Fret: 0}}}
 	got, unp := AssignWith([][]int{{64}}, fixed, score.StandardTuning, 0)
@@ -323,12 +281,6 @@ func TestAssignWithFixedHoldsItsStrings(t *testing.T) {
 	}
 }
 
-// TestAssignWithWideFixedChordStillPlaces: authored music does contain
-// chords wider than MaxSpan. Measuring the added note against MaxSpan
-// alone would rule every position out and drop the beat into the greedy
-// fallback (string 1 fret 3 here, nowhere near the hand); the beat's
-// allowance widens to the authored chord's own span instead, so the note
-// lands inside it.
 func TestAssignWithWideFixedChordStillPlaces(t *testing.T) {
 	fixed := [][]Position{{{String: 6, Fret: 10}, {String: 5, Fret: 17}}}
 	got, unp := AssignWith([][]int{{67}}, fixed, score.StandardTuning, 0)
@@ -340,12 +292,8 @@ func TestAssignWithWideFixedChordStillPlaces(t *testing.T) {
 	}
 }
 
-// TestAssignWithUnreachableFixedKeepsNote: when no position at all is
-// within reach of the fixed hand, the note is still placed — an awkward
-// fingering beats a missing note, which is the property the mixed-chord
-// path exists to protect.
 func TestAssignWithUnreachableFixedKeepsNote(t *testing.T) {
-	// Key 71 is only ever fret 7 or higher; the fixed note is at fret 1.
+
 	fixed := [][]Position{{{String: 6, Fret: 1}}}
 	got, unp := AssignWith([][]int{{71}}, fixed, score.StandardTuning, 0)
 	if len(unp) != 0 {
@@ -359,8 +307,6 @@ func TestAssignWithUnreachableFixedKeepsNote(t *testing.T) {
 	}
 }
 
-// TestAssignWithShortFixedLeavesBeatsFree: fixed may cover a prefix of the
-// beats (or none of them); the rest are assigned as Assign would.
 func TestAssignWithShortFixedLeavesBeatsFree(t *testing.T) {
 	beats := [][]int{{67}, {67}}
 	fixed := [][]Position{{{String: 6, Fret: 12}, {String: 5, Fret: 12}}}

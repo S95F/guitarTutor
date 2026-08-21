@@ -7,28 +7,15 @@ import (
 	"github.com/S95F/musicTutor/internal/score"
 )
 
-// A barSpec is one bar of the shared bar structure.
 type barSpec struct {
 	start    int64
 	num, den int
 }
 
-// MaxTicks caps the score extent the import will accept — about 14
-// hours of 4/4 at 120 BPM. barSpecs allocates one barSpec per bar from
-// tick 0 to the score's end, so a single hostile <duration> (or time
-// signature) could otherwise turn the layout into an unbounded
-// allocation loop.
 const MaxTicks = 100_000_000
 
-// maxBars is the belt-and-braces cap on the bar count itself, for meter
-// maps whose tiny bars would slice even a legal extent into an absurd
-// number of specs (it also breaks any overflow-induced cycle in the
-// bar-advance arithmetic).
 const maxBars = 100_000
 
-// barSpecs lays out contiguous bars from tick 0 through end under the
-// meter map. Meter entries are recorded at measure starts during parsing,
-// so every entry falls on a barline by construction.
 func barSpecs(meters score.MeterMap, end int64) ([]barSpec, error) {
 	if end > MaxTicks {
 		return nil, fmt.Errorf("score too long: extends to tick %d, past the %d-tick limit", end, int64(MaxTicks))
@@ -48,22 +35,6 @@ func barSpecs(meters score.MeterMap, end int64) ([]barSpec, error) {
 	return specs, nil
 }
 
-// buildTrack converts one finished part into a score.Track. Within each
-// bar the beat boundaries are the union of the bar's edges and every note
-// onset and end inside it, so each note covers a whole number of beats:
-// the first carries the attack, the rest continue it as Tied notes
-// (score.Events merges them back), and beats with nothing sounding become
-// rests — which is how underfull measures end up padded.
-//
-// The walk is linear in notes plus bars rather than their product: note
-// edges are bucketed into their bars up front (one binary search per
-// edge), and the notes sounding at each beat segment are tracked with an
-// advancing cursor plus a carried active set instead of rescanning the
-// whole note list per segment. After finish's same-string truncation the
-// active set holds at most one note per string. A tied note can sound
-// many bars past its start, which is why the active set is carried
-// across bars instead of being recomputed from a per-bar window of note
-// starts.
 func buildTrack(pd *partData, role score.TrackRole, specs []barSpec) *score.Track {
 	tr := &score.Track{
 		Name:    pd.name,
@@ -71,12 +42,7 @@ func buildTrack(pd *partData, role score.TrackRole, specs []barSpec) *score.Trac
 		Role:    role,
 	}
 	if pd.wind != nil {
-		// A wind track has one representation: no Tuning, no Capo
-		// (Validate rejects either alongside Wind). The file's declared
-		// program is kept even when it differs from the registry's — the
-		// file said something, so it wins — but a part classified by name
-		// alone takes the instrument's own program rather than the
-		// importer's guitar default.
+
 		tr.Wind = pd.wind
 		if !pd.hasProgram {
 			tr.Program = pd.wind.Program
@@ -85,11 +51,7 @@ func buildTrack(pd *partData, role score.TrackRole, specs []barSpec) *score.Trac
 		tr.Tuning = pd.tuning
 		tr.Capo = pd.capo
 	}
-	// Bucket every note edge that falls strictly inside a bar; an edge
-	// on a barline adds no boundary because the bar's own edges already
-	// cover it. Bars are contiguous, so the bar owning edge x is the
-	// last one starting before x, and an edge at or past that bar's end
-	// sits on a barline or past the score.
+
 	edges := make([][]int64, len(specs))
 	for _, n := range pd.notes {
 		for _, x := range [2]int64{n.start, n.end} {
@@ -103,10 +65,7 @@ func buildTrack(pd *partData, role score.TrackRole, specs []barSpec) *score.Trac
 			}
 		}
 	}
-	// pd.notes is sorted by start (finish keeps it that way) and segment
-	// starts only ever advance, so a single cursor pass activates each
-	// note exactly once; a note leaves the active set once it no longer
-	// sounds at the current segment.
+
 	cursor := 0
 	var active []*rawNote
 	for bi, bs := range specs {
@@ -117,7 +76,7 @@ func buildTrack(pd *partData, role score.TrackRole, specs []barSpec) *score.Trac
 		for i := 0; i+1 < len(bounds); i++ {
 			segStart, segEnd := bounds[i], bounds[i+1]
 			if segEnd == segStart {
-				continue // duplicate boundary
+				continue
 			}
 			for cursor < len(pd.notes) && pd.notes[cursor].start <= segStart {
 				active = append(active, pd.notes[cursor])
@@ -138,10 +97,7 @@ func buildTrack(pd *partData, role score.TrackRole, specs []barSpec) *score.Trac
 					Tied:     n.start < segStart,
 					Inferred: n.inferred,
 				}
-				// A technique describes the transition INTO the note, so
-				// it rides the segment carrying the attack; the Tied
-				// continuations Events merges back would otherwise
-				// restate it on every beat the note sustains through.
+
 				if n.start == segStart {
 					nn.Tech = n.tech
 				}

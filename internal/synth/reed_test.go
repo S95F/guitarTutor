@@ -1,16 +1,10 @@
 package synth
 
-// The wind voice's contract, property-tested the way tone_test.go pins the
-// pluck's: in tune across the wind ranges, flat while blown, quickly quiet
-// when the breath stops, slurred without a second attack, and level-matched
-// to the window the practice pipeline's gates are calibrated against.
-
 import (
 	"math"
 	"testing"
 )
 
-// rmsOf returns the root-mean-square of x.
 func rmsOf(x []float32) float64 {
 	if len(x) == 0 {
 		return 0
@@ -36,7 +30,7 @@ func TestReedFundamental(t *testing.T) {
 			v.NoteOn(tt.key, 1)
 			l, r := renderFrames(v, sr, 2048)
 			m := monoSum(l, r)
-			// Skip the attack; measure the sustain.
+
 			got := estimateFundamental(t, m[sr/4:], sr)
 			if cents := math.Abs(centsBetween(tt.want, got)); cents > 3 {
 				t.Errorf("key %d: %.2f Hz, want %.2f (off %.1f cents)", tt.key, got, tt.want, cents)
@@ -45,8 +39,6 @@ func TestReedFundamental(t *testing.T) {
 	}
 }
 
-// TestReedSustainsWhileHeld: a blown note holds its level for as long as
-// the breath does — the property no delay-loop pluck can have.
 func TestReedSustainsWhileHeld(t *testing.T) {
 	const sr = 48000
 	v := NewReed(sr, 64)
@@ -63,8 +55,6 @@ func TestReedSustainsWhileHeld(t *testing.T) {
 	}
 }
 
-// TestReedReleaseIsFast: NoteOff is the breath stopping, not a string
-// ringing out — 60 dB down well inside a quarter second.
 func TestReedReleaseIsFast(t *testing.T) {
 	const sr = 48000
 	v := NewReed(sr, 64)
@@ -74,7 +64,7 @@ func TestReedReleaseIsFast(t *testing.T) {
 	v.NoteOff(69)
 	l, r = renderFrames(v, sr/2, 2048)
 	m := monoSum(l, r)
-	tail := rmsOf(m[sr/4 : sr/4+sr/10]) // 250-350 ms after the release
+	tail := rmsOf(m[sr/4 : sr/4+sr/10])
 	if held <= 0 {
 		t.Fatal("no held output")
 	}
@@ -83,9 +73,6 @@ func TestReedReleaseIsFast(t *testing.T) {
 	}
 }
 
-// TestReedLevelWindow: velocity-1 peak lands where the pluck's does,
-// because internal/pitch's input gate and onset thresholds are calibrated
-// against the built-in voices' output level.
 func TestReedLevelWindow(t *testing.T) {
 	const sr = 48000
 	v := NewReed(sr, 64)
@@ -97,9 +84,6 @@ func TestReedLevelWindow(t *testing.T) {
 	}
 }
 
-// TestReedSlurDoesNotReattack: a slurred note change re-pitches the
-// standing tone. The level through the transition never collapses (no gap,
-// no restart from silence) and the pitch afterwards is the new note's.
 func TestReedSlurDoesNotReattack(t *testing.T) {
 	const sr = 48000
 	r := NewReed(sr, 64).(*reed)
@@ -110,8 +94,7 @@ func TestReedSlurDoesNotReattack(t *testing.T) {
 	r.NoteOnSpec(NoteSpec{Key: 71, Velocity: 1, Attack: AttackLegato, From: 69})
 	l, rr = renderFrames(r, sr/2, 2048)
 	m := monoSum(l, rr)
-	// The 50 ms straddling the change: a fresh attack would pass through
-	// (near) zero on its way up from env 0.
+
 	dip := rmsOf(m[:sr/20])
 	if dip < steady/2 {
 		t.Errorf("slur dipped to %.4f RMS (steady %.4f): that is a re-attack", dip, steady)
@@ -122,8 +105,6 @@ func TestReedSlurDoesNotReattack(t *testing.T) {
 	}
 }
 
-// TestReedSlideArrives: a scoop travels and comes to rest exactly on the
-// destination pitch.
 func TestReedSlideArrives(t *testing.T) {
 	const sr = 48000
 	r := NewReed(sr, 64).(*reed)
@@ -138,9 +119,6 @@ func TestReedSlideArrives(t *testing.T) {
 	}
 }
 
-// TestReedAllNotesOffIsImmediate: the seek/loop silence ramp reaches
-// nothing within a couple of engine blocks, click-free but effectively at
-// once.
 func TestReedAllNotesOffIsImmediate(t *testing.T) {
 	const sr = 48000
 	v := NewReed(sr, 64)
@@ -154,19 +132,17 @@ func TestReedAllNotesOffIsImmediate(t *testing.T) {
 	}
 }
 
-// TestNewBuiltinDispatch: the built-in factory reads the General MIDI map
-// — brass, reeds and pipes sustain; everything else plucks.
 func TestNewBuiltinDispatch(t *testing.T) {
 	const sr = 48000
 	for prog, wantReed := range map[int]bool{
-		25: false, // steel guitar
-		55: false, // orchestra hit: the last non-wind before brass
-		56: true,  // trumpet
-		64: true,  // soprano sax
-		71: true,  // clarinet
-		73: true,  // flute
-		79: true,  // ocarina: the last pipe
-		80: false, // square lead
+		25: false,
+		55: false,
+		56: true,
+		64: true,
+		71: true,
+		73: true,
+		79: true,
+		80: false,
 	} {
 		_, isReed := NewBuiltin(sr, prog).(*reed)
 		if isReed != wantReed {
@@ -175,21 +151,16 @@ func TestNewBuiltinDispatch(t *testing.T) {
 	}
 }
 
-// TestReedSoundsTheWholeChord: a fretted track pointed at a wind program
-// can strum — six NoteOns on one frame — and every note must sound. The
-// pool used to be small enough that the fifth and sixth notes stole the
-// first two before they rendered a sample.
 func TestReedSoundsTheWholeChord(t *testing.T) {
 	const sr = 48000
 	v := NewReed(sr, 64)
-	chord := []int{40, 45, 52, 56, 59, 64} // open E major
+	chord := []int{40, 45, 52, 56, 59, 64}
 	for _, k := range chord {
 		v.NoteOn(k, 1)
 	}
 	l, r := renderFrames(v, sr/2, 2048)
 	base := energy(monoSum(l, r))
-	// Releasing any one note must audibly change the mix: a note whose
-	// NoteOff changes nothing never sounded.
+
 	for _, k := range chord {
 		v2 := NewReed(sr, 64)
 		for _, kk := range chord {

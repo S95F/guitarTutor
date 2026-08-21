@@ -2,9 +2,6 @@ package pitch
 
 import "testing"
 
-// fixedEstimator is a stub F0Estimator: it reports the same pitch for
-// every window, which no real signal would produce, so any frame carrying
-// it proves the built-in MPM path was bypassed.
 type fixedEstimator struct {
 	f0      float64
 	clarity float64
@@ -20,11 +17,8 @@ func (e *fixedEstimator) EstimateF0(window []float32) (float64, float64) {
 	return e.f0, e.clarity
 }
 
-// TestEstimatorOverridesDetection: with a Config.Estimator set, the
-// reported pitch is the estimator's, not the signal's. The window it is
-// handed is one full analysis window of the live stream.
 func TestEstimatorOverridesDetection(t *testing.T) {
-	const stubF0 = 987.77 // B5, nowhere near the 220 Hz being played
+	const stubF0 = 987.77
 	est := &fixedEstimator{f0: stubF0, clarity: 0.95}
 	cfg := DefaultConfig(testSR)
 	cfg.Estimator = est
@@ -54,9 +48,6 @@ func TestEstimatorOverridesDetection(t *testing.T) {
 	}
 }
 
-// TestEstimatorKeepsGateAndVoicingRules pins which stages an external
-// estimator does NOT replace: the RMS noise gate still silences it, and
-// ClarityThreshold and the MinHz/MaxHz range still decide voicing.
 func TestEstimatorKeepsGateAndVoicingRules(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -89,9 +80,6 @@ func TestEstimatorKeepsGateAndVoicingRules(t *testing.T) {
 	}
 }
 
-// TestEstimatorKeepsOnsetsAndStrums: swapping the pitch estimator leaves
-// the parts of the pipeline that do not depend on it — the onset detector
-// and Phase 4's chroma/strum accumulation — running exactly as before.
 func TestEstimatorKeepsOnsetsAndStrums(t *testing.T) {
 	x := append(silence(0.2), ksNote(45, 0.5)...)
 
@@ -113,8 +101,7 @@ func TestEstimatorKeepsOnsetsAndStrums(t *testing.T) {
 		t.Errorf("chroma differs with an estimator:\n got%s\nwant%s",
 			formatChroma(estStrums[0].Chroma), formatChroma(biStrums[0].Chroma))
 	}
-	// Strum.Clarity comes from the estimator by design (it is the pitch
-	// estimator's confidence), so only the onsets are compared here.
+
 	for i := range biFrames {
 		if estFrames[i].Onset != biFrames[i].Onset || estFrames[i].RMS != biFrames[i].RMS {
 			t.Fatalf("frame %d: onset/RMS differ: %+v with an estimator, %+v without",
@@ -123,9 +110,6 @@ func TestEstimatorKeepsOnsetsAndStrums(t *testing.T) {
 	}
 }
 
-// TestNilEstimatorIsTheBuiltIn: a nil Config.Estimator selects MPM and
-// changes nothing. The whole existing detector suite runs with it nil, so
-// this only pins the naming contract and the config default.
 func TestNilEstimatorIsTheBuiltIn(t *testing.T) {
 	d := NewDetector(DefaultConfig(testSR))
 	if got, want := d.EstimatorName(), "mpm"; got != want {

@@ -1,18 +1,3 @@
-// Command musictutor is the musicTutor practice application.
-//
-//	musictutor <file>                    open a piece in the windowed shell
-//	musictutor play [flags] <file>       open the practice view from the terminal
-//	musictutor render [flags] <file>     render the piece to a WAV
-//	musictutor devices                   list audio endpoints
-//	musictutor calibrate [flags]         measure the round-trip latency
-//	musictutor version                   print the version
-//
-// Pieces are .gtab, .mid, .gp, .musicxml, or .mxl files.
-//
-// A bare file argument — the invocation a double-clicked piece arrives
-// as — opens the windowed shell on that piece, so a file that will not
-// load is reported on the start screen instead of on a console that
-// closes itself. See README.md and ROADMAP.md for where this is headed.
 package main
 
 import (
@@ -39,48 +24,23 @@ import (
 	"github.com/S95F/musicTutor/internal/wavio"
 )
 
-// sampleRate is the project-wide audio rate (ROADMAP "Guiding principles").
 const sampleRate = 48000
 
-// Tempo scale bounds accepted on the command line. The engine clamps out-of-
-// range scales silently; the CLI refuses them loudly instead, so a typo does
-// not render at an unexpected speed.
 const (
 	minScale = 0.25
 	maxScale = 2.0
 )
 
-// maxRenderFrames caps the playing portion of a render (~30 minutes of
-// audio) as a runaway guard.
 const maxRenderFrames = 30 * 60 * sampleRate
 
-// playerReadAhead is how far ahead of the speaker oto is allowed to pull
-// audio out of the engine.
-//
-// It matters far more than a buffer size usually does, because the engine
-// publishes its playback position as it RENDERS: whatever oto has read but
-// not yet played is music the tab has already scrolled past. oto's own
-// default is half a second, which put the playhead half a second ahead of
-// what you could hear and moved it in whatever gulps the refill loop
-// happened to take. A tenth of a second is still a generous cushion for a
-// non-realtime source — the synthesis costs microseconds per block, so the
-// buffer only ever has to cover a scheduling hiccup — and it brings the
-// display to within a frame or two of the sound.
-//
-// The live duplex path does not go through oto at all: there the engine
-// renders straight into the device buffer, and the lead is one period.
 const playerReadAhead = 100 * time.Millisecond
 
-// playerBufferBytes is playerReadAhead as oto's SetBufferSize wants it:
-// bytes of interleaved stereo float32 at the project sample rate.
 const playerBufferBytes = int(int64(playerReadAhead)*sampleRate/int64(time.Second)) * bytesPerFrame
 
 var version = "0.1.0-dev"
 
 func main() {
-	// No arguments is the double-clicked-binary case: open the windowed
-	// app with the start screen, where a piece can be chosen and settings
-	// changed without ever touching a terminal.
+
 	if len(os.Args) < 2 {
 		if err := runShell(""); err != nil {
 			fmt.Fprintln(os.Stderr, "musictutor:", err)
@@ -104,30 +64,14 @@ func main() {
 		err = runCalibrate(os.Args[2:])
 	default:
 		if strings.HasPrefix(os.Args[1], "-") {
-			// A flag in command position is almost always a subcommand
-			// forgotten, not a file — say what is actually wrong before
-			// the wall of usage text, or the one line that matters is
-			// the one line that is missing.
+
 			fmt.Fprintln(os.Stderr, flagFirstDiagnostic(os.Args[1]))
 			usage(os.Stderr)
 			os.Exit(2)
 		}
-		// A bare argument is a piece to practise — the invocation Windows
-		// Explorer uses for a double-clicked file — so it opens through
-		// the windowed shell, where a file that will not load is an error
-		// on the start screen rather than a console that flashes and
-		// vanishes. Anything that cannot be a piece is diagnosed here
-		// first: opening a window to say "devcies is not a file" would be
-		// worse than saying it where the typo was made.
+
 		if err = checkPieceArgument(os.Args[1]); err == nil {
-			// Whatever follows the piece would be silently lost — the
-			// shell opens exactly one file. A flag anywhere in the tail
-			// means the play subcommand was meant, and refusing puts the
-			// diagnostic where the flag was typed; extra files mean a
-			// multi-select drop onto the executable, and there refusing
-			// would leave a vanishing console as the only witness, so
-			// the first file still opens and stderr names the rest for
-			// whoever can see it.
+
 			var note string
 			if note, err = checkExtraArguments(os.Args[1], os.Args[2:]); err != nil {
 				break
@@ -144,20 +88,10 @@ func main() {
 	}
 }
 
-// flagFirstDiagnostic is the one line printed above the usage text when
-// the first argument is a flag: what was misunderstood, and the shape of
-// the invocation that would have worked.
 func flagFirstDiagnostic(arg string) string {
 	return fmt.Sprintf("musictutor: unknown command %q — flags follow a subcommand: musictutor play %s <file>", arg, arg)
 }
 
-// checkExtraArguments diagnoses everything after the one piece a bare
-// invocation can open. Any flag in the tail refuses the whole invocation
-// — the generic shape is suggested rather than the user's arguments
-// respliced, because value-taking flags make any reordering wrong — while
-// extra files come back as a stderr note naming what was skipped, and the
-// first piece still opens: from Explorer, a refusal's console vanishes
-// before it can be read.
 func checkExtraArguments(piece string, rest []string) (note string, err error) {
 	for _, a := range rest {
 		if strings.HasPrefix(a, "-") {
@@ -175,18 +109,6 @@ func checkExtraArguments(piece string, rest []string) (note string, err error) {
 		piece, len(rest), noun, strings.Join(rest, ", ")), nil
 }
 
-// checkPieceArgument reports why a bare argument cannot be opened as a
-// piece, or nil when it carries an extension an importer reads. The
-// extension list is the browser's own (ui.PieceExtensions), so the
-// command line and the start screen cannot disagree about what counts as
-// a piece — and a load-time test pins that list to the importer switch.
-//
-// The two failure shapes are told apart with a stat, because they are
-// different mistakes: a path that does not exist is almost always a
-// mistyped subcommand and is answered with where the commands are
-// listed, while a file that really exists in a format the importers do
-// not read is named by its path — "unsupported file type """ named
-// neither the file nor the problem.
 func checkPieceArgument(arg string) error {
 	ext := strings.ToLower(filepath.Ext(arg))
 	for _, e := range ui.PieceExtensions() {
@@ -200,9 +122,6 @@ func checkPieceArgument(arg string) error {
 	return fmt.Errorf("%s: unsupported file type %q (want .gtab, .mid, .gp, .musicxml, or .mxl)", arg, filepath.Ext(arg))
 }
 
-// usage writes the help text to w. `help` and -h ask for it, so they get
-// it on stdout where a pager or a grep can reach it; only the
-// unknown-flag path, where the help is a diagnostic, writes to stderr.
 func usage(w io.Writer) {
 	fmt.Fprint(w, `musictutor — practice companion for guitarists and wind players
 
@@ -244,27 +163,13 @@ point a mic at the speakers, or wire a loopback).
 `)
 }
 
-// piecesLine names the piece formats, once, for every usage text that
-// takes a <file>: the top-level help and each subcommand's -h say the
-// same thing because they print the same line.
 const piecesLine = "pieces: .gtab (text tab), .mid (MIDI), .gp (Guitar Pro 7/8), .musicxml / .mxl (MusicXML)"
 
-// inFlagHelp and outFlagHelp describe the device flags the same way
-// everywhere they appear (play and calibrate): naming where the device
-// names come from, because "name fragment" alone left the user to guess
-// which names the fragment was a fragment of.
 const (
 	inFlagHelp  = "capture device for live input: a unique part of a name from 'musictutor devices' (default: the system default)"
 	outFlagHelp = "playback device: a unique part of a name from 'musictutor devices' (default: the system default)"
 )
 
-// setUsage replaces fs's -h output with one that starts from the
-// synopsis. Go's default dump lists the flags and nothing else — no hint
-// that a <file> is required, no word on what kind of file — so
-// 'musictutor play -h' answered every question except the one a person
-// asking for help actually has. extra lines (the pieces line, a
-// subcommand's one-sentence description) follow the synopsis, then the
-// flag defaults.
 func setUsage(fs *flag.FlagSet, synopsis string, extra ...string) {
 	fs.Usage = func() {
 		w := fs.Output()
@@ -276,7 +181,6 @@ func setUsage(fs *flag.FlagSet, synopsis string, extra ...string) {
 	}
 }
 
-// load parses a piece by file extension.
 func load(path string) (*score.Score, []string, error) {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".gtab":
@@ -293,7 +197,6 @@ func load(path string) (*score.Score, []string, error) {
 	}
 }
 
-// loadBacking decodes a backing track and installs it on the engine.
 func loadBacking(eng *engine.Engine, path string, offsetSec, gain float64) error {
 	left, right, warns, err := audiofile.Load(path)
 	if err != nil {
@@ -307,9 +210,6 @@ func loadBacking(eng *engine.Engine, path string, offsetSec, gain float64) error
 	return nil
 }
 
-// makeFactory picks the synthesis path: SoundFont when supplied, otherwise
-// the built-in voices (no assets needed) — the Karplus-Strong pluck for
-// fretted tracks, the sustained reed for tracks whose program names a wind.
 func makeFactory(sf2 string) (synth.Factory, error) {
 	if sf2 == "" {
 		return synth.NewBuiltin, nil
@@ -321,8 +221,6 @@ func makeFactory(sf2 string) (synth.Factory, error) {
 	return synth.NewSoundFontFactory(sf), nil
 }
 
-// validateScale rejects tempo scales outside [minScale, maxScale] (NaN
-// included) with an error naming the accepted range.
 func validateScale(s float64) error {
 	if !(s >= minScale && s <= maxScale) {
 		return fmt.Errorf("-scale %v: accepted range is %g to %g", s, minScale, maxScale)
@@ -330,9 +228,6 @@ func validateScale(s float64) error {
 	return nil
 }
 
-// ensureTracks returns a clean error for a track-less score. textfmt rejects
-// bar-less pieces at parse time, but MIDI import is a second path that can
-// legitimately produce one; downstream code indexes Tracks unconditionally.
 func ensureTracks(sc *score.Score, action string) error {
 	if len(sc.Tracks) == 0 {
 		return fmt.Errorf("the piece has no tracks; nothing to %s", action)
@@ -340,7 +235,6 @@ func ensureTracks(sc *score.Score, action string) error {
 	return nil
 }
 
-// setup loads the piece and builds an engine from shared flags.
 func setup(file, sf2 string, scale float64, met bool, countIn int) (*score.Score, *engine.Engine, error) {
 	sc, warns, err := load(file)
 	if err != nil {
@@ -415,17 +309,11 @@ func runPlay(args []string) error {
 
 	app := ui.New(eng, sc, display)
 	app.SetInitialMetronome(*met)
-	// The view mirrors the count-in the engine was built with, and only
-	// the shell path used to sync it — `play -countin 4` drew the
-	// COUNT-IN toggle as off while the engine counted in, and pressing C
-	// to "turn it on" turned it off (audit C5).
+
 	app.SetCountIn(*countIn)
 
 	if *listen {
-		// Live mode: the duplex stream renders the engine inside its own
-		// callback — oto stays out of the picture entirely. The CLI's
-		// config source is the file on disk; the shell passes its
-		// in-memory config instead (see setupListen).
+
 		cfg, cfgErr := appconfig.Load()
 		if cfgErr != nil {
 			fmt.Fprintln(os.Stderr, "warning: existing config unreadable, ignoring it:", cfgErr)
@@ -435,11 +323,7 @@ func runPlay(args []string) error {
 			return err
 		}
 		defer session.Stop()
-		// The stderr warnings setupListen printed also go over the tab:
-		// this path opens the same window the shell does, and the person
-		// watching it is not necessarily watching the terminal it was
-		// started from. The remedy named is the CLI's — this view has no
-		// settings screen to press S for.
+
 		conds := cond.notes
 		if cond.uncalibrated {
 			conds = append(conds, "timing is not calibrated for these devices — quit and run 'musictutor calibrate'")
@@ -513,11 +397,7 @@ func runRender(args []string) error {
 		f.Close()
 		return err
 	}
-	// Close before claiming success. The OS buffers the write, and on a
-	// network share or a full disk the failure only surfaces on the final
-	// flush — a deferred Close discarded that error and the success line
-	// below had already printed, handing the user a truncated WAV and
-	// exit status 0 (audit D1).
+
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("writing %s: %w", *out, err)
 	}
@@ -525,12 +405,6 @@ func runRender(args []string) error {
 	return nil
 }
 
-// renderAll starts eng and renders until the transport stops on its own,
-// then renders tailSec seconds more so release tails ring out. Letting the
-// engine decide the end makes the length exact for any count-in, tempo map,
-// and tempo scale — no precomputed-duration formula to drift out of sync
-// with engine semantics. maxFrames caps the playing portion (a looping or
-// otherwise never-ending engine would grow the buffers forever).
 func renderAll(eng *engine.Engine, tailSec float64, maxFrames int) (left, right []float32, err error) {
 	const chunk = 4800
 	bufL := make([]float32, chunk)

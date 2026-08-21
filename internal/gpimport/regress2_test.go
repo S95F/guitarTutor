@@ -1,8 +1,5 @@
 package gpimport
 
-// Round-2 sweep regressions: one string sounds once per beat, and
-// imported labels always save.
-
 import (
 	"strings"
 	"testing"
@@ -10,12 +7,6 @@ import (
 	"github.com/S95F/musicTutor/internal/score/textfmt"
 )
 
-// TestDuplicateStringInBeatSkipped: a beat listing the same note id twice
-// — or two note ids claiming one string — imported two attacks on one
-// string at one tick. score.Events treats the pair as one ringing note
-// overwriting its own bookkeeping, and textfmt.Format refuses to write
-// the beat, so the piece could never save. Later duplicates are now
-// skipped with a warning.
 func TestDuplicateStringInBeatSkipped(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -63,9 +54,6 @@ func TestDuplicateStringInBeatSkipped(t *testing.T) {
 	}
 }
 
-// TestDuplicateStringSecondSurvivesFirstDrop: the dedupe must track only
-// notes actually kept — when the first claim on a string is dropped for
-// its own reasons (an absurd fret), the second is not a duplicate.
 func TestDuplicateStringSecondSurvivesFirstDrop(t *testing.T) {
 	doc := gpifDoc(
 		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`,
@@ -88,10 +76,6 @@ func TestDuplicateStringSecondSurvivesFirstDrop(t *testing.T) {
 	}
 }
 
-// TestImportedLabelsAlwaysSave: a GPIF title or track name holding "//"
-// or a line break flowed verbatim into the score, and textfmt.Format
-// refuses both — an import that plays but can never be saved. Labels are
-// now cleaned with a warning.
 func TestImportedLabelsAlwaysSave(t *testing.T) {
 	doc := gpifDoc(
 		`<MasterBar><Time>4/4</Time><Bars>0</Bars></MasterBar>`,

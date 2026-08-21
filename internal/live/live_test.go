@@ -9,8 +9,6 @@ import (
 
 const testRate = 48000
 
-// sineTone renders n samples of a sine at hz, amplitude 0.5 (~-9 dBFS
-// RMS, comfortably above the detector's noise gate).
 func sineTone(hz float64, n int) []float32 {
 	buf := make([]float32, n)
 	for i := range buf {
@@ -19,14 +17,12 @@ func sineTone(hz float64, n int) []float32 {
 	return buf
 }
 
-// analyzeRun drives an analyzer synchronously and records what it
-// reported: every closed note and the final consumed clock.
 type analyzeRun struct {
 	s        *Session
 	a        *analyzer
 	closed   []pitch.Note
 	strums   []pitch.Strum
-	order    []string // callback order within the run ("strums"/"notes")
+	order    []string
 	consumed int64
 }
 
@@ -47,8 +43,6 @@ func newAnalyzeRun(ringSize int) *analyzeRun {
 	return r
 }
 
-// feed writes samples through the ring in callback-sized writes,
-// draining after each so nothing overflows.
 func (r *analyzeRun) feed(samples []float32) {
 	const cb = 1024
 	for off := 0; off < len(samples); off += cb {
@@ -61,28 +55,19 @@ func (r *analyzeRun) feed(samples []float32) {
 	}
 }
 
-// TestAnalyzeOverflowKeepsDeviceClock reproduces the stall that used to
-// desynchronize the scoring clock for good: the ring fills while the
-// analysis goroutine is wedged, a second of capture is dropped, and then
-// audio resumes. The dropped stretch must still advance the detector's
-// clock (fed as silence), so the note that was sounding closes and the
-// note played after the stall is stamped on the device clock — not early
-// by the cumulative loss.
 func TestAnalyzeOverflowKeepsDeviceClock(t *testing.T) {
 	const (
-		ringSize = 8192  // small ring so the test's "stall" overflows it
-		gap      = 48000 // one second of capture lost to the stall
+		ringSize = 8192
+		gap      = 48000
 		toneALen = ringSize
 		toneBLen = 24000
-		tailLen  = 4800 // silence long enough to close the last note
+		tailLen  = 4800
 	)
 	cfg := pitch.DefaultConfig(testRate)
-	toneA := sineTone(440, toneALen) // A4, MIDI 69
-	toneB := sineTone(330, toneBLen) // E4, MIDI 64
+	toneA := sineTone(440, toneALen)
+	toneB := sineTone(330, toneBLen)
 	tail := make([]float32, tailLen)
 
-	// Overflow run: toneA fills the ring with nobody draining, then the
-	// whole gap is dropped on the floor; only then does analysis wake.
 	over := newAnalyzeRun(ringSize)
 	over.s.ringBuf.write(toneA)
 	over.s.ringBuf.write(make([]float32, gap))
@@ -93,8 +78,6 @@ func TestAnalyzeOverflowKeepsDeviceClock(t *testing.T) {
 	over.feed(toneB)
 	over.feed(tail)
 
-	// Control run: the identical device stream with no drops — the gap
-	// arrives as real silence through a ring big enough to hold it all.
 	ctrl := newAnalyzeRun(1 << 17)
 	ctrl.feed(toneA)
 	ctrl.feed(make([]float32, gap))
@@ -108,8 +91,6 @@ func TestAnalyzeOverflowKeepsDeviceClock(t *testing.T) {
 		t.Fatalf("overflow run closed %+v, want 2 notes like the control run", over.closed)
 	}
 
-	// The gap must have closed toneA's note and re-stamped nothing: both
-	// notes land where the drop-free control run put them, within a hop.
 	hop := int64(cfg.Hop)
 	for i := range ctrl.closed {
 		want, got := ctrl.closed[i], over.closed[i]
@@ -124,14 +105,10 @@ func TestAnalyzeOverflowKeepsDeviceClock(t *testing.T) {
 		}
 	}
 
-	// Direct device-clock check: toneB started at frame toneALen+gap of
-	// the device stream; before the fix its note was stamped a full gap
-	// early (toneALen + a few hops).
 	if min := int64(toneALen + gap - cfg.Hop); over.closed[1].Start < min {
 		t.Errorf("post-stall Start = %d, want >= %d: the dropped stretch no longer advanced the clock", over.closed[1].Start, min)
 	}
 
-	// And the consumed clock reported to OnNotes counts the loss too.
 	total := int64(toneALen + gap + toneBLen + tailLen)
 	if over.consumed != total {
 		t.Errorf("overflow run consumed = %d, want %d (device clock including the dropped stretch)", over.consumed, total)
@@ -140,12 +117,6 @@ func TestAnalyzeOverflowKeepsDeviceClock(t *testing.T) {
 		t.Errorf("control run consumed = %d, want %d", ctrl.consumed, total)
 	}
 
-	// Phase 4: the zeroed splice must not manufacture onsets, or a stall
-	// would invent a strum — and a strum is a scoring event now (it can
-	// verify a chord or credit a palm mute). It cannot: the detector's
-	// onset test needs a hop RMS above max(smoothed, noise floor) times
-	// the jump ratio, and a zeroed hop's RMS is 0. Both runs must see the
-	// same strums, and neither may stamp one inside the gap.
 	if len(over.strums) != len(ctrl.strums) {
 		t.Fatalf("overflow run saw %d strums, control run %d: the splice changed the onset stream",
 			len(over.strums), len(ctrl.strums))
@@ -155,10 +126,7 @@ func TestAnalyzeOverflowKeepsDeviceClock(t *testing.T) {
 			t.Errorf("strum %d: Frame = %d, want %d +/- one hop", i, over.strums[i].Frame, ctrl.strums[i].Frame)
 		}
 	}
-	// Interior of the gap. A Strum is stamped at its onset hop's CENTER,
-	// which trails the audio by half a window, so the attack that ends
-	// the gap legitimately stamps up to a window BEFORE the gap does —
-	// hence the upper bound backs off by one window.
+
 	loGap, hiGap := int64(toneALen), int64(toneALen+gap-cfg.Window)
 	for _, st := range over.strums {
 		if st.Frame >= loGap && st.Frame < hiGap {
@@ -168,13 +136,8 @@ func TestAnalyzeOverflowKeepsDeviceClock(t *testing.T) {
 	}
 }
 
-// TestAnalyzeDeliversStrums pins the Phase 4 plumbing: an attack produces
-// a Strum on OnStrums, stamped near the attack, and delivered BEFORE the
-// batch's OnNotes call — wiring drives Scorer.Advance off the consumed
-// clock OnNotes carries, so a strum from the same batch has to reach the
-// scorer first or its expectations can age out before it is seen.
 func TestAnalyzeDeliversStrums(t *testing.T) {
-	const lead = 9600 // silence, so the attack is a real rising edge
+	const lead = 9600
 	r := newAnalyzeRun(1 << 17)
 	r.feed(make([]float32, lead))
 	if len(r.strums) != 0 {

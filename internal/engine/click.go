@@ -2,26 +2,19 @@ package engine
 
 import "math"
 
-// A clickState is one sounding metronome click: a read cursor into one of
-// the two prerendered burst buffers. A nil buf (or an exhausted cursor) is
-// silent and free for reuse.
 type clickState struct {
 	buf []float32
 	pos int
 }
 
-// Click synthesis parameters: short sine bursts with an exponential decay,
-// prerendered once at construction so the render path never computes them.
 const (
-	clickLenSeconds = 0.006  // burst length
-	clickAccentHz   = 1568.0 // beat 1 of a bar (G6)
-	clickBeatHz     = 1046.0 // other beats (C6)
-	clickAmp        = 0.4    // peak amplitude
-	clickDecay      = 6.0    // decay exponent over the burst
+	clickLenSeconds = 0.006
+	clickAccentHz   = 1568.0
+	clickBeatHz     = 1046.0
+	clickAmp        = 0.4
+	clickDecay      = 6.0
 )
 
-// renderClickBurst prerenders one click: a sine at freq under an
-// exponential-decay envelope.
 func renderClickBurst(sampleRate int, freq float64) []float32 {
 	n := int(clickLenSeconds * float64(sampleRate))
 	if n < 1 {
@@ -35,8 +28,6 @@ func renderClickBurst(sampleRate int, freq float64) []float32 {
 	return buf
 }
 
-// startClick begins sounding a click, accented or not, reusing a finished
-// slot. Caller holds mu.
 func (e *Engine) startClick(accent bool) {
 	buf := e.beatBuf
 	if accent {
@@ -52,8 +43,6 @@ func (e *Engine) startClick(accent bool) {
 	e.clicks[0] = clickState{buf: buf}
 }
 
-// mixClicks adds the sounding clicks into left/right and advances their
-// cursors. Caller holds mu.
 func (e *Engine) mixClicks(left, right []float32) {
 	for i := range e.clicks {
 		c := &e.clicks[i]
@@ -73,7 +62,6 @@ func (e *Engine) mixClicks(left, right []float32) {
 	}
 }
 
-// stopClicks silences all sounding clicks. Caller holds mu.
 func (e *Engine) stopClicks() {
 	for i := range e.clicks {
 		e.clicks[i] = clickState{}

@@ -1,21 +1,5 @@
 package ui
 
-// The editor's wind lane: what the grid means on a track with no strings.
-//
-// A wind system keeps the guitar grid's whole skeleton — the same bar
-// layout, the same cursor, the same rhythm marks under the band — and
-// changes only the vertical axis: height is WRITTEN pitch on a fixed
-// ladder spanning the instrument's standard range, with a labelled line
-// at each octave's C, the same reading the practice view teaches. The
-// compass is the instrument's rather than the piece's on purpose: an
-// editor whose ladder rescaled itself every time a higher note was typed
-// would make the music jump under the cursor.
-//
-// Entry is note letters, not fret digits: A–G places the natural nearest
-// the previous note (ties go up), ↑/↓ move it by a semitone, shift+↑/↓ by
-// an octave. That gives every chromatic pitch in two keystrokes without a
-// key for accidentals — 'b' has to be the note B, not a flat sign.
-
 import (
 	"fmt"
 	"strings"
@@ -28,15 +12,8 @@ import (
 	"github.com/S95F/musicTutor/internal/score"
 )
 
-// edWindLines is how many string-rows' worth of height a wind system
-// occupies. Eight (a 154 px band) spreads a sax's ~34-semitone standard
-// range to about 4.5 px per semitone — coarse, but height is redundancy
-// here: every note carries its written name, and the beats are at least
-// edMinBeatW apart, so neighbouring seconds cannot collide horizontally.
 const edWindLines = 8
 
-// gridLines is how many line-rows the edited track's systems are sized
-// for: its strings, or the wind band's fixed height.
 func (e *Editor) gridLines() int {
 	if e.doc.Track().Wind != nil {
 		return edWindLines
@@ -44,21 +21,14 @@ func (e *Editor) gridLines() int {
 	return len(e.doc.Track().Tuning)
 }
 
-// An edWindLadder maps written pitch onto a system's band, top line to
-// bottom line. Fixed per instrument (see the file comment).
 type edWindLadder struct {
-	lo, hi int // written keys at the band's bottom and top lines
+	lo, hi int
 }
 
-// edWindLadderFor is the instrument's standard written range with a
-// semitone of margin each side, so the extreme notes sit off the edges.
 func edWindLadderFor(w *score.WindInstrument) edWindLadder {
 	return edWindLadder{lo: w.Written(w.LowSounding) - 1, hi: w.Written(w.LowSounding+w.Span) + 1}
 }
 
-// y places a written key inside a system whose top line is at strTop.
-// Altissimo above the compass clamps to the top line — drawn at the edge,
-// named truthfully by its label.
 func (l edWindLadder) y(written int, strTop float64) float64 {
 	span := float64(l.hi - l.lo)
 	bottom := strTop + float64(edWindLines-1)*edStringGap
@@ -72,9 +42,6 @@ func (l edWindLadder) y(written int, strTop float64) float64 {
 	return y
 }
 
-// drawWindSystemLines paints the ladder's reference lines for one system:
-// one per octave C in the compass, named in the margin the way string
-// lines are named on a tab system.
 func drawWindSystemLines(screen *ebiten.Image, l edWindLadder, strTop, w float64) {
 	for c := (l.lo + 11) / 12 * 12; c <= l.hi; c += 12 {
 		y := float32(l.y(c, strTop))
@@ -84,24 +51,16 @@ func drawWindSystemLines(screen *ebiten.Image, l edWindLadder, strTop, w float64
 	}
 }
 
-// windEntryWritten is the written pitch a typed letter starts from — and
-// where the empty beat's cursor cell is drawn, so the lit cell says where
-// the next note will land before it exists.
 func (e *Editor) windEntryWritten() int {
 	w := e.doc.Track().Wind
 	return w.Written(e.doc.WindReference())
 }
 
-// edNoteClasses is each letter's pitch class: what typing that letter
-// means, before the octave is chosen.
 var edNoteClasses = map[ebiten.Key]int{
 	ebiten.KeyC: 0, ebiten.KeyD: 2, ebiten.KeyE: 4, ebiten.KeyF: 5,
 	ebiten.KeyG: 7, ebiten.KeyA: 9, ebiten.KeyB: 11,
 }
 
-// typeNoteLetter places a natural of the given pitch class at the octave
-// nearest the reference pitch; a dead tie between the octave below and
-// the octave above goes up, the way a melody more often does.
 func (e *Editor) typeNoteLetter(class int) {
 	ref := e.windEntryWritten()
 	base := (ref/12)*12 + class
@@ -121,10 +80,6 @@ func abs(v int) int {
 	return v
 }
 
-// windCursorPitch is the header's cursor description on a wind track:
-// the note under the cursor in the player's own written pitch, with the
-// sounding pitch beside it — the same both-worlds honesty cursorPitch
-// gives a capoed guitar.
 func (e *Editor) windCursorPitch() string {
 	w := e.doc.Track().Wind
 	n, ok := e.doc.NoteAt(1)
@@ -135,8 +90,6 @@ func (e *Editor) windCursorPitch() string {
 	return fmt.Sprintf("written %s · sounding %s", edPitchName(w.Written(sounding)), edPitchName(sounding))
 }
 
-// windTechSuffix spells a wind note's techniques the way its file does —
-// l for a slur where a guitar writes h for a hammer-on.
 func windTechSuffix(t score.Technique) string {
 	var b strings.Builder
 	for _, m := range []struct {
@@ -153,9 +106,6 @@ func windTechSuffix(t score.Technique) string {
 	return b.String()
 }
 
-// windNoteButtons are the marks a wind note can carry, in place of the
-// guitar set: no hammer-ons, pull-offs or dead notes on an instrument
-// with no strings to hammer or damp.
 func (e *Editor) windNoteButtons() []edButton {
 	tech := e.cursorTech()
 	note, hasNote := e.doc.NoteAt(1)
@@ -186,12 +136,6 @@ func (e *Editor) windNoteButtons() []edButton {
 	return out
 }
 
-// windBindings is the help table behind ? on a wind track. The rhythm,
-// bar and session groups repeat the guitar table's rows verbatim — those
-// keys really are the same keys — and the repetition is deliberate: a
-// shared slice stitched from parts would make the guitar's table, the one
-// most people read, harder to read for the sake of rows that change
-// perhaps once a year. The fit test measures both tables.
 func (e *Editor) windBindings() []helpBinding {
 	return []helpBinding{
 		{Group: "notes", Keys: "A-G", Hint: "A-G note", Desc: "Type a note name — it lands at the octave nearest the note before it"},
@@ -228,8 +172,6 @@ func (e *Editor) windBindings() []helpBinding {
 	}
 }
 
-// windFirstStepsContent is the blank-band guidance for a wind piece: the
-// same three-line shape as the guitar's, in this instrument's own moves.
 func windFirstStepsContent() ([]firstStep, string) {
 	lines := []firstStep{
 		{"A-G", "type a note — it lands nearest the one before it"},
@@ -240,15 +182,6 @@ func windFirstStepsContent() ([]firstStep, string) {
 	return lines, tail
 }
 
-// --- the instrument picker ---------------------------------------------
-//
-// The one question the editor asks BEFORE there is anything to edit: what
-// will this be played on? It appears when a new piece is started and when
-// a track is added — the two moments an instrument is chosen — and never
-// again, because changing a track's instrument under notes already
-// written would re-pitch music the user meant.
-
-// A pickPurpose says which of the two moments the picker is serving.
 type pickPurpose int
 
 const (
@@ -256,25 +189,18 @@ const (
 	pickAddTrack
 )
 
-// An edPicker is the open instrument choice.
 type edPicker struct {
 	purpose pickPurpose
 	sel     int
 }
 
-// pickerChoices is the pickable instruments: the guitar the editor has
-// always started with, then the wind registry in its own order. Index 0
-// (guitar) is also what cancelling a new-piece pick falls back to.
 func pickerChoices() []string {
 	out := []string{"guitar"}
 	return append(out, score.WindNames()...)
 }
 
-// edPickerChoices is pickerChoices computed once: the registry is static,
-// so there is no reason to rebuild the list every frame.
 var edPickerChoices = pickerChoices()
 
-// pickerWind maps a choice index to its wind instrument; nil is guitar.
 func pickerWind(i int) *score.WindInstrument {
 	if i <= 0 {
 		return nil
@@ -286,16 +212,10 @@ func pickerWind(i int) *score.WindInstrument {
 	return score.WindByName(names[i-1])
 }
 
-// openInstrumentPicker raises the choice. The add-track flow keeps the
-// grid behind it; the new-piece flow is opened by NewEditorChoosing
-// before the user has seen anything else.
 func (e *Editor) openInstrumentPicker(p pickPurpose) {
 	e.picker = &edPicker{purpose: p}
 }
 
-// updatePicker runs the modal choice: arrows move, enter takes, escape
-// declines — which for a new piece means the guitar default, and for a
-// new track means no track.
 func (e *Editor) updatePicker() {
 	n := len(edPickerChoices)
 	switch {
@@ -317,27 +237,21 @@ func (e *Editor) updatePicker() {
 	}
 }
 
-// applyPick is the single place a choice takes effect.
 func (e *Editor) applyPick(i int) {
 	p := e.picker
 	e.picker = nil
 	w := pickerWind(i)
 	switch p.purpose {
 	case pickNewPiece:
-		// The blank document the editor opened with was a placeholder for
-		// exactly this answer; nothing has been typed into it (the picker
-		// was up), so rebuilding it loses nothing.
+
 		e.doc = edit.New(edit.NewOptions{Wind: w})
 	case pickAddTrack:
 		e.report(e.doc.AddTrack(fmt.Sprintf("Track %d", len(e.doc.Score().Tracks)+1), w))
 	}
 }
 
-// cancelPick closes the picker without a choice: a new piece keeps the
-// guitar it already is, a new track is simply not added.
 func (e *Editor) cancelPick() { e.picker = nil }
 
-// edPickerRect sizes the card to its rows.
 func edPickerRect() rect {
 	h := 78.0 + float64(len(edPickerChoices))*edPickRowH + 16
 	return rect{screenW/2 - 220, screenH/2 - h/2, 440, h}
@@ -345,7 +259,6 @@ func edPickerRect() rect {
 
 const edPickRowH = 30.0
 
-// pickerSpots are the rows as click targets; each records into out.
 func (e *Editor) pickerSpots(out *int) []hotspot {
 	r := edPickerRect()
 	var spots []hotspot

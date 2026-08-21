@@ -1,34 +1,5 @@
 package textfmt
 
-// Serialising a score back to .gtab source — the other half of the
-// authoring loop the parser opens. The editor (internal/edit) keeps a
-// score in memory and saves it through here, and the editor's text view
-// shows exactly what this produces, so anything Format writes has to be
-// something Parse reads back as the same score. write_test.go pins that
-// round trip on every fixture in the tree.
-//
-// The format is smaller than the model, and this is where that shows.
-// Six things a *score.Score can hold cannot be written down:
-//
-//   - a beat whose duration is not a plain, dotted, or triplet note value
-//     (an importer that quantised to something else, most often);
-//   - a tempo change that does not land on a barline (SMF places them
-//     wherever it likes);
-//   - two notes on one string in the same beat;
-//   - a wind note whose WRITTEN pitch leaves C0-G9 (MIDI 12-127) — a
-//     transposing instrument reads above what it sounds, and no note name
-//     a beat token can spell reaches past G9 or below C0. (The importers
-//     drop notes past 127 with a warning, and no registry instrument
-//     writes below C0, so only a hand-built score can hold either.)
-//   - a meter \time cannot spell — a numerator past 64, or a denominator
-//     that is not one of 1 2 4 8 16 32;
-//   - a title or track name holding a line break or "//", which would
-//     end the directive or start a comment mid-name.
-//
-// Each is reported as an error naming the bar, rather than written out as
-// something Parse would reject or — worse — read back as a different
-// piece. A score that came from the editor can never contain any of them.
-
 import (
 	"fmt"
 	"os"
@@ -40,9 +11,6 @@ import (
 	"github.com/S95F/musicTutor/internal/score"
 )
 
-// Format renders sc as .gtab source. The returned bytes parse back to a
-// score equal to sc (see the package comment for the three shapes that
-// are refused instead).
 func Format(sc *score.Score) ([]byte, error) {
 	if sc == nil {
 		return nil, fmt.Errorf("gtab: nil score")
@@ -57,11 +25,6 @@ func Format(sc *score.Score) ([]byte, error) {
 	return []byte(w.b.String()), nil
 }
 
-// WriteFile renders sc and writes it to path, replacing whatever was
-// there. The write goes to a temporary file in the same directory and is
-// renamed over the target, so an interrupted save cannot leave a piece
-// half-written — losing the previous version of a piece to a crash
-// mid-save is exactly the accident a practice log is meant to survive.
 func WriteFile(path string, sc *score.Score) error {
 	src, err := Format(sc)
 	if err != nil {
@@ -73,8 +36,7 @@ func WriteFile(path string, sc *score.Score) error {
 		return fmt.Errorf("gtab: %w", err)
 	}
 	name := tmp.Name()
-	// Any failure from here on removes the temporary file; the target is
-	// only touched by the rename, which is the last thing that happens.
+
 	defer os.Remove(name)
 	if _, err := tmp.Write(src); err != nil {
 		tmp.Close()
@@ -89,34 +51,20 @@ func WriteFile(path string, sc *score.Score) error {
 	return nil
 }
 
-// A writer renders one score. curNum/curDen and sticky mirror the state
-// the PARSER will be in at the same point in the output — the meter it
-// believes is in effect, and the duration a bare beat inherits — which is
-// what lets both be left out of the text whenever they have not changed.
 type writer struct {
 	sc  *score.Score
 	b   strings.Builder
-	ctx string       // the bar being written, for error messages
-	tr  *score.Track // the track being written, for its instrument
+	ctx string
+	tr  *score.Track
 
 	sticky int64
 
-	// tempoDone and meterDone mark map entries already written. Both maps
-	// are piece-wide but the directives that build them live in one track's
-	// bar stream, so an entry is written by the FIRST track that has a bar
-	// starting on its tick and skipped by every later one — restating it
-	// would be harmless (the parser replaces the entry at that tick) but it
-	// is noise in a format whose whole point is being readable. These are
-	// also what notices, at the end, that an entry found no barline
-	// anywhere and cannot be expressed at all.
 	tempoDone []bool
 	meterDone []bool
 }
 
 func (w *writer) run() error {
-	// Every meter that will be written must be one \time can spell, or the
-	// output would be text the parser rejects. parseTimeSig is the judge of
-	// that, so the check cannot drift from what the parser accepts.
+
 	for _, m := range w.sc.Meters {
 		if _, _, ok := parseTimeSig(fmt.Sprintf("%d/%d", m.Num, m.Den)); !ok {
 			return fmt.Errorf("gtab: the %d/%d time signature at tick %d is not one \\time can write (n/d with n 1-64 and d one of 1 2 4 8 16 32)", m.Num, m.Den, m.Tick)
@@ -127,7 +75,7 @@ func (w *writer) run() error {
 	}
 	w.tempoDone = make([]bool, len(w.sc.Tempos))
 	w.meterDone = make([]bool, len(w.sc.Meters))
-	// The opening tempo and meter are in the header.
+
 	w.tempoDone[0], w.meterDone[0] = true, true
 	for i, tr := range w.sc.Tracks {
 		if err := w.track(i, tr); err != nil {
@@ -147,8 +95,6 @@ func (w *writer) run() error {
 	return nil
 }
 
-// header writes the piece-wide directives: the title and the tempo and
-// meter in effect at tick 0.
 func (w *writer) header() error {
 	if title := strings.TrimSpace(w.sc.Title); title != "" {
 		if strings.ContainsAny(title, "\r\n") {
@@ -169,20 +115,12 @@ func (w *writer) header() error {
 	return nil
 }
 
-// track writes one track: its header directives, then its bars.
 func (w *writer) track(i int, tr *score.Track) error {
 	w.tr = tr
 	w.b.WriteString("\n")
-	// Where the track's own directives begin, so the blank line that
-	// separates them from its bars is only written when there are any: an
-	// anonymous single-track piece has no header block at all, and an empty
-	// one would read as a missing directive rather than as breathing room.
+
 	headStart := w.b.Len()
-	// The first track may stay anonymous — that is the implicit track the
-	// parser materialises for a piece whose bars precede any \track. Every
-	// later one needs a name to exist at all, so an unnamed one is given a
-	// positional one rather than being silently merged into its
-	// predecessor.
+
 	name := tr.Name
 	if i > 0 && strings.TrimSpace(name) == "" {
 		name = fmt.Sprintf("Track %d", i+1)
@@ -197,12 +135,10 @@ func (w *writer) track(i int, tr *score.Track) error {
 		fmt.Fprintf(&w.b, "\\track %s\n", name)
 	}
 	if tr.Wind != nil {
-		// A wind track's pitch reference is its instrument; Validate has
-		// already refused one carrying a tuning or a capo.
+
 		fmt.Fprintf(&w.b, "\\instrument %s\n", tr.Wind.Name)
 	} else if !tr.Tuning.Equal(score.StandardTuning) {
-		// The file lists open strings low to high; the model stores the
-		// highest-pitched string first.
+
 		names := make([]string, len(tr.Tuning))
 		for j, key := range tr.Tuning {
 			if key < 0 || key > 127 {
@@ -218,9 +154,7 @@ func (w *writer) track(i int, tr *score.Track) error {
 		}
 		fmt.Fprintf(&w.b, "\\capo %d\n", tr.Capo)
 	}
-	// The program a track's instrument implies is the one worth leaving
-	// out: for a fretted track the format's steel-string default, for a
-	// wind track the instrument's own.
+
 	trackDefaultProgram := DefaultProgram
 	if tr.Wind != nil {
 		trackDefaultProgram = tr.Wind.Program
@@ -238,8 +172,7 @@ func (w *writer) track(i int, tr *score.Track) error {
 	if w.b.Len() > headStart {
 		w.b.WriteString("\n")
 	}
-	// A \track directive resets the parser's sticky duration to a quarter;
-	// so does the start of the implicit first track.
+
 	w.sticky = score.Quarter
 	for bi, bar := range tr.Bars {
 		w.ctx = fmt.Sprintf("track %d bar %d", i+1, bi+1)
@@ -253,15 +186,6 @@ func (w *writer) track(i int, tr *score.Track) error {
 	return nil
 }
 
-// betweenBars writes the map changes anchored exactly at a bar's start.
-// Both directives are legal only between bars, which is where this is
-// called from.
-//
-// The meter written is the MAP's, not the bar's own denormalized copy,
-// because the map is what the parser reads a bar's meter out of. When the
-// two disagree the score is internally inconsistent — the bar would come
-// back a different length than it validated as — so that is reported here
-// rather than written out as a piece that changes on the way to disk.
 func (w *writer) betweenBars(bar *score.Bar) error {
 	if m := w.sc.Meters.At(bar.Start); m.Num != bar.Num || m.Den != bar.Den {
 		return fmt.Errorf("gtab: %s is written as %d/%d but the meter map says %d/%d at tick %d; the two have to agree before the piece can be written",
@@ -292,7 +216,6 @@ func (w *writer) betweenBars(bar *score.Bar) error {
 	return nil
 }
 
-// bar writes one bar's beats and the barline that closes it.
 func (w *writer) bar(bar *score.Bar) error {
 	for i, beat := range bar.Beats {
 		if i > 0 {
@@ -308,8 +231,6 @@ func (w *writer) bar(bar *score.Bar) error {
 	return nil
 }
 
-// beat renders one beat: a rest, a note, or a chord, with the duration
-// left out whenever it is the one the previous beat already set.
 func (w *writer) beat(bt *score.Beat) (string, error) {
 	dur, err := w.durSuffix(bt.Dur)
 	if err != nil {
@@ -327,9 +248,6 @@ func (w *writer) beat(bt *score.Beat) (string, error) {
 		return s + dur + techString(n.Tech, w.tr.Wind != nil), nil
 	}
 
-	// A chord every note of which is tied is written with one "~" in front
-	// of the whole thing, which is how a guitarist reads it — the chord is
-	// still ringing — rather than as a tie marker on each note.
 	allTied := true
 	for _, n := range bt.Notes {
 		if !n.Tied {
@@ -338,12 +256,10 @@ func (w *writer) beat(bt *score.Beat) (string, error) {
 		}
 	}
 
-	// A string played twice in one beat cannot happen here: Format runs
-	// Validate first, which refuses it.
 	parts := make([]string, 0, len(bt.Notes))
 	for _, n := range bt.Notes {
 		if allTied {
-			n.Tied = false // carried by the chord's own prefix
+			n.Tied = false
 		}
 		s, err := w.noteToken(n)
 		if err != nil {
@@ -355,24 +271,14 @@ func (w *writer) beat(bt *score.Beat) (string, error) {
 	if allTied {
 		prefix = "~("
 	}
-	// The duration attaches directly to the ")", with no space: that is
-	// how the parser knows the suffix belongs to the chord.
+
 	return prefix + strings.Join(parts, " ") + ")" + dur, nil
 }
 
-// noteToken renders a note's tie marker and pitch — "fret.string" on a
-// fretted track, a written pitch name on a wind track — everything but
-// its duration and techniques, which sit in different places for a chord
-// than for a lone note.
 func (w *writer) noteToken(n score.Note) (string, error) {
 	if wind := w.tr.Wind; wind != nil {
 		written := wind.Written(w.tr.Pitch(n))
-		// The floor is C0 (key 12), not 0: a beat token's pitch is read by
-		// tokScan.pitch, whose octave is unsigned, so "C-1" — a spelling
-		// \tuning's parser accepts — would come back unreadable. No
-		// registry instrument writes below C0 (the lowest written note of
-		// any of them is key 58), so only a hand-built instrument can get
-		// here — refused rather than written as a file that cannot reopen.
+
 		if written < 12 || written > 127 {
 			return "", fmt.Errorf("gtab: %s: the note's written pitch is MIDI key %d, which a beat's note name cannot hold (C0-G9)", w.ctx, written)
 		}
@@ -392,10 +298,6 @@ func (w *writer) noteToken(n score.Note) (string, error) {
 	return s, nil
 }
 
-// techString renders a note's techniques in the instrument family's own
-// letter order, so the same set of bits always writes the same way. Both
-// tables mirror the parser's techFor alphabets — the four lists must stay
-// in step.
 func techString(t score.Technique, wind bool) string {
 	table := []struct {
 		bit  score.Technique
@@ -428,9 +330,6 @@ func techString(t score.Technique, wind bool) string {
 	return b.String()
 }
 
-// durSuffix returns the ".N" suffix a beat needs, or "" when the sticky
-// duration already carries it, and updates the sticky duration to match
-// what the parser will hold after reading this beat.
 func (w *writer) durSuffix(dur int64) (string, error) {
 	if dur == w.sticky {
 		return "", nil
@@ -443,9 +342,6 @@ func (w *writer) durSuffix(dur int64) (string, error) {
 	return "." + name, nil
 }
 
-// durationNames maps every length the format can express to its spelling.
-// It is built from the same constants the parser converts back, so the
-// two cannot drift.
 var durationNames = func() map[int64]string {
 	out := map[int64]string{}
 	for _, d := range []struct {
@@ -466,17 +362,11 @@ var durationNames = func() map[int64]string {
 	return out
 }()
 
-// durationName spells a length in ticks, reporting whether the format can
-// express it at all.
 func durationName(dur int64) (string, bool) {
 	s, ok := durationNames[dur]
 	return s, ok
 }
 
-// DurationNames returns every beat length .gtab can write, shortest
-// first, paired with its spelling. The editor builds its duration picker
-// from this, so the palette it offers and the file it saves cannot
-// disagree about what exists.
 func DurationNames() []struct {
 	Ticks int64
 	Name  string
@@ -495,12 +385,6 @@ func DurationNames() []struct {
 	return out
 }
 
-// bpmString spells microseconds-per-quarter as the BPM the parser will
-// convert back to exactly that value. Tempo is stored SMF-style and BPM
-// is its reciprocal, so most tempos are not round numbers; rather than
-// pick a fixed precision and hope, this widens the precision until the
-// text round-trips, which is the only definition of "enough digits" that
-// is actually true.
 func bpmString(usPerQuarter int64) (string, error) {
 	if usPerQuarter <= 0 {
 		return "", fmt.Errorf("gtab: tempo of %d microseconds per quarter is not positive", usPerQuarter)
@@ -509,9 +393,7 @@ func bpmString(usPerQuarter int64) (string, error) {
 	if !(bpm >= 1 && bpm <= 1000) {
 		return "", fmt.Errorf("gtab: tempo of %.4g BPM is outside the 1-1000 the format accepts", bpm)
 	}
-	// Plain decimal only, never an exponent: 'g' turns 120 BPM into
-	// "1.2e+02" at the first precision that happens to round-trip, which is
-	// a correct number and an unreadable tempo marking.
+
 	for dec := 0; dec <= 12; dec++ {
 		s := strconv.FormatFloat(bpm, 'f', dec, 64)
 		v, err := strconv.ParseFloat(s, 64)
@@ -519,20 +401,10 @@ func bpmString(usPerQuarter int64) (string, error) {
 			return s, nil
 		}
 	}
-	// Unreachable for any int64 tempo: 17 significant digits reproduce any
-	// float64 exactly, and the value came from one. Reported rather than
-	// silently approximated all the same.
+
 	return "", fmt.Errorf("gtab: tempo of %d microseconds per quarter cannot be written as a BPM that reads back exactly", usPerQuarter)
 }
 
-// CleanLabel rewrites arbitrary text — an imported title or track name —
-// into something \title and \track can hold: line breaks become spaces
-// and the "//" comment marker is broken with a space, the two shapes
-// Format refuses (see header and track). Surrounding whitespace is also
-// trimmed, silently, because the parser's restOfLine would hand exactly
-// the trimmed text back on reload. changed reports whether a refused
-// shape had to give, so an importer can warn; importers run their titles
-// and names through here so an imported piece can always be saved.
 func CleanLabel(s string) (string, bool) {
 	cleaned := strings.NewReplacer("\r", " ", "\n", " ").Replace(s)
 	for strings.Contains(cleaned, "//") {
@@ -542,12 +414,8 @@ func CleanLabel(s string) (string, bool) {
 	return strings.TrimSpace(cleaned), changed
 }
 
-// pitchClassNames spells the twelve pitch classes with sharps. The parser
-// reads flats too; the writer only ever needs one spelling per pitch.
 var pitchClassNames = [12]string{"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"}
 
-// pitchName renders a MIDI key in scientific pitch notation, middle C =
-// C4 = 60 — the notation \tuning reads.
 func pitchName(key int) string {
 	return pitchClassNames[key%12] + strconv.Itoa(key/12-1)
 }

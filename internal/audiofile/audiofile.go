@@ -1,17 +1,3 @@
-// Package audiofile decodes audio files into the project-standard
-// 48 kHz stereo float32 format (ROADMAP Phase 3: backing-track import).
-//
-// WAV is read via internal/wavio, FLAC via github.com/mewkiz/flac, and
-// MP3 — best-effort, the decoder is unmaintained (ROADMAP "Known risks")
-// — via github.com/hajimehoshi/go-mp3. Mono sources are duplicated into
-// both channels; sources at other sample rates are resampled to 48000 Hz
-// by linear interpolation.
-//
-// Linear interpolation is a deliberate quality tradeoff: it attenuates
-// high frequencies slightly and adds a small amount of aliasing compared
-// to a windowed-sinc resampler, but it is simple, fast, and more than
-// adequate for a practice backing track. A windowed-sinc upgrade is
-// future work if the difference ever becomes audible in practice.
 package audiofile
 
 import (
@@ -29,39 +15,15 @@ import (
 	"github.com/S95F/musicTutor/internal/wavio"
 )
 
-// SampleRate is the output sample rate: the project-wide 48 kHz standard.
 const SampleRate = 48000
 
-// maxPreallocSamples caps the per-channel preallocation hint taken from
-// the FLAC STREAMINFO total-sample count. That 36-bit field is
-// attacker-controlled — a file of a few hundred bytes can declare 2^36
-// samples and would force a ~275 GB make() if trusted — so it is honored
-// only up to 4 M samples (16 MB per channel); longer streams grow by
-// append as frames actually decode.
 const maxPreallocSamples = 4 << 20
 
-// Sample-rate plausibility bounds on a file's declared rate. The
-// declaration is attacker-controlled bytes (a WAV fmt chunk, a FLAC
-// STREAMINFO) and it DIVIDES in resampleLinear: a 167 KB WAV claiming
-// 1 Hz would inflate into two ~8 GB output channels and abort the
-// process out of memory (audit B3). Nothing real declares below 8 kHz
-// (MPEG-2.5, telephony WAV) or above 768 kHz (the highest marketed PCM
-// rate; FLAC's own spec ceiling is 655,350 Hz), so these bounds reject
-// only garbage while capping the resample amplification at 48x.
-// (go-mp3 is table-bound to 8-48 kHz and cannot report an absurd rate;
-// the check covers it anyway as free insurance.)
 const (
 	minSampleRate = 1000
 	maxSampleRate = 768000
 )
 
-// Load decodes the audio file at path into 48 kHz stereo float32.
-// The format is chosen by file extension: .wav, .flac, or .mp3
-// (case-insensitive). Mono files are duplicated into both channels, and
-// other sample rates are resampled to 48000 Hz by linear interpolation
-// (see the package comment for the quality tradeoff). Everything Load
-// changed about the audio — resampling, channel handling, best-effort
-// decoding — is reported as human-readable warnings.
 func Load(path string) (left, right []float32, warnings []string, err error) {
 	var rate int
 	switch strings.ToLower(filepath.Ext(path)) {
@@ -77,21 +39,13 @@ func Load(path string) (left, right []float32, warnings []string, err error) {
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	// One policy check covers every decode path above and any format
-	// added later; the per-decoder checks only reject rate <= 0.
+
 	if rate < minSampleRate || rate > maxSampleRate {
 		return nil, nil, nil, fmt.Errorf(
 			"audiofile: %s: declared sample rate %d Hz is outside the plausible %d-%d Hz range (corrupt or forged header)",
 			filepath.Base(path), rate, minSampleRate, maxSampleRate)
 	}
-	// Before resampling, which would smear a bad sample across its
-	// neighbours: a 32-bit-float WAV carries whatever bits the writing DAW
-	// put there, and NaN or ±Inf among them is not a decode error, so
-	// nothing above rejects it. Left alone it reaches the mixer, turns the
-	// entire mix non-finite, and is written to the device as a full-scale
-	// rail — several seconds of maximum-amplitude noise into headphones
-	// (bug review N2's sibling; the offline render is now merely silent,
-	// but the live path writes float32 straight to the backend).
+
 	nfL, clL := scrubSamples(left)
 	nfR, clR := scrubSamples(right)
 	if n := nfL + nfR; n > 0 {
@@ -111,28 +65,8 @@ func Load(path string) (left, right []float32, warnings []string, err error) {
 	return left, right, warnings, nil
 }
 
-// maxSample bounds a decoded sample's magnitude — about 24 dB above full
-// scale, far more headroom than any real recording uses.
-//
-// Audio is nominally in [-1, 1] and the integer formats cannot leave it,
-// but a 32-bit-float WAV carries whatever the writing tool put there.
-// A value near float32's 3.4e38 ceiling is not audio, and it is not
-// harmless either: resampleLinear SUBTRACTS neighbouring samples, and
-// 3e38 - (-3e38) overflows float32 to +Inf, so an entirely finite file
-// becomes an all-NaN one on its way to the mixer — the very failure the
-// non-finite scrub above exists to prevent, manufactured after it ran.
-// Bounding the input is what makes the interpolation arithmetic provably
-// safe rather than merely usually safe.
 const maxSample = 16
 
-// scrubSamples makes every sample in s something the rest of the pipeline
-// can safely arithmetic on, reporting how many it had to change of each
-// kind.
-//
-// Non-finite samples become silence: a sample that is not a number names
-// no amplitude, and any finite guess would be audible. Wildly out-of-range
-// samples are clamped rather than silenced — the recording is probably
-// real and merely mis-scaled, so keeping the waveform beats blanking it.
 func scrubSamples(s []float32) (nonFinite, clamped int) {
 	for i, v := range s {
 		f := float64(v)
@@ -151,8 +85,6 @@ func scrubSamples(s []float32) (nonFinite, clamped int) {
 	return nonFinite, clamped
 }
 
-// loadWAV reads a WAV file via wavio, which already duplicates mono into
-// both channels and scales samples to [-1, 1].
 func loadWAV(path string) (rate int, left, right []float32, err error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -166,16 +98,12 @@ func loadWAV(path string) (rate int, left, right []float32, err error) {
 	return rate, left, right, nil
 }
 
-// loadFLAC decodes a FLAC file. Samples are scaled by the frame's bit
-// depth to [-1, 1]. Files with more than two channels keep the first two
-// (front left/right in every FLAC channel assignment), with a warning.
 func loadFLAC(path string) (rate int, left, right []float32, warnings []string, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return 0, nil, nil, nil, err
 	}
-	// Close the file directly: flac.New wraps it in a bufio.Reader, so
-	// Stream.Close cannot reach (and never closes) the *os.File.
+
 	defer f.Close()
 	stream, err := flac.New(f)
 	if err != nil {
@@ -215,7 +143,7 @@ func loadFLAC(path string) (rate int, left, right []float32, warnings []string, 
 			continue
 		}
 		ls := fr.Subframes[0].Samples
-		rs := ls // mono duplicates into both channels
+		rs := ls
 		if len(fr.Subframes) > 1 {
 			rs = fr.Subframes[1].Samples
 		}
@@ -231,9 +159,6 @@ func loadFLAC(path string) (rate int, left, right []float32, warnings []string, 
 	return rate, left, right, warnings, nil
 }
 
-// loadMP3 decodes an MP3 file. go-mp3 always yields 16-bit little-endian
-// stereo at the file's reported sample rate. Decoding is best-effort: the
-// decoder is unmaintained, so failures suggest converting to WAV or FLAC.
 func loadMP3(path string) (rate int, left, right []float32, warnings []string, err error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -263,7 +188,7 @@ func loadMP3(path string) (rate int, left, right []float32, warnings []string, e
 			return 0, nil, nil, nil, mp3Err(path, err)
 		}
 	}
-	frames := len(raw) / 4 // 2 channels x 2 bytes
+	frames := len(raw) / 4
 	left = make([]float32, frames)
 	right = make([]float32, frames)
 	for i := 0; i < frames; i++ {
@@ -274,16 +199,10 @@ func loadMP3(path string) (rate int, left, right []float32, warnings []string, e
 	return rate, left, right, warnings, nil
 }
 
-// mp3Err wraps an MP3 decoding failure with the best-effort caveat and
-// the recommended way out.
 func mp3Err(path string, err error) error {
 	return fmt.Errorf("audiofile: decoding MP3 %s (MP3 support is best-effort — the decoder is unmaintained; please convert the file to WAV or FLAC): %w", path, err)
 }
 
-// resampleLinear resamples src from srcRate to dstRate by linear
-// interpolation between neighboring input samples. Output sample i sits
-// at input position i*srcRate/dstRate; positions past the last input
-// sample hold it (at most one output sample at the tail).
 func resampleLinear(src []float32, srcRate, dstRate int) []float32 {
 	if srcRate == dstRate || len(src) == 0 {
 		return src

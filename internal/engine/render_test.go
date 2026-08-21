@@ -5,11 +5,6 @@ import (
 	"testing"
 )
 
-// TestSetTempoScaleRefusesNonFinite: NaN passes both clamp comparisons, so
-// it used to be stored as the tempo scale and from there poison frames per
-// tick, the segment end, the published BPM, and the backing-track position
-// — which indexed a slice with int(NaN) and panicked the audio thread. The
-// scale must be left as it was.
 func TestSetTempoScaleRefusesNonFinite(t *testing.T) {
 	for _, bad := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
 		e, _ := newFixtureEngine(t, Options{})
@@ -21,7 +16,7 @@ func TestSetTempoScaleRefusesNonFinite(t *testing.T) {
 		if bpm := e.EffectiveBPM(); math.IsNaN(bpm) || math.IsInf(bpm, 0) {
 			t.Errorf("SetTempoScale(%v) made EffectiveBPM %v", bad, bpm)
 		}
-		// And the render path must still produce finite audio.
+
 		e.Play()
 		l := make([]float32, 512)
 		r := make([]float32, 512)

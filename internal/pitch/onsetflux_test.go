@@ -7,9 +7,6 @@ import (
 	"testing"
 )
 
-// vibrato synthesizes a tone whose pitch wobbles by +-cents at rate Hz —
-// the technique most likely to fool a spectral-flux onset detector, since
-// it moves energy around the spectrum without adding any.
 func vibrato(freq, cents, rate, amp, seconds float64) []float32 {
 	n := int(seconds * testSR)
 	x := make([]float32, n)
@@ -22,7 +19,6 @@ func vibrato(freq, cents, rate, amp, seconds float64) []float32 {
 	return x
 }
 
-// countOnsets returns the number of Frames marked Onset.
 func countOnsets(cfg Config, x []float32) int {
 	d := NewDetector(cfg)
 	n := 0
@@ -34,15 +30,6 @@ func countOnsets(cfg Config, x []float32) int {
 	return n
 }
 
-// TestOnsetFluxNoSpuriousTriggers is the other half of P3. Adding a
-// level-independent trigger is only safe if it stays quiet through
-// everything that is NOT a new attack: a note decaying, a chord ringing,
-// and — the hard one — pitch that MOVES. Vibrato and bends slide partials
-// across bins, and under the detector's rectangular analysis window that
-// redistribution looked exactly like new energy: a plain magnitude flux
-// fired seven spurious onsets on 1.4 s of a +-30-cent vibrato. Computing
-// the flux on Hann-smoothed magnitudes (see Detector.hannMags) is what
-// makes these signals quiet.
 func TestOnsetFluxNoSpuriousTriggers(t *testing.T) {
 	tests := []struct {
 		name string
@@ -65,9 +52,6 @@ func TestOnsetFluxNoSpuriousTriggers(t *testing.T) {
 	}
 }
 
-// TestOnsetFluxSeparation records the measured flux on both sides of the
-// decision, so the threshold's headroom is visible rather than folklore.
-// A future change that narrows this gap shows up here first.
 func TestOnsetFluxSeparation(t *testing.T) {
 	cfg := strumConfig()
 	peak := func(x []float32, from, to float64) float64 {
@@ -84,7 +68,6 @@ func TestOnsetFluxSeparation(t *testing.T) {
 		return best
 	}
 
-	// Must trigger: a new chord over a ringing one.
 	minChange, minName := math.Inf(1), ""
 	for _, sp := range []float64{0, 0.005, 0.012, 0.020} {
 		for _, pr := range changePairs {
@@ -95,7 +78,7 @@ func TestOnsetFluxSeparation(t *testing.T) {
 			}
 		}
 	}
-	// Must not trigger: anything still sounding from an earlier attack.
+
 	maxHold, maxName := 0.0, ""
 	for _, sh := range chordCorpus {
 		for _, sp := range strumSpreads {
@@ -121,11 +104,6 @@ func TestOnsetFluxSeparation(t *testing.T) {
 	}
 }
 
-// TestStrumLatencyBudget pins the cost of the longer span. Moving the fold
-// off the attack transient (strumSkipHops) is what fixed the false misses,
-// and it is paid for in the delay between the physical attack and the
-// Process call that reports the Strum. The budget is 250 ms: past that a
-// Strum starts landing after the next beat at practice tempos.
 func TestStrumLatencyBudget(t *testing.T) {
 	cfg := strumConfig()
 	lead := silence(0.3)
@@ -156,13 +134,8 @@ func TestStrumLatencyBudget(t *testing.T) {
 	}
 }
 
-// TestStrumFallbackWhenTruncatedEarly: a span cut short by the next attack
-// before it reached its folding hops must still carry chroma. An all-zero
-// Chroma would make the scorer report a Miss on every note of a chord the
-// player did play — the D5 failure mode the whole change set is about.
 func TestStrumFallbackWhenTruncatedEarly(t *testing.T) {
-	// 50 ms apart: shorter than strumSkipHops (80 ms), so the first span
-	// never reaches its folding hops.
+
 	lead := silence(0.2)
 	first := scale(ksNote(45, 0.05), 0.15)
 	x := append(append(lead, first...), ksNote(52, 0.5)...)
@@ -179,7 +152,7 @@ func TestStrumFallbackWhenTruncatedEarly(t *testing.T) {
 	if sum == 0 {
 		t.Fatal("truncated strum has an all-zero chroma: the scorer would call every note a Miss")
 	}
-	if got, want := chromaRank(strums[0].Chroma)[0], 9; got != want { // A
+	if got, want := chromaRank(strums[0].Chroma)[0], 9; got != want {
 		t.Errorf("truncated strum's strongest class %s, want A;%s",
 			pitchClassNames[got], formatChroma(strums[0].Chroma))
 	}

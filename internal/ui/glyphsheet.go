@@ -1,34 +1,15 @@
 package ui
 
-// A specimen sheet for the drawn symbols.
-//
-// The glyphs in glyphdraw.go are geometry written by hand, and geometry
-// written by hand is wrong until it has been looked at. This is a Screen
-// that draws every one of them, labelled, at the three sizes they are
-// actually used at — so a change to a curve can be reviewed as a picture
-// instead of as coordinates.
-//
-// It ships in the package rather than in the screenshot tool because the
-// glyph ids are unexported and giving them a second, exported spelling to
-// make a development aid possible would be a worse trade than fifty lines
-// that never appear in the application. Nothing constructs it except
-// tools/uishot.
-
 import (
 	"github.com/hajimehoshi/ebiten/v2"
 )
 
-// A GlyphSheet lists every symbol the interface can draw.
 type GlyphSheet struct{}
 
-// NewGlyphSheet builds the specimen screen.
 func NewGlyphSheet() *GlyphSheet { return &GlyphSheet{} }
 
 func (*GlyphSheet) Update() error { return nil }
 
-// glyphSpecimens is every glyph with the name it stands for. The name is
-// the one the tooltip shows, so reviewing this sheet is also reviewing
-// whether the word and the picture agree.
 var glyphSpecimens = []struct {
 	id   glyphID
 	name string
@@ -99,12 +80,10 @@ func (s *GlyphSheet) Draw(dst *ebiten.Image) {
 		y := y0 + float64(row)*cellH
 		drawPanel(dst, rect{x, y, cellW - 10, cellH - 12}, colPanel, colPanelEdge)
 
-		// The three sizes: a toolbar control, a compact row, and the
-		// smallest anything is ever drawn at.
 		drawGlyph(dst, sp.id, rect{x + 10, y + 10, 28, 28}, colNote)
 		drawGlyph(dst, sp.id, rect{x + 46, y + 14, 20, 20}, colNote)
 		drawGlyph(dst, sp.id, rect{x + 72, y + 17, 14, 14}, colDisabled)
-		// And once engaged, which is the colour a lit toggle draws in.
+
 		drawPanel(dst, rect{x + 94, y + 8, 32, 32}, colOn, colOnEdge)
 		drawGlyph(dst, sp.id, rect{x + 100, y + 14, 20, 20}, colNote)
 

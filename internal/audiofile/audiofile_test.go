@@ -16,8 +16,6 @@ import (
 	"github.com/S95F/musicTutor/internal/wavio"
 )
 
-// sine generates n samples of a sine at freq Hz and the given rate,
-// scaled to amp.
 func sine(n int, freq float64, rate int, amp float64) []float32 {
 	out := make([]float32, n)
 	for i := range out {
@@ -26,8 +24,6 @@ func sine(n int, freq float64, rate int, amp float64) []float32 {
 	return out
 }
 
-// writeWAVStereo writes a stereo 16-bit WAV to a temp file and returns
-// its path.
 func writeWAVStereo(t *testing.T, rate int, left, right []float32) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.wav")
@@ -44,7 +40,6 @@ func writeWAVStereo(t *testing.T, rate int, left, right []float32) string {
 	return path
 }
 
-// writeWAVMono writes a mono 16-bit WAV to a temp file and returns its path.
 func writeWAVMono(t *testing.T, rate int, samples []float32) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "mono.wav")
@@ -61,8 +56,6 @@ func writeWAVMono(t *testing.T, rate int, samples []float32) string {
 	return path
 }
 
-// TestWAVRoundTrip48k loads a 48 kHz stereo WAV: no resampling, samples
-// back within 16-bit quantization error, no warnings.
 func TestWAVRoundTrip48k(t *testing.T) {
 	const n = 4800
 	l := sine(n, 440, SampleRate, 0.8)
@@ -79,7 +72,7 @@ func TestWAVRoundTrip48k(t *testing.T) {
 	if len(gl) != n || len(gr) != n {
 		t.Fatalf("got %d/%d samples, want %d", len(gl), len(gr), n)
 	}
-	const tol = 1.0 / 32768 // 16-bit quantization
+	const tol = 1.0 / 32768
 	for i := 0; i < n; i++ {
 		if math.Abs(float64(gl[i]-l[i])) > tol || math.Abs(float64(gr[i]-r[i])) > tol {
 			t.Fatalf("sample %d = (%v, %v), want (%v, %v) within %v", i, gl[i], gr[i], l[i], r[i], tol)
@@ -87,7 +80,6 @@ func TestWAVRoundTrip48k(t *testing.T) {
 	}
 }
 
-// TestWAVMonoDuplication loads a mono WAV: both channels identical.
 func TestWAVMonoDuplication(t *testing.T) {
 	m := sine(4800, 440, SampleRate, 0.7)
 	path := writeWAVMono(t, SampleRate, m)
@@ -105,14 +97,12 @@ func TestWAVMonoDuplication(t *testing.T) {
 	}
 }
 
-// estimateFreq estimates a sine's frequency from upward zero crossings,
-// interpolated to sub-sample precision, over the whole buffer.
 func estimateFreq(s []float32, rate int) float64 {
 	var first, last float64
 	crossings := 0
 	for i := 1; i < len(s); i++ {
 		if s[i-1] < 0 && s[i] >= 0 {
-			// Linear sub-sample position of the crossing.
+
 			x := float64(i-1) + float64(-s[i-1])/float64(s[i]-s[i-1])
 			if crossings == 0 {
 				first = x
@@ -127,12 +117,9 @@ func estimateFreq(s []float32, rate int) float64 {
 	return float64(crossings-1) * float64(rate) / (last - first)
 }
 
-// TestResampleKeepsFrequency loads a 440 Hz sine recorded at 44.1 kHz:
-// after resampling to 48 kHz the frequency must hold within 1 Hz, the
-// length must scale by 48000/44100, and a resample warning is emitted.
 func TestResampleKeepsFrequency(t *testing.T) {
 	const srcRate = 44100
-	src := sine(srcRate, 440, srcRate, 0.8) // 1 second
+	src := sine(srcRate, 440, srcRate, 0.8)
 	path := writeWAVMono(t, srcRate, src)
 
 	gl, _, warns, err := Load(path)
@@ -157,10 +144,6 @@ func TestResampleKeepsFrequency(t *testing.T) {
 	}
 }
 
-// writeFLAC encodes 16-bit samples (int16 range, one slice per channel)
-// as a FLAC file and returns its path. Encoding uses verbatim subframes;
-// mewkiz/flac's prediction analysis may still pick a tighter method, but
-// the decoded samples are bit-identical either way (FLAC is lossless).
 func writeFLAC(t *testing.T, rate int, channels [][]int32) string {
 	t.Helper()
 	n := len(channels[0])
@@ -215,8 +198,6 @@ func writeFLAC(t *testing.T, rate int, channels [][]int32) string {
 	return path
 }
 
-// int16Sine generates a sine directly in int16 sample space so the FLAC
-// round trip can be compared exactly (FLAC is lossless).
 func int16Sine(n int, freq float64, rate int, amp float64) []int32 {
 	out := make([]int32, n)
 	for i := range out {
@@ -225,8 +206,6 @@ func int16Sine(n int, freq float64, rate int, amp float64) []int32 {
 	return out
 }
 
-// TestFLACStereoDecode encodes a stereo 48 kHz FLAC in-test and loads it:
-// samples must round-trip exactly (lossless), no resampling.
 func TestFLACStereoDecode(t *testing.T) {
 	const n = 3000
 	l := int16Sine(n, 440, SampleRate, 0.8)
@@ -252,11 +231,9 @@ func TestFLACStereoDecode(t *testing.T) {
 	}
 }
 
-// TestFLACMonoResample encodes a mono 44.1 kHz FLAC: both channels
-// duplicated, resampled to 48 kHz with the frequency held within 1 Hz.
 func TestFLACMonoResample(t *testing.T) {
 	const srcRate = 44100
-	m := int16Sine(srcRate/2, 440, srcRate, 0.8) // half a second
+	m := int16Sine(srcRate/2, 440, srcRate, 0.8)
 	path := writeFLAC(t, srcRate, [][]int32{m})
 
 	gl, gr, warns, err := Load(path)
@@ -285,12 +262,6 @@ func TestFLACMonoResample(t *testing.T) {
 	}
 }
 
-// TestFLACForgedNSamplesBoundedAlloc is a regression test for hostile
-// input: a tiny valid FLAC patched so its STREAMINFO declares the
-// maximum 36-bit total-sample count (~68.7 billion samples, a ~275 GB
-// per-channel make() if trusted). Decoding must still succeed with the
-// real samples while treating the declared count as a clamped
-// preallocation hint.
 func TestFLACForgedNSamplesBoundedAlloc(t *testing.T) {
 	const n = 256
 	m := int16Sine(n, 440, SampleRate, 0.5)
@@ -299,10 +270,7 @@ func TestFLACForgedNSamplesBoundedAlloc(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// FLAC layout: "fLaC" magic (4 bytes) and a metadata block header (4
-	// bytes) put the STREAMINFO body at offset 8. Within STREAMINFO the
-	// 36-bit total-sample count is the low nibble of byte 13 plus bytes
-	// 14-17; force every bit on.
+
 	data[8+13] |= 0x0F
 	for i := 14; i <= 17; i++ {
 		data[8+i] = 0xFF
@@ -312,8 +280,6 @@ func TestFLACForgedNSamplesBoundedAlloc(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Sanity-check the forgery itself, so the test cannot silently stop
-	// covering the hostile path if the encoder's layout ever changes.
 	fh, err := os.Open(forged)
 	if err != nil {
 		t.Fatal(err)
@@ -347,35 +313,23 @@ func TestFLACForgedNSamplesBoundedAlloc(t *testing.T) {
 	}
 }
 
-// silentMP3 constructs a minimal valid MP3 in memory: nframes MPEG-1
-// Layer III frames (44.1 kHz, 128 kbps, stereo, no CRC) whose side info
-// is all zeros — every granule has part2_3_length 0, so the decoder reads
-// no Huffman data and synthesizes silence. This is built from the public
-// MPEG-1 frame-header layout, not from any decoder's source; go-mp3
-// cannot encode, and this keeps the fixture generated rather than
-// committed opaque binary.
 func silentMP3(nframes int) []byte {
-	// Frame length: 144 * bitrate / samplerate = 144*128000/44100 = 417
-	// bytes (padding bit clear), 4-byte header + 32-byte stereo side info
-	// + zero main data.
+
 	const frameLen = 417
 	var out []byte
 	for i := 0; i < nframes; i++ {
 		f := make([]byte, frameLen)
-		f[0] = 0xFF // sync
-		f[1] = 0xFB // sync | MPEG-1 | Layer III | no CRC
-		f[2] = 0x90 // 128 kbps | 44.1 kHz | no padding
-		f[3] = 0x00 // stereo
+		f[0] = 0xFF
+		f[1] = 0xFB
+		f[2] = 0x90
+		f[3] = 0x00
 		out = append(out, f...)
 	}
 	return out
 }
 
-// TestMP3SilentDecode loads a generated silent MP3: decoding succeeds,
-// output is silence, the length reflects 44.1->48 kHz resampling, and
-// the best-effort warning is present.
 func TestMP3SilentDecode(t *testing.T) {
-	const nframes = 8 // 8 * 1152 samples at 44.1 kHz
+	const nframes = 8
 	path := filepath.Join(t.TempDir(), "silence.mp3")
 	if err := os.WriteFile(path, silentMP3(nframes), 0o644); err != nil {
 		t.Fatal(err)
@@ -405,8 +359,6 @@ func TestMP3SilentDecode(t *testing.T) {
 	}
 }
 
-// TestMP3GarbageError loads a .mp3 that is not an MP3: the error must
-// carry the best-effort tone and point at WAV/FLAC.
 func TestMP3GarbageError(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "garbage.mp3")
 	if err := os.WriteFile(path, []byte("this is not an mp3 file at all, not even close"), 0o644); err != nil {
@@ -422,9 +374,6 @@ func TestMP3GarbageError(t *testing.T) {
 	}
 }
 
-// TestMP3RealFile decodes a real MP3 when one is provided at
-// testdata/real.mp3 (not committed — go-mp3 cannot encode and the
-// generated fixture only covers silence); skipped otherwise.
 func TestMP3RealFile(t *testing.T) {
 	path := filepath.Join("testdata", "real.mp3")
 	if _, err := os.Stat(path); err != nil {
@@ -439,7 +388,6 @@ func TestMP3RealFile(t *testing.T) {
 	}
 }
 
-// TestUnsupportedExtension rejects unknown formats with a clear error.
 func TestUnsupportedExtension(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.ogg")
 	if err := os.WriteFile(path, []byte("OggS"), 0o644); err != nil {
@@ -451,8 +399,6 @@ func TestUnsupportedExtension(t *testing.T) {
 	}
 }
 
-// TestResampleLinearRatio checks the raw resampler's arithmetic: a ramp
-// resampled 2:1 lands halfway between neighbors.
 func TestResampleLinearRatio(t *testing.T) {
 	src := []float32{0, 2, 4, 6, 8, 10, 12, 14}
 	got := resampleLinear(src, 24000, 48000)
@@ -462,7 +408,7 @@ func TestResampleLinearRatio(t *testing.T) {
 	for i := range got {
 		want := float32(i)
 		if i >= 15 {
-			want = 14 // held tail past the last input sample
+			want = 14
 		}
 		if got[i] != want {
 			t.Errorf("sample %d = %v, want %v", i, got[i], want)
@@ -470,11 +416,6 @@ func TestResampleLinearRatio(t *testing.T) {
 	}
 }
 
-// TestImplausibleSampleRateRejected is the regression test for audit B3:
-// the declared rate divides in resampleLinear, so a small file claiming
-// 1 Hz would inflate into two ~8 GB output channels and abort the process
-// out of memory. Anything outside the plausible range must be rejected
-// promptly — the absent allocation is the point of the test.
 func TestImplausibleSampleRateRejected(t *testing.T) {
 	samples := sine(2000, 220, 8000, 0.5)
 	for _, rate := range []int{1, 999, 768001, 4_000_000} {
@@ -484,8 +425,6 @@ func TestImplausibleSampleRateRejected(t *testing.T) {
 		}
 	}
 
-	// The floor is generous: telephony-grade 8 kHz still loads (with the
-	// resample warning).
 	path := writeWAVMono(t, 8000, samples)
 	_, _, warnings, err := Load(path)
 	if err != nil {
@@ -502,10 +441,6 @@ func TestImplausibleSampleRateRejected(t *testing.T) {
 	}
 }
 
-// writeFloatWAV writes a mono 32-bit IEEE-float WAV by hand. wavio.Write
-// emits 16-bit PCM, which quantizes a bad sample away — float is the only
-// format that can carry NaN or ±Inf through a decode, which is exactly
-// why it is the format worth testing.
 func writeFloatWAV(t *testing.T, rate int, samples []float32) string {
 	t.Helper()
 	var buf bytes.Buffer
@@ -514,8 +449,8 @@ func writeFloatWAV(t *testing.T, rate int, samples []float32) string {
 	binary.Write(&buf, binary.LittleEndian, uint32(36+dataLen))
 	buf.WriteString("WAVEfmt ")
 	binary.Write(&buf, binary.LittleEndian, uint32(16))
-	binary.Write(&buf, binary.LittleEndian, uint16(3)) // IEEE float
-	binary.Write(&buf, binary.LittleEndian, uint16(1)) // mono
+	binary.Write(&buf, binary.LittleEndian, uint16(3))
+	binary.Write(&buf, binary.LittleEndian, uint16(1))
 	binary.Write(&buf, binary.LittleEndian, uint32(rate))
 	binary.Write(&buf, binary.LittleEndian, uint32(rate*4))
 	binary.Write(&buf, binary.LittleEndian, uint16(4))
@@ -532,11 +467,6 @@ func writeFloatWAV(t *testing.T, rate int, samples []float32) string {
 	return path
 }
 
-// TestLoadSilencesNonFiniteSamples: a 32-bit-float WAV can carry NaN and
-// ±Inf, and no decoder rejects them — they are valid bit patterns, not a
-// parse error. Left in, they turn the entire mix non-finite and reach the
-// device as a full-scale rail, which is seconds of maximum-amplitude noise
-// in the player's headphones. Load must silence them and say so.
 func TestLoadSilencesNonFiniteSamples(t *testing.T) {
 	samples := []float32{
 		0.5,
@@ -578,15 +508,8 @@ func TestLoadSilencesNonFiniteSamples(t *testing.T) {
 	}
 }
 
-// TestResampleCannotManufactureNonFiniteSamples is the fix-verification
-// regression for the non-finite scrub. Silencing NaN and Inf on load is
-// not enough on its own: resampleLinear subtracts neighbouring samples,
-// and a 32-bit-float WAV may legally carry values near float32's 3.4e38
-// ceiling, whose difference overflows to +Inf. An entirely finite file
-// then arrived at the mixer as all-NaN — the exact failure the scrub was
-// added to prevent, manufactured just after it ran.
 func TestResampleCannotManufactureNonFiniteSamples(t *testing.T) {
-	// Alternating extremes at a rate that forces resampling.
+
 	samples := make([]float32, 64)
 	for i := range samples {
 		if i%2 == 0 {

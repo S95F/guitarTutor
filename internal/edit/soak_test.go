@@ -9,16 +9,6 @@ import (
 	"github.com/S95F/musicTutor/internal/score/textfmt"
 )
 
-// TestSoak drives the editor the way a user does — a long run of ordinary
-// operations in an order nobody planned — and checks after every single
-// one that the piece still validates and can still be written down.
-//
-// This is the test that matters most for this package. The individual
-// operations are easy to get right one at a time; what is hard is that a
-// meter change lands on a bar an insertion moved, or that a refused edit
-// leaves a bar half-refitted, or that undo restores a score whose ticks no
-// longer match its bars. Those only show up in combination, and a fixed
-// script would only ever find the combinations someone thought of.
 func TestSoak(t *testing.T) {
 	const (
 		seeds = 12
@@ -33,9 +23,7 @@ func TestSoak(t *testing.T) {
 			var last string
 			for step := 0; step < steps; step++ {
 				op, err := applyRandomOp(d, rng, durations)
-				// Refusals are a normal outcome, not a failure: half the
-				// operations here are deliberately asking for something that
-				// may not fit. What matters is the state they leave behind.
+
 				_ = err
 				if e := d.Score().Validate(); e != nil {
 					t.Fatalf("step %d (%s) left an invalid piece: %v\n--- last good ---\n%s", step, op, e, last)
@@ -81,8 +69,6 @@ func TestSoak(t *testing.T) {
 	}
 }
 
-// applyRandomOp performs one arbitrary editor operation and names it, so a
-// failure says what was being done when the piece broke.
 func applyRandomOp(d *Doc, rng *rand.Rand, durations []struct {
 	Ticks int64
 	Name  string
@@ -125,7 +111,7 @@ func applyRandomOp(d *Doc, rng *rand.Rand, durations []struct {
 		bpm := float64(40 + rng.Intn(200))
 		return fmt.Sprintf("SetTempo(%g) at bar %d", bpm, d.Cursor().Bar), d.SetTempo(bpm)
 	case 18:
-		// History and navigation, which have to survive the same soak.
+
 		switch rng.Intn(4) {
 		case 0:
 			return "Undo", nilIf(d.Undo())
@@ -160,8 +146,6 @@ func applyRandomOp(d *Doc, rng *rand.Rand, durations []struct {
 	}
 }
 
-// nilIf turns the "was there anything to do" result of Undo and Redo into
-// the error shape applyRandomOp reports in.
 func nilIf(ok bool) error {
 	if ok {
 		return nil

@@ -1,14 +1,5 @@
 package ui
 
-// The start screen's geometry and painting.
-//
-// Every rectangle the screen uses comes out of layout(), and both the
-// drawing and the hit testing read it — so what the eye sees and what the
-// mouse finds are the same numbers by construction rather than by two
-// people remembering to change two files. It is computed per frame
-// because it is not constant: the hint strip collapses, and the panes
-// take back the room it gives up.
-
 import (
 	"fmt"
 	"image/color"
@@ -17,7 +8,6 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/vector"
 )
 
-// A browserAction is one button on the action row.
 type browserAction struct {
 	id      string
 	glyph   glyphID
@@ -28,22 +18,19 @@ type browserAction struct {
 	act     func(*Browser)
 }
 
-// browserLayout is one frame's geometry.
 type browserLayout struct {
-	hint    rect   // the getting-started strip, or its collapsed stub
-	hintBtn rect   // hide / show
-	steps   []rect // the strip's clickable steps
-	actions []rect // one per entry of actionList
-	panes   []rect // one per entry of paneOrder
-	rows    int    // rows that fit in a pane
-	// statusY is the top of the band reserved for errors and import
-	// warnings, which the panes stop above whether or not it is in use.
+	hint    rect
+	hintBtn rect
+	steps   []rect
+	actions []rect
+	panes   []rect
+	rows    int
+
 	statusY float64
-	// paneWidth is every pane's width; they divide the page evenly.
+
 	paneWidth float64
 }
 
-// layout computes the frame's geometry.
 func (b *Browser) layout() browserLayout {
 	var l browserLayout
 	y := uiBodyTop
@@ -80,9 +67,6 @@ func (b *Browser) layout() browserLayout {
 	}
 	y += brwActionH + 14
 
-	// The status stack sits between the panes and the footer, and always
-	// has its room reserved: panes that grew into it when there was
-	// nothing to report would jump every time an import warned.
 	l.statusY = uiFooterY - 10 - brwStatusLines*18
 	paneH := l.statusY - 12 - y
 	l.rows = int((paneH - brwPaneHeadH) / brwRowH)
@@ -101,12 +85,8 @@ func (b *Browser) layout() browserLayout {
 	return l
 }
 
-// rowsPerPane is how many rows a pane shows, which the selection clamping
-// needs outside a draw.
 func (b *Browser) rowsPerPane() int { return b.layout().rows }
 
-// actionList is the row of buttons under the hint: everything the screen
-// can do that is not "open the thing I have selected".
 func (b *Browser) actionList() []browserAction {
 	_, canEdit := b.editableSelection()
 	return []browserAction{
@@ -121,13 +101,6 @@ func (b *Browser) actionList() []browserAction {
 	}
 }
 
-// --- hit testing --------------------------------------------------------
-
-// paneHit maps a cursor position to a pane and a row index within it,
-// reporting whether it landed on one at all. A click in a pane's blank
-// space still lands ON the pane — it moves the focus there without
-// changing which row is selected, which is what makes clicking a heading
-// to switch panes work.
 func (b *Browser) paneHit(l browserLayout, x, y float64) (pane browserPane, row int, onRow, onPane bool) {
 	order := b.paneOrder()
 	for i, r := range l.panes {
@@ -151,7 +124,6 @@ func (b *Browser) paneHit(l browserLayout, x, y float64) (pane browserPane, row 
 	return 0, 0, false, false
 }
 
-// handleMouse routes one frame's pointer state.
 func (b *Browser) handleMouse(pt pointer) {
 	l := b.layout()
 	b.hoverIdx = -1
@@ -166,9 +138,7 @@ func (b *Browser) handleMouse(pt pointer) {
 			var steps int
 			steps, b.wheelAcc = wheelSteps(b.wheelAcc)
 			if steps != 0 {
-				// Scrolling a pane the keyboard is not on scrolls THAT
-				// pane: the wheel follows the cursor, which is the whole
-				// point of having one.
+
 				if p != b.focus {
 					b.focusPane(p)
 				}
@@ -176,12 +146,7 @@ func (b *Browser) handleMouse(pt pointer) {
 			}
 		}
 		if pt.pressed {
-			// A press on another pane is one gesture doing two things: it
-			// moves the focus there and picks the row under the cursor. It
-			// must not ALSO open that row — focusPane restores the pane's
-			// parked selection, and when the click happened to land on it
-			// (row 0 of a never-visited pane, say), click() would read one
-			// press as the promised two.
+
 			entered := p != b.focus
 			if entered {
 				b.focusPane(p)
@@ -219,8 +184,6 @@ func (b *Browser) handleMouse(pt pointer) {
 	}
 }
 
-// click selects a row, and opens it when it was already selected — the
-// second click of a double-click, without the timing.
 func (b *Browser) click(i int) {
 	if i == b.sel {
 		b.activate()
@@ -228,8 +191,6 @@ func (b *Browser) click(i int) {
 	}
 	b.setSel(i)
 }
-
-// --- drawing ------------------------------------------------------------
 
 func (b *Browser) Draw(screen *ebiten.Image) {
 	screen.Fill(colBG)
@@ -247,8 +208,6 @@ func (b *Browser) Draw(screen *ebiten.Image) {
 	}
 }
 
-// headerStatus is the line on the right of the header: what the screen is
-// for, or how much is in it.
 func (b *Browser) headerStatus() string {
 	total := 0
 	for _, p := range b.paneOrder() {
@@ -286,8 +245,6 @@ func (b *Browser) drawPanes(screen *ebiten.Image, l browserLayout) {
 	}
 }
 
-// drawPane paints one list: its heading, its rows, and whatever it has to
-// say when it has none.
 func (b *Browser) drawPane(screen *ebiten.Image, l browserLayout, r rect, p browserPane) {
 	focused := p == b.focus
 	fillRounded(screen, r, colPanel)
@@ -353,8 +310,6 @@ func (b *Browser) drawPane(screen *ebiten.Image, l browserLayout, r rect, p brow
 	b.drawPaneNote(screen, r, p)
 }
 
-// drawPaneNote paints the footer a pane carries: for the library, where
-// the folder is or what went wrong reading it.
 func (b *Browser) drawPaneNote(screen *ebiten.Image, r rect, p browserPane) {
 	if p != paneLibrary {
 		return
@@ -370,8 +325,6 @@ func (b *Browser) drawPaneNote(screen *ebiten.Image, r rect, p browserPane) {
 	drawTextSmall(screen, ellipsizeWSmall(note, r.w-24), r.x+12, r.y+r.h-34, col)
 }
 
-// rowBG is a row's background: the selection in the focused pane, a
-// dimmer one in the pane that is merely remembered, and the hover.
 func (b *Browser) rowBG(p browserPane, i, sel int) (color.RGBA, bool) {
 	if i == sel && len(b.panes[p]) > 0 {
 		if p == b.focus {
@@ -385,8 +338,6 @@ func (b *Browser) rowBG(p browserPane, i, sel int) (color.RGBA, bool) {
 	return color.RGBA{}, false
 }
 
-// drawStatus paints the last open's error and importer warnings under the
-// panes.
 func (b *Browser) drawStatus(screen *ebiten.Image, l browserLayout) {
 	const maxWarn = brwStatusWarnings
 	width := float64(screenW - 2*uiPadX)
@@ -409,15 +360,6 @@ func (b *Browser) drawStatus(screen *ebiten.Image, l browserLayout) {
 	}
 }
 
-// warnsHeading names the piece over the warning lines, or "" when there
-// is nothing to head. The warnings can still be on screen minutes after
-// the open, when the user comes back from practising; without the
-// piece's name over them they are orphaned text about nothing in
-// particular. An open can also fail WITH warnings (the importer read
-// enough to complain before the error), and then the piece did not open,
-// so the heading must not say it did — warnsFailed records that at open
-// time, because errMsg is cleared by unrelated actions while the
-// warnings stay.
 func (b *Browser) warnsHeading() string {
 	if len(b.warns) == 0 || b.warnsFrom == "" {
 		return ""

@@ -1,26 +1,11 @@
 package synth
 
-// Tests for what the pluck voice SOUNDS like, as opposed to whether it is
-// in tune and does not clip (karplus_test.go covers those).
-//
-// Every assertion here is a property with a physical reason, not a
-// snapshot of the current tuning: how long a note rings is stated in
-// seconds and compared against the range a guitar occupies, the pick
-// filter is checked by the notch it puts in the spectrum, and velocity is
-// checked by the direction it moves the brightness. Retuning the voice by
-// ear should not have to touch this file; changing what the voice IS
-// should.
-
 import (
 	"math"
 	"math/cmplx"
 	"testing"
 )
 
-// decayTime measures the -60 dB time of a rendered note: the point where
-// its envelope has fallen a thousandfold from its peak, extrapolated from
-// the slope so a note that has not finished decaying still gives an
-// answer.
 func decayTime(x []float32, sampleRate int) float64 {
 	const win = 2048
 	var peakE, lastE float64
@@ -41,7 +26,7 @@ func decayTime(x []float32, sampleRate int) float64 {
 	if peakE <= 0 || lastE <= 0 || lastAt <= peakAt {
 		return math.Inf(1)
 	}
-	// dB per second between the peak and the last measured window.
+
 	span := float64(lastAt-peakAt) / float64(sampleRate)
 	drop := 20 * math.Log10(peakE/lastE)
 	if drop <= 0 {
@@ -50,12 +35,6 @@ func decayTime(x []float32, sampleRate int) float64 {
 	return 60 * span / drop
 }
 
-// TestPluckDecayIsGuitarLike pins the thing that was most wrong with this
-// voice: a constant loop gain per PERIOD gave every note the same number
-// of cycles of ring, so the low E rang for twenty seconds and the high E
-// for five. A guitar is nothing like that — the whole range lands between
-// about five seconds and two, and the bass rings LONGER than the treble
-// but not by an order of magnitude.
 func TestPluckDecayIsGuitarLike(t *testing.T) {
 	const sr = 48000
 	for _, tt := range []struct {
@@ -82,8 +61,6 @@ func TestPluckDecayIsGuitarLike(t *testing.T) {
 	}
 }
 
-// TestPluckBassRingsLongerThanTreble is the ordering the decay times have
-// to keep whatever they are individually tuned to.
 func TestPluckBassRingsLongerThanTreble(t *testing.T) {
 	const sr = 48000
 	measure := func(key int) float64 {
@@ -98,10 +75,6 @@ func TestPluckBassRingsLongerThanTreble(t *testing.T) {
 	}
 }
 
-// TestPluckReleaseIsTheSameEverywhere checks that lifting a finger damps
-// a high note and a low one at about the same rate. The old per-period
-// release damped the top of the neck four times faster than the bottom,
-// which is the opposite of what a hand does.
 func TestPluckReleaseIsTheSameEverywhere(t *testing.T) {
 	const sr = 48000
 	measure := func(key int) float64 {
@@ -119,9 +92,6 @@ func TestPluckReleaseIsTheSameEverywhere(t *testing.T) {
 	}
 }
 
-// spectrumAt returns the magnitude of a rendered signal at freq, by
-// correlating against a complex exponential over a whole number of cycles
-// — a one-bin DFT, which is all these tests need and needs no FFT.
 func spectrumAt(x []float32, sampleRate int, freq float64) float64 {
 	cycles := math.Floor(float64(len(x)) * freq / float64(sampleRate))
 	if cycles < 1 {
@@ -139,19 +109,12 @@ func spectrumAt(x []float32, sampleRate int, freq float64) float64 {
 	return cmplx.Abs(acc) / float64(n)
 }
 
-// TestPluckPickPositionNotchesItsHarmonic is the pick filter's whole
-// reason for existing: a string struck a fraction b of its length from
-// the bridge cannot sound the harmonic with a node there. With b at about
-// a sixth, that is the sixth harmonic, and it has to be markedly weaker
-// than the harmonics either side of it — which is what makes a plucked
-// note sound plucked rather than filtered.
 func TestPluckPickPositionNotchesItsHarmonic(t *testing.T) {
 	const sr = 48000
-	const key = 45 // open A, 110 Hz: enough harmonics under Nyquist to see
+	const key = 45
 	v := NewPluck(sr, 25)
 	v.NoteOn(key, 1.0)
-	// The first tenth of a second, where the excitation's own spectrum is
-	// still what is sounding rather than what the loop's lowpass has left.
+
 	l, r := renderFrames(v, sr/10, 512)
 	x := monoSum(l, r)
 	f0 := keyFreq(key)
@@ -169,10 +132,6 @@ func TestPluckPickPositionNotchesItsHarmonic(t *testing.T) {
 	}
 }
 
-// TestPluckVelocityChangesBrightness checks that a harder pick is not
-// just a louder one. Comparing the two at the SAME level is the point:
-// what has to move is the balance between the top of the spectrum and the
-// bottom, not the whole thing together.
 func TestPluckVelocityChangesBrightness(t *testing.T) {
 	const sr = 48000
 	const key = 45
@@ -200,11 +159,6 @@ func TestPluckVelocityChangesBrightness(t *testing.T) {
 	}
 }
 
-// TestPluckLevelIsIndependentOfTheFilters guards the calibration the rest
-// of the pipeline depends on. The excitation's filters change the tone of
-// a note; they must not change how loud it is, because the input gate and
-// the onset detector in internal/pitch are both tuned against what this
-// voice puts out at a given velocity.
 func TestPluckLevelIsIndependentOfTheFilters(t *testing.T) {
 	const sr = 48000
 	for _, key := range []int{40, 45, 52, 64, 76} {
@@ -212,11 +166,7 @@ func TestPluckLevelIsIndependentOfTheFilters(t *testing.T) {
 		v.NoteOn(key, 1.0)
 		l, r := renderFrames(v, sr/20, 512)
 		p := peak(monoSum(l, r))
-		// The burst is scaled by pluckExcite at velocity 1, and the two
-		// channels sum back to about one whole note; the bound is loose
-		// because the loop's own filter and the pan law both touch it. What
-		// it catches is a filter that has quietly multiplied the level by
-		// several times, which is what an energy-preserving rescale did.
+
 		if p < 0.1 || p > 1.0 {
 			t.Errorf("key %d peaks at %.3f; a velocity-1 note should sit well inside the headroom", key, p)
 		}

@@ -9,18 +9,11 @@ import (
 	"github.com/S95F/musicTutor/internal/synth"
 )
 
-// A noteRec is one recorded NoteOn or NoteOff with the exact frame index
-// (frames the voice had rendered when the call arrived) it landed on.
 type noteRec struct {
 	frame int64
 	key   int
 }
 
-// stubVoice is a deterministic offline test double: it records every event
-// with its exact frame index and renders a signal derived only from its
-// frame counter and active-note count, so its output is independent of how
-// rendering is chunked. Record slices are preallocated so steady-state
-// rendering does not allocate.
 type stubVoice struct {
 	frame   int64
 	ons     []noteRec
@@ -59,8 +52,7 @@ func (v *stubVoice) AllNotesOff() {
 }
 
 func (v *stubVoice) Render(left, right []float32) {
-	// Like a real voice, contribute nothing when idle — the engine mixes
-	// voices even while the transport is stopped (release tails).
+
 	for i := range left {
 		if v.active > 0 {
 			s := float32(v.active)*0.05 + float32(v.frame%101)*0.0001
@@ -71,8 +63,6 @@ func (v *stubVoice) Render(left, right []float32) {
 	}
 }
 
-// fixtureScore builds the canonical fixture riff from docs/TEXTFORMAT.md:
-// one standard-tuned track, 120 BPM, 4/4.
 func fixtureScore(t *testing.T) *score.Score {
 	t.Helper()
 	s := &score.Score{
@@ -97,7 +87,7 @@ func fixtureScore(t *testing.T) *score.Score {
 	b3 := tr.AppendBar(4, 4)
 	b3.AddBeat(score.Half,
 		score.Note{String: 6, Fret: 0}, score.Note{String: 5, Fret: 2}, score.Note{String: 4, Fret: 2})
-	b3.AddBeat(score.Quarter) // rest
+	b3.AddBeat(score.Quarter)
 	b3.AddBeat(score.Quarter, score.Note{String: 6, Fret: 3})
 	b4 := tr.AppendBar(4, 4)
 	b4.AddBeat(score.Half, score.Note{String: 6, Fret: 0})
@@ -109,8 +99,6 @@ func fixtureScore(t *testing.T) *score.Score {
 	return s
 }
 
-// newFixtureEngine builds an engine over the fixture riff with stub voices,
-// returning the engine and the single track's voice.
 func newFixtureEngine(t *testing.T, opts Options) (*Engine, *stubVoice) {
 	t.Helper()
 	var reg []*stubVoice
@@ -119,12 +107,6 @@ func newFixtureEngine(t *testing.T, opts Options) (*Engine, *stubVoice) {
 	return e, reg[0]
 }
 
-// TestDiscontinuityFrame: seeks and loop edits stamp the stream clock, and
-// a loop WRAP deliberately does not. The practice scorer abandons
-// expectations stamped before the frame this reports, so marking a wrap
-// would throw away the notes near the loop end that the player is still
-// answering — the wrap is the practice loop working, not a jump under the
-// player.
 func TestDiscontinuityFrame(t *testing.T) {
 	e, _ := newFixtureEngine(t, Options{})
 	if d := e.DiscontinuityFrame(); d != 0 {
@@ -141,7 +123,6 @@ func TestDiscontinuityFrame(t *testing.T) {
 		t.Fatalf("DiscontinuityFrame after a seek = %d, want the stream clock %d", seekAt, at)
 	}
 
-	// A loop edit moves the goalposts the same way.
 	renderN(e, 4800, 480)
 	e.SetLoop(3840, 7680)
 	loopAt := e.DiscontinuityFrame()
@@ -149,7 +130,6 @@ func TestDiscontinuityFrame(t *testing.T) {
 		t.Fatalf("DiscontinuityFrame after SetLoop = %d, want > the seek's %d", loopAt, seekAt)
 	}
 
-	// Now run the loop round at least once. The wrap must not stamp.
 	e.SeekTick(3840)
 	afterSeek := e.DiscontinuityFrame()
 	before := e.PassCount()
@@ -167,7 +147,6 @@ func TestDiscontinuityFrame(t *testing.T) {
 	}
 }
 
-// renderN drives the engine through frames total frames in blocks.
 func renderN(e *Engine, frames, block int) {
 	l := make([]float32, block)
 	r := make([]float32, block)
@@ -188,10 +167,6 @@ func abs64(x int64) int64 {
 	return x
 }
 
-// TestNoteOnFramesConstantTempo checks that every NoteOn of the canonical
-// riff lands on its exact frame at 48 kHz / 120 BPM (frame = tick * 25),
-// allowing at most off-by-one for rounding, and that the transport stops
-// at the score end.
 func TestNoteOnFramesConstantTempo(t *testing.T) {
 	e, v := newFixtureEngine(t, Options{})
 	e.Play()
@@ -224,9 +199,6 @@ func TestNoteOnFramesConstantTempo(t *testing.T) {
 	}
 }
 
-// TestTempoChangeExactFrames checks event frames on both sides of a
-// mid-score tempo change: 120 BPM (25 frames/tick), then 60 BPM
-// (50 frames/tick) from bar 2.
 func TestTempoChangeExactFrames(t *testing.T) {
 	s := &score.Score{
 		Tempos: score.TempoMap{
@@ -253,7 +225,7 @@ func TestTempoChangeExactFrames(t *testing.T) {
 	for i := 0; i < 700 && e.Playing(); i++ {
 		renderN(e, 480, 480)
 	}
-	// Bar 1 at 25 frames/tick, bar 2 at 50 frames/tick from frame 96000.
+
 	want := []int64{0, 24000, 48000, 72000, 96000, 144000, 192000, 240000}
 	v := reg[0]
 	if len(v.ons) != len(want) {
@@ -266,8 +238,6 @@ func TestTempoChangeExactFrames(t *testing.T) {
 	}
 }
 
-// TestTempoScaleDoublesSpacing checks that half speed exactly doubles
-// inter-onset frame distances.
 func TestTempoScaleDoublesSpacing(t *testing.T) {
 	e, v := newFixtureEngine(t, Options{})
 	e.SetTempoScale(0.5)
@@ -275,7 +245,7 @@ func TestTempoScaleDoublesSpacing(t *testing.T) {
 		t.Fatalf("TempoScale = %v, want 0.5", got)
 	}
 	e.Play()
-	renderN(e, 200000, 512) // through bar 1 and into bar 2 at 50 frames/tick
+	renderN(e, 200000, 512)
 	if len(v.ons) < 9 {
 		t.Fatalf("got %d NoteOns, want at least 9", len(v.ons))
 	}
@@ -286,10 +256,6 @@ func TestTempoScaleDoublesSpacing(t *testing.T) {
 	}
 }
 
-// TestLoopGapless loops bar 2 [3840, 7680) and checks that the NoteOn
-// pattern repeats with an exact 96000-frame period, that the first note of
-// every pass is present (the MuseScore bug class), and that PassCount
-// increments per wrap.
 func TestLoopGapless(t *testing.T) {
 	e, v := newFixtureEngine(t, Options{})
 	e.SetLoop(3840, 7680)
@@ -313,7 +279,7 @@ func TestLoopGapless(t *testing.T) {
 	if got := e.PassCount(); got != 3 {
 		t.Errorf("PassCount = %d, want 3", got)
 	}
-	// Ringing notes are silenced at each wrap.
+
 	wantOffs := map[int64]bool{96000: false, 192000: false, 288000: false}
 	for _, f := range v.allOffs {
 		if _, ok := wantOffs[f]; ok {
@@ -327,10 +293,6 @@ func TestLoopGapless(t *testing.T) {
 	}
 }
 
-// TestRampShrinksPeriod runs the speed trainer over the bar-2 loop: start
-// at 0.5, +0.1 per pass toward 1.0. Each pass's frame period must match the
-// engine's frames-per-tick conversion at that pass's scale, and the scale
-// must never exceed the target.
 func TestRampShrinksPeriod(t *testing.T) {
 	e, v := newFixtureEngine(t, Options{})
 	e.SetTempoScale(0.5)
@@ -339,8 +301,6 @@ func TestRampShrinksPeriod(t *testing.T) {
 	e.SeekTick(3840)
 	e.Play()
 
-	// Replicate the engine's arithmetic exactly: scale per pass and the
-	// pass period ceil((B-A) * framesPerTick).
 	const passes = 7
 	scales := make([]float64, passes)
 	s := 0.5
@@ -381,16 +341,13 @@ func TestRampShrinksPeriod(t *testing.T) {
 	}
 }
 
-// TestCountIn checks that four count-in beats at 120 BPM delay the first
-// NoteOn by exactly 4 * 0.5 s * 48000 frames, that CountingIn reports
-// during (not after), and that the position does not advance meanwhile.
 func TestCountIn(t *testing.T) {
 	e, v := newFixtureEngine(t, Options{CountInBeats: 4})
 	e.Play()
 	if on, left := e.CountingIn(); !on || left != 4 {
 		t.Fatalf("CountingIn after Play = (%v, %d), want (true, 4)", on, left)
 	}
-	renderN(e, 30000, 480) // one beat is 24000 frames; now inside beat 2
+	renderN(e, 30000, 480)
 	if on, left := e.CountingIn(); !on || left != 3 {
 		t.Errorf("CountingIn mid count-in = (%v, %d), want (true, 3)", on, left)
 	}
@@ -400,7 +357,7 @@ func TestCountIn(t *testing.T) {
 	if !e.Playing() {
 		t.Error("Playing during count-in = false, want true (count-in included)")
 	}
-	renderN(e, 78000, 480) // through the count-in end at 96000, into the riff
+	renderN(e, 78000, 480)
 	if on, left := e.CountingIn(); on || left != 0 {
 		t.Errorf("CountingIn after count-in = (%v, %d), want (false, 0)", on, left)
 	}
@@ -415,9 +372,6 @@ func TestCountIn(t *testing.T) {
 	}
 }
 
-// TestCountInEveryPass loops bar 2 with a 2-beat count-in between passes:
-// each pass starts one count-in (48000 frames at 120 BPM) after the
-// previous pass ends, position frozen during the clicks.
 func TestCountInEveryPass(t *testing.T) {
 	e, v := newFixtureEngine(t, Options{CountInBeats: 2, CountInEveryPass: true})
 	e.SetLoop(3840, 7680)
@@ -443,13 +397,10 @@ func TestCountInEveryPass(t *testing.T) {
 	}
 }
 
-// TestPauseResume pauses mid-note: ringing notes are silenced, Read yields
-// silence, and Play resumes from the same tick with later events on their
-// original frames.
 func TestPauseResume(t *testing.T) {
 	e, v := newFixtureEngine(t, Options{})
 	e.Play()
-	renderN(e, 30000, 480) // inside note 3 (tick 1200)
+	renderN(e, 30000, 480)
 	e.Pause()
 	if e.Playing() {
 		t.Error("Playing after Pause = true, want false")
@@ -472,9 +423,7 @@ func TestPauseResume(t *testing.T) {
 	}
 	onsBefore := len(v.ons)
 	e.Play()
-	// The paused Read above still rendered 512 voice frames (voices mix
-	// while stopped so release tails ring), so the voice frame counter
-	// sits at 30512; note 4 fires 6000 transport frames after resume.
+
 	renderN(e, 12000, 480)
 	if got := e.PosTick(); got != 1680 {
 		t.Errorf("PosTick after resume = %d, want 1680", got)
@@ -488,13 +437,11 @@ func TestPauseResume(t *testing.T) {
 	}
 }
 
-// TestSeekSilencesAndContinues seeks mid-playback: ringing notes get
-// AllNotesOff and events continue exactly from the seek target.
 func TestSeekSilencesAndContinues(t *testing.T) {
 	e, v := newFixtureEngine(t, Options{})
 	e.Play()
 	renderN(e, 30000, 480)
-	e.SeekTick(7680) // bar 3: the chord
+	e.SeekTick(7680)
 	if len(v.allOffs) == 0 || v.allOffs[len(v.allOffs)-1] != 30000 {
 		t.Errorf("AllNotesOff frames = %v, want silencing at frame 30000", v.allOffs)
 	}
@@ -503,8 +450,7 @@ func TestSeekSilencesAndContinues(t *testing.T) {
 	}
 	onsBefore := len(v.ons)
 	renderN(e, 73000, 480)
-	// The chord fires immediately at the seek point (voice frame 30000),
-	// then the bar-3 quarter note 2880 ticks later (72000 frames).
+
 	want := []noteRec{{30000, 40}, {30000, 47}, {30000, 52}, {102000, 43}}
 	if len(v.ons) != onsBefore+len(want) {
 		t.Fatalf("got %d NoteOns after seek, want %d: %v", len(v.ons)-onsBefore, len(want), v.ons[onsBefore:])
@@ -517,13 +463,10 @@ func TestSeekSilencesAndContinues(t *testing.T) {
 	}
 }
 
-// TestMuteUnmute checks that a muted track's voice receives no NoteOns
-// (with ringing notes silenced at mute time) and that unmuting mid-play
-// delivers subsequent events normally.
 func TestMuteUnmute(t *testing.T) {
 	e, v := newFixtureEngine(t, Options{})
 	e.Play()
-	renderN(e, 6000, 480) // note 1 (frame 0) is ringing
+	renderN(e, 6000, 480)
 	e.SetTrackMuted(0, true)
 	if !e.TrackMuted(0) {
 		t.Fatal("TrackMuted = false after mute")
@@ -531,12 +474,12 @@ func TestMuteUnmute(t *testing.T) {
 	if len(v.allOffs) == 0 || v.allOffs[len(v.allOffs)-1] != 6000 {
 		t.Errorf("AllNotesOff frames = %v, want silencing at mute (frame 6000)", v.allOffs)
 	}
-	renderN(e, 42000, 480) // through events at 12000..36000, to frame 48000
+	renderN(e, 42000, 480)
 	if len(v.ons) != 1 {
 		t.Fatalf("muted voice got NoteOns: %v", v.ons[1:])
 	}
 	e.SetTrackMuted(0, false)
-	renderN(e, 480, 480) // the event at tick 1920 lands on frame 48000
+	renderN(e, 480, 480)
 	if len(v.ons) != 2 {
 		t.Fatalf("got %d NoteOns after unmute, want 2", len(v.ons))
 	}
@@ -546,8 +489,6 @@ func TestMuteUnmute(t *testing.T) {
 	}
 }
 
-// TestRenderFramesDoesNotAllocate drives a steady-state render (playing,
-// looping, metronome on) and requires zero allocations per RenderFrames.
 func TestRenderFramesDoesNotAllocate(t *testing.T) {
 	var reg []*stubVoice
 	sc := fixtureScore(t)
@@ -557,28 +498,20 @@ func TestRenderFramesDoesNotAllocate(t *testing.T) {
 	l := make([]float32, 512)
 	r := make([]float32, 512)
 	for i := 0; i < 50; i++ {
-		e.RenderFrames(l, r) // reach steady state
+		e.RenderFrames(l, r)
 	}
 	if allocs := testing.AllocsPerRun(100, func() { e.RenderFrames(l, r) }); allocs != 0 {
 		t.Errorf("RenderFrames allocates %v times per run, want 0", allocs)
 	}
 }
 
-// TestSetMetronomeMidPlayNoStaleClicks enables the metronome after playing
-// past several beats with it off. Regression: nextBeat only advances while
-// the click is on, so a stale beat schedule fired every missed beat since
-// the segment anchor as one stacked click blast. The track is muted so the
-// output is click-only: the block up to the next real beat boundary must be
-// silent, and that boundary must sound exactly one click.
 func TestSetMetronomeMidPlayNoStaleClicks(t *testing.T) {
 	e, _ := newFixtureEngine(t, Options{})
-	e.SetTrackMuted(0, true) // click-only output
+	e.SetTrackMuted(0, true)
 	e.Play()
-	renderN(e, 60000, 480) // 2.5 beats at 24000 frames/beat, metronome off
+	renderN(e, 60000, 480)
 	e.SetMetronome(true)
 
-	// Frames 60000..71999 precede the next beat boundary (frame 72000):
-	// no click may sound in them.
 	l := make([]float32, 12000)
 	r := make([]float32, 12000)
 	e.RenderFrames(l, r)
@@ -589,7 +522,6 @@ func TestSetMetronomeMidPlayNoStaleClicks(t *testing.T) {
 		}
 	}
 
-	// The beat boundary itself must click — a single click, not a stack.
 	l2 := make([]float32, 300)
 	r2 := make([]float32, 300)
 	e.RenderFrames(l2, r2)
@@ -607,10 +539,6 @@ func TestSetMetronomeMidPlayNoStaleClicks(t *testing.T) {
 	}
 }
 
-// TestSetLoopClampsBeyondScoreEnd sets a loop whose end point lies past the
-// score end. Regression: buildSegment never classified the boundary as the
-// loop end, so the transport silently stopped at the score end with zero
-// passes. The points must clamp to the score and the loop must wrap.
 func TestSetLoopClampsBeyondScoreEnd(t *testing.T) {
 	var reg []*stubVoice
 	sc := fixtureScore(t)
@@ -620,14 +548,14 @@ func TestSetLoopClampsBeyondScoreEnd(t *testing.T) {
 		t.Fatalf("Loop after clamping = (%d, %d, %v), want (0, %d, true)", a, b, on, sc.End())
 	}
 	e.Play()
-	renderN(e, 390000, 480) // past the score end at frame 384000
+	renderN(e, 390000, 480)
 	if !e.Playing() {
 		t.Fatal("Playing = false after the clamped loop end: transport stopped instead of looping")
 	}
 	if got := e.PassCount(); got < 1 {
 		t.Errorf("PassCount = %d, want >= 1", got)
 	}
-	// Pass 2 restarts the riff exactly at the wrap frame.
+
 	v := reg[0]
 	if len(v.ons) < 17 {
 		t.Fatalf("got %d NoteOns, want at least 17 (16 in pass 1 plus the pass-2 restart)", len(v.ons))
@@ -637,32 +565,26 @@ func TestSetLoopClampsBeyondScoreEnd(t *testing.T) {
 	}
 }
 
-// TestTempoScaleDuringCountIn halves the tempo one-and-a-quarter beats into
-// a four-beat count-in. Regression: ciFPB kept the old tempo, so the user
-// was counted in at one tempo and the piece started at another. The elapsed
-// fraction of the current beat carries over (6000/24000 becomes 12000/48000),
-// the remaining beats consume 48000 frames each, and the first NoteOn lands
-// where the new tempo predicts.
 func TestTempoScaleDuringCountIn(t *testing.T) {
 	e, v := newFixtureEngine(t, Options{CountInBeats: 4})
 	e.Play()
-	renderN(e, 30000, 480) // beat 1 (24000 frames) + 6000 into beat 2
+	renderN(e, 30000, 480)
 	if on, left := e.CountingIn(); !on || left != 3 {
 		t.Fatalf("CountingIn before rescale = (%v, %d), want (true, 3)", on, left)
 	}
-	e.SetTempoScale(0.5) // beats are now 48000 frames; 12000 of beat 2 elapsed
+	e.SetTempoScale(0.5)
 	renderN(e, 35999, 480)
 	if on, left := e.CountingIn(); !on || left != 3 {
 		t.Errorf("CountingIn one frame before rescaled beat 2 ends = (%v, %d), want (true, 3)", on, left)
 	}
-	renderN(e, 1, 1) // beat 2 ends exactly 36000 frames after the rescale
+	renderN(e, 1, 1)
 	if on, left := e.CountingIn(); !on || left != 2 {
 		t.Errorf("CountingIn at rescaled beat 2 end = (%v, %d), want (true, 2)", on, left)
 	}
 	if got := e.PosTick(); got != 0 {
 		t.Errorf("PosTick during count-in = %d, want 0", got)
 	}
-	renderN(e, 96000, 480) // beats 3 and 4 at 48000 frames each
+	renderN(e, 96000, 480)
 	if on, left := e.CountingIn(); on || left != 0 {
 		t.Errorf("CountingIn after count-in = (%v, %d), want (false, 0)", on, left)
 	}
@@ -678,9 +600,6 @@ func TestTempoScaleDuringCountIn(t *testing.T) {
 	}
 }
 
-// TestReadMatchesRenderFrames renders the same score twice — once through
-// RenderFrames, once through Read with a non-multiple-of-8 byte length —
-// and requires bit-identical sample streams.
 func TestReadMatchesRenderFrames(t *testing.T) {
 	const frames = 60000
 	var regA, regB []*stubVoice
@@ -696,7 +615,7 @@ func TestReadMatchesRenderFrames(t *testing.T) {
 	}
 
 	buf := make([]byte, 0, frames*8+1024)
-	chunk := make([]byte, 999) // never frame-aligned: exercises the remainder path
+	chunk := make([]byte, 999)
 	for len(buf) < frames*8 {
 		n, err := eb.Read(chunk)
 		if err != nil || n != len(chunk) {
@@ -714,10 +633,6 @@ func TestReadMatchesRenderFrames(t *testing.T) {
 	}
 }
 
-// TestEventTapFramesAndMute checks that the event tap reports every
-// scheduled NoteOn on its exact output frame — including for muted tracks
-// (the tap is the musical schedule, not what is audible) — and that
-// TotalFrames tracks the output stream clock.
 func TestEventTapFramesAndMute(t *testing.T) {
 	e, _ := newFixtureEngine(t, Options{})
 	type tapRec struct {
@@ -728,7 +643,7 @@ func TestEventTapFramesAndMute(t *testing.T) {
 	e.SetEventTap(func(ev score.NoteEvent, f int64) {
 		got = append(got, tapRec{ev.Key, f})
 	})
-	e.SetTrackMuted(0, true) // tap must still fire for muted tracks
+	e.SetTrackMuted(0, true)
 	e.Play()
 	renderN(e, 480000, 480)
 
@@ -754,16 +669,12 @@ func TestEventTapFramesAndMute(t *testing.T) {
 	}
 }
 
-// TestSeekToLoopEndWrapsIn is the regression test for audit E1: a position
-// parked exactly on the loop end B — the timeline scrubbed there, or the B
-// edge dragged onto a parked playhead — must engage the loop and wrap to
-// A, not sail past a still-armed loop to the score end and stop.
 func TestSeekToLoopEndWrapsIn(t *testing.T) {
 	e, v := newFixtureEngine(t, Options{})
 	e.SetLoop(3840, 7680)
-	e.SeekTick(7680) // exactly B
+	e.SeekTick(7680)
 	e.Play()
-	renderN(e, 96000, 480) // one full pass worth of frames
+	renderN(e, 96000, 480)
 
 	if !e.Playing() {
 		t.Fatal("parked on B with the loop armed, Play stopped instead of wrapping to A")
@@ -771,25 +682,21 @@ func TestSeekToLoopEndWrapsIn(t *testing.T) {
 	if len(v.ons) == 0 || v.ons[0].key != 47 {
 		t.Fatalf("first NoteOn = %v, want the loop's first note (key 47)", v.ons)
 	}
-	// The degenerate wrap itself is not a completed pass; only the full
-	// pass rendered above counts.
+
 	if got := e.PassCount(); got != 1 {
 		t.Errorf("PassCount = %d, want 1 (the empty wrap must not count)", got)
 	}
 }
 
-// TestPlayAtScoreEndWithLoopAtEnd: the pre-timeline repro — play the piece
-// out, set a loop over the last bar, press play. The position sits at
-// B == scoreEnd; before the E1 fix the transport died in under one block.
 func TestPlayAtScoreEndWithLoopAtEnd(t *testing.T) {
 	e, v := newFixtureEngine(t, Options{})
 	e.Play()
-	renderN(e, 16*48000, 480) // the whole piece and then some
+	renderN(e, 16*48000, 480)
 	if e.Playing() {
 		t.Fatal("the piece never finished; fixture assumptions changed")
 	}
 
-	e.SetLoop(11520, 15360) // bar 4
+	e.SetLoop(11520, 15360)
 	e.Play()
 	before := len(v.ons)
 	renderN(e, 48000, 480)
@@ -801,13 +708,10 @@ func TestPlayAtScoreEndWithLoopAtEnd(t *testing.T) {
 	}
 }
 
-// TestLoopBehindPlayheadStaysDormant pins the deliberate other half of
-// E1: a position strictly PAST the loop end leaves the loop dormant — the
-// DAW convention — until a seek re-enters it.
 func TestLoopBehindPlayheadStaysDormant(t *testing.T) {
 	e, _ := newFixtureEngine(t, Options{})
 	e.SetLoop(3840, 7680)
-	e.SeekTick(9600) // strictly past B
+	e.SeekTick(9600)
 	e.Play()
 	renderN(e, 16*48000, 480)
 	if e.Playing() {
@@ -821,8 +725,6 @@ func TestLoopBehindPlayheadStaysDormant(t *testing.T) {
 	}
 }
 
-// TestSeekToLoopEndDoesNotRamp: the degenerate wrap must not feed the
-// speed trainer — a scrub to the loop end is not a completed pass.
 func TestSeekToLoopEndDoesNotRamp(t *testing.T) {
 	e, _ := newFixtureEngine(t, Options{})
 	e.SetTempoScale(0.5)
@@ -830,7 +732,7 @@ func TestSeekToLoopEndDoesNotRamp(t *testing.T) {
 	e.SetLoop(3840, 7680)
 	e.SeekTick(7680)
 	e.Play()
-	renderN(e, 480, 480) // enough to process the wrap
+	renderN(e, 480, 480)
 	if got := e.TempoScale(); got != 0.5 {
 		t.Errorf("TempoScale after the empty wrap = %v, want 0.5 untouched", got)
 	}

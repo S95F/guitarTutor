@@ -1,10 +1,5 @@
 package ui
 
-// The wind practice view: the pitch ladder that replaces string lanes, the
-// written-pitch names a transposing player reads, and the proof that the
-// band geometry every layout test pins for guitars holds identically for a
-// track with no strings at all.
-
 import (
 	"testing"
 
@@ -14,8 +9,6 @@ import (
 	"github.com/S95F/musicTutor/internal/synth"
 )
 
-// newAppWind builds an App over a validated soprano sax score: one note a
-// bar walking up from the horn's low written C5 (sounding Bb4).
 func newAppWind(t *testing.T, bars int) *App {
 	t.Helper()
 	sc := &score.Score{
@@ -39,9 +32,6 @@ func newAppWind(t *testing.T, bars int) *App {
 	return New(eng, sc, 0)
 }
 
-// TestWindBandMatchesSixStringGeometry: the wind band borrows exactly a
-// six-string staff's height, so every overlay and control positioned from
-// tabBottom sits where the guitar layout tests already prove it safe.
 func TestWindBandMatchesSixStringGeometry(t *testing.T) {
 	wind := newAppWind(t, 4)
 	guitar := newApp(t, 4)
@@ -56,9 +46,6 @@ func TestWindBandMatchesSixStringGeometry(t *testing.T) {
 	}
 }
 
-// TestWindLadderPlacesPitch: higher written pitch sits higher on screen,
-// every used note stays inside the band, and the compass never collapses
-// below an octave.
 func TestWindLadderPlacesPitch(t *testing.T) {
 	a := newAppWind(t, 4)
 	tr := a.displayed()
@@ -81,8 +68,6 @@ func TestWindLadderPlacesPitch(t *testing.T) {
 	}
 }
 
-// TestWindLadderEmptyTrackShowsTheInstrument: a bar-less wind track still
-// has a compass — the instrument's own standard range.
 func TestWindLadderEmptyTrackShowsTheInstrument(t *testing.T) {
 	a := newAppWind(t, 0)
 	tr := a.displayed()
@@ -94,12 +79,9 @@ func TestWindLadderEmptyTrackShowsTheInstrument(t *testing.T) {
 	}
 }
 
-// TestWindNoteLabelIsWrittenPitch: the glyph is the name the player reads
-// — written pitch, a major second above what a B-flat soprano sounds —
-// with the tab's own tie prefix.
 func TestWindNoteLabelIsWrittenPitch(t *testing.T) {
 	tr := newAppWind(t, 1).displayed()
-	// Fret 16 sounds C5 (72); a soprano sax player reads D5.
+
 	if got := windNoteLabel(tr, score.Note{String: 1, Fret: 16}); got != "D5" {
 		t.Errorf("label = %q, want D5", got)
 	}
@@ -108,8 +90,6 @@ func TestWindNoteLabelIsWrittenPitch(t *testing.T) {
 	}
 }
 
-// TestDisplayNameTransposes: the tuner names notes as the practiced
-// player reads them — written on a wind track, concert on a guitar.
 func TestDisplayNameTransposes(t *testing.T) {
 	wind := newAppWind(t, 1)
 	if got := wind.displayName(72); got != "D5" {
@@ -121,8 +101,6 @@ func TestDisplayNameTransposes(t *testing.T) {
 	}
 }
 
-// TestWindVerdictKeying: wind events carry String 1, and the verdict
-// pipeline keys them exactly as it keys a fretted note.
 func TestWindVerdictKeying(t *testing.T) {
 	a := newAppWind(t, 1)
 	a.OfferResults([]practice.NoteResult{result(0, 1, practice.VerdictHit)})
@@ -132,9 +110,6 @@ func TestWindVerdictKeying(t *testing.T) {
 	}
 }
 
-// TestNewEditorForAcceptsWind: a wind piece opens straight onto the
-// pitch-ladder grid, the same front door a fretted piece uses — the
-// text-view detour the first wind release shipped is gone.
 func TestNewEditorForAcceptsWind(t *testing.T) {
 	sc := newAppWind(t, 1).sc
 	e, err := NewEditorFor(nil, sc, "")
@@ -149,9 +124,6 @@ func TestNewEditorForAcceptsWind(t *testing.T) {
 	}
 }
 
-// TestWindTextViewRoundTrips: a wind piece can still visit the raw text
-// (F2 both ways), and file actions taken there return to the grid exactly
-// as a fretted piece's do — the pane is a view again, not the editor.
 func TestWindTextViewRoundTrips(t *testing.T) {
 	src := "\\instrument soprano sax\nD5.4 E5.4 G5.2 |\n"
 	e := NewEditorForText(nil, []byte(src), "sax.gtab")

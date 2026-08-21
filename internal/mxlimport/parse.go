@@ -11,77 +11,35 @@ import (
 	"github.com/S95F/musicTutor/internal/score/textfmt"
 )
 
-// overLong reports whether v file ticks would rescale past MaxTicks
-// score ticks. The first clause keeps the rescale itself from
-// overflowing int64 (a hostile <duration> can be anything an int64
-// holds, and v*PPQ overflows long before that).
 func overLong(v, divisions int64) bool {
 	return v > (math.MaxInt64-divisions/2)/score.PPQ ||
 		(v*score.PPQ+divisions/2)/divisions > MaxTicks
 }
 
-// A rawNote is one sounding note in score ticks, before bar building.
-// Tied note chains are merged into a single rawNote spanning the chain.
 type rawNote struct {
 	start, end int64
 	key        int
-	str, fret  int  // fingering; str 0 until assigned
-	hasFing    bool // authored <technical> string+fret
-	inferred   bool // fingering came from internal/fretting
-	// slurred: a slur arc begun at an earlier onset was still open when
-	// this note started. Recorded on every note of a chord — the arc
-	// covers the onset, not one head — so whichever note survives the
-	// wind chord collapse still carries it. Only finishWind consumes it;
-	// mapping a fretted part's slurs to hammer-ons/pull-offs is a
-	// separate decision, not taken by this importer.
+	str, fret  int
+	hasFing    bool
+	inferred   bool
+
 	slurred bool
-	tech    score.Technique // techniques for the built note's attack
+	tech    score.Technique
 }
 
-// An openTie is a tie start still waiting for its stop.
-//
-// Keying ties by pitch alone collapses unisons — two notes of the SAME
-// pitch sounding at once on DIFFERENT strings, as common in guitar music
-// as an open B against the 7th fret of the E string. One start overwrote
-// the other, so a tie never resolved and its note kept the wrong duration.
-// The authored string and the tie's number attribute are therefore part of
-// a tie's identity, alongside the pitch.
 type openTie struct {
-	key  int // sounding MIDI key
-	str  int // authored <technical><string>, 0 when the note has none
-	num  int // <tie number>, 0 when absent
+	key  int
+	str  int
+	num  int
 	note *rawNote
 }
 
-// maxCapoFret is the highest capo fret accepted; real capos live in the
-// first handful of frets, so 12 is already generous. The bound matches
-// internal/gpimport's, and matters beyond plausibility: Track.Capo is
-// written to .gtab by \capo, which refuses anything past the format's
-// fret limit, so an unbounded capo imports a piece that can never save.
 const maxCapoFret = 12
 
-// maxImportFret is the highest fret an authored fingering may claim: 30
-// is the text format's fret ceiling (textfmt.MaxFret) and gpimport's
-// bound, and internal/fretting never infers past 24 — so a bigger
-// authored fret would import a note the .gtab writer must refuse, a
-// piece that plays but can never be saved.
 const maxImportFret = 30
 
-// maxOpenTies bounds how many unresolved tie starts are tracked at once.
-// Ties resolve by scanning that list, so leaving it unbounded would turn a
-// file full of never-closed <tie type="start"/> into quadratic work — the
-// same shape as audit E2. A tie chain is per string and staves are capped
-// at 25 lines, so no real music comes near this.
 const maxOpenTies = 1024
 
-// resolveTie returns the index of the open tie that a note of this pitch,
-// string and tie number starting at tick continues, or -1.
-//
-// A candidate must abut the new note and share its pitch. Where BOTH sides
-// state a string (or a tie number) they must agree — that is what keeps a
-// unison's two chains apart — and a candidate agreeing on more of them
-// wins, so the older, laxer match still works for files that author the
-// string on only one end of the tie.
 func resolveTie(open []openTie, key, str, num int, start int64) int {
 	best, bestRank := -1, -1
 	for i := range open {
@@ -109,12 +67,6 @@ func resolveTie(open []openTie, key, str, num int, start int64) int {
 	return best
 }
 
-// usableFingering returns a note's authored <technical> string and fret.
-// authored reports whether the file stated one at all; usable reports
-// whether it can be honored — string in range for the tuning, fret within
-// the fret range the text format can write back (maxImportFret), AND the
-// pitch they derive inside MIDI 0-127, since Validate rejects the score
-// otherwise — so an absurd authored fret falls back to inference.
 func usableFingering(e *xmlNote, tuning score.Tuning, capo int) (str, fret int, authored, usable bool) {
 	s, f, ok := e.fingering()
 	if !ok {
@@ -129,36 +81,24 @@ func usableFingering(e *xmlNote, tuning score.Tuning, capo int) (str, fret int, 
 	return s, f, true, true
 }
 
-// A partData is one part's extracted content.
 type partData struct {
-	index      int // part index in the document
+	index      int
 	id         string
 	name       string
 	program    int
-	hasProgram bool                  // the file declared a <midi-program>
-	wind       *score.WindInstrument // non-nil: import as a monophonic wind part
+	hasProgram bool
+	wind       *score.WindInstrument
 	tuning     score.Tuning
 	capo       int
-	sawTuning  bool // an explicit <staff-tuning> set the tuning
+	sawTuning  bool
 	notes      []*rawNote
-	end        int64 // end tick of the part's last measure
+	end        int64
 }
 
-// parsePart walks one part's measures in play order, maintaining the
-// MusicXML time cursor: <note> advances it by its duration (except
-// <chord/> notes, which share the previous note's onset), <backup> moves
-// it backward, <forward> moves it forward. Positions are converted from
-// the file's <divisions> to score ticks as they are read, so divisions
-// changes take effect exactly where they appear.
-//
-// order lists the measure indices to walk, so a measure inside a repeated
-// section is walked once per pass (see repeat.go). Indices past this
-// part's last measure are skipped: the order spans the longest part.
 func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []int) (*partData, error) {
 	pd := &partData{index: pi, id: xp.ID, program: DefaultProgram, tuning: score.StandardTuning}
 	if decl != nil {
-		// A part name \track cannot hold (a line break, the "//" comment
-		// marker) would make the imported piece refuse to save.
+
 		name, changed := textfmt.CleanLabel(decl.PartName)
 		if changed {
 			im.warnf("part %d (%s): the part name holds text a saved .gtab cannot (a line break or \"//\"); imported as %q", pi+1, xp.ID, name)
@@ -171,29 +111,20 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 	}
 	label := fmt.Sprintf("part %d (%s)", pi+1, xp.ID)
 
-	divisions := int64(0) // file ticks per quarter; 0 until declared
+	divisions := int64(0)
 	num, den := 4, 4
 	pendingNum, pendingDen := 0, 0
-	transpose := 0         // written-to-sounding shift for staff 1
-	var measureStart int64 // score tick of the current measure's start
-	var open []openTie     // tie starts awaiting their stops
-	// Slur arcs, keyed by their number attribute so overlapping arcs stay
-	// apart. An arc spans measures freely, so nothing prunes this at
-	// barlines; an arc never stopped simply stays open to the part's end,
-	// which is how a phrase mark reads, and an unmatched stop deletes
-	// nothing — neither is worth a warning, since nothing is lost.
+	transpose := 0
+	var measureStart int64
+	var open []openTie
+
 	slurs := map[int]bool{}
-	slurInto := false // an arc from an earlier onset covers the current onset
-	// Aggregate warning counters, reported once per part.
+	slurInto := false
+
 	var rounded, mismatched, otherVoice, otherStaff, grace, badTie, badFing, oversized int
 	var unpitched, noPitch, badDur, badStep, strayChord, pickups, untracked, authoredFing int
 
-	// setMeter records the shared bar structure's meter, and only where it
-	// actually changes. barSpecs lays the bars out from this map, so it has
-	// to agree with the num/den this walk uses at every measure start —
-	// including when a repeat returns to a section under a different meter,
-	// where nothing in the file restates the earlier signature.
-	emitted := [2]int{4, 4} // what the map asserts; run's default entry is 4/4 at tick 0
+	emitted := [2]int{4, 4}
 	setMeter := func(tick int64, n, d int) {
 		if pi != 0 || (emitted[0] == n && emitted[1] == d) {
 			return
@@ -202,13 +133,6 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 		emitted = [2]int{n, d}
 	}
 
-	// Divisions, meter and transposition persist until an <attributes>
-	// restates them, so re-walking a measure would otherwise inherit
-	// whatever the END of the repeated section left behind — a meter
-	// change inside the section would leak into its second pass and shift
-	// every bar after it. A repeat returns to the section with the state
-	// that was in effect there the first time through, so that state is
-	// recorded per measure and restored whenever the order comes back.
 	type carried struct {
 		divisions                                   int64
 		num, den, pendingNum, pendingDen, transpose int
@@ -226,9 +150,7 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 			entry[mi] = carried{divisions, num, den, pendingNum, pendingDen, transpose}
 		}
 		setMeter(measureStart, num, den)
-		// A tie is only ever continued by a note that abuts it, and a note
-		// never starts before its own measure, so a tie ending before this
-		// measure is dead and can leave the scan.
+
 		if len(open) > 0 {
 			live := open[:0]
 			for _, t := range open {
@@ -243,11 +165,11 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 		if mlabel == "" {
 			mlabel = strconv.Itoa(mi + 1)
 		}
-		var cursor, maxCursor int64 // file ticks from the measure's start
-		placed := false             // any duration consumed yet in this measure
-		lastBase := int64(-1)       // cursor base of the last non-chord note
-		noteBase := len(pd.notes)   // first note this measure contributes
-		tempoBase := len(im.tempos) // first tempo entry this measure contributes
+		var cursor, maxCursor int64
+		placed := false
+		lastBase := int64(-1)
+		noteBase := len(pd.notes)
+		tempoBase := len(im.tempos)
 		scale := func(v int64) int64 { return (v*score.PPQ + divisions/2) / divisions }
 
 		for _, el := range meas.Elements {
@@ -280,9 +202,7 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 						pendingNum, pendingDen = n, d
 					}
 				}
-				// <transpose> is the shift from written to sounding
-				// pitch. It persists until another <attributes> restates
-				// it, so an attributes block without one changes nothing.
+
 				if t, ok := e.transposeForStaff(1); ok {
 					transpose = t.semitones()
 				}
@@ -298,10 +218,7 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 						if c := *sd.Capo; c >= 0 && c <= maxCapoFret {
 							pd.capo = c
 						} else {
-							// A wrong capo shifts every pitch on the track,
-							// so clamping nonsense to "no capo" is the
-							// least-wrong recovery — the same one gpimport
-							// applies: the authored frets stay intact.
+
 							im.warnf("%s: capo fret %d outside 0-%d; using no capo", label, c, maxCapoFret)
 							pd.capo = 0
 						}
@@ -381,12 +298,7 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 					continue
 				}
 				if e.Rest != nil {
-					// A slur endpoint authored on a rest still moves the
-					// arc state: dropping a stop here would leave the arc
-					// open and every later note in the part would import
-					// slurred. The rest covers no onset of its own, so
-					// slurInto is untouched — the next real onset re-reads
-					// the state as usual.
+
 					restStops, restStarts := e.slurs()
 					for _, num := range restStops {
 						delete(slurs, num)
@@ -397,9 +309,7 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 					continue
 				}
 				if e.Pitch == nil {
-					// Both causes are counted, not warned per note: a drum
-					// staff is hundreds of <unpitched> notes, and one line
-					// each would bury every warning that matters.
+
 					if e.Unpitched != nil {
 						unpitched++
 					} else {
@@ -407,13 +317,7 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 					}
 					continue
 				}
-				// Coverage is decided per ONSET, before this note's own
-				// endpoints apply: an arc starting here covers only LATER
-				// notes, and the note an arc stops on is the arc's last
-				// covered note. Chord members reuse the head's answer
-				// rather than re-reading the state their head's start
-				// already changed. Grace notes left the walk above, so an
-				// arc touching one is simply an arc missing an endpoint.
+
 				if !isChord {
 					slurInto = len(slurs) > 0
 				}
@@ -429,14 +333,9 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 					badStep++
 					continue
 				}
-				// <pitch> is what is WRITTEN; the score model stores what
-				// SOUNDS. Everything downstream — fret positions, scoring
-				// expectations — is derived from this key.
+
 				key += transpose
-				// A hostile <duration> here or on an earlier <forward>
-				// would blow the score extent past anything the bar
-				// layout can hold — or overflow the rescale outright.
-				// Skip the note; barSpecs backstops the global extent.
+
 				if overLong(dur, divisions) || overLong(base, divisions) || overLong(base+dur, divisions) {
 					oversized++
 					continue
@@ -449,8 +348,7 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 				if end <= start {
 					end = start + 1
 				}
-				// The fingering is resolved before the tie so the authored
-				// string can take part in identifying the tie chain.
+
 				str, fret, authored, usable := usableFingering(e, pd.tuning, pd.capo)
 				if authored {
 					authoredFing++
@@ -463,10 +361,7 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 					if i := resolveTie(open, key, str, stopNum, start); i >= 0 {
 						open[i].note.end = end
 						if tieStart {
-							// The chain continues: the next link matches
-							// against this note's identity — including the
-							// START side's number, which may differ from
-							// the stop's when the chain is renumbered.
+
 							open[i].str, open[i].num = str, startNum
 						} else {
 							open = append(open[:i], open[i+1:]...)
@@ -497,24 +392,12 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 			return nil, fmt.Errorf("unsupported time signature %d/%d", num, den)
 		}
 		beatTicks := 4 * score.PPQ / int64(den)
-		// A numerator so large that num*beatTicks wraps int64 would slide
-		// the measure start to a nonsense (even negative) tick and slip
-		// past the MaxTicks extent check with a quietly empty score. Any
-		// measure longer than the whole permitted score already errors
-		// there, so reject it here, before the multiplication, with the
-		// same answer.
+
 		if int64(num) > MaxTicks/beatTicks {
 			return nil, fmt.Errorf("score too long: one %d/%d measure alone exceeds the %d-tick limit", num, den, int64(MaxTicks))
 		}
 		barTicks := int64(num) * beatTicks
-		// A pickup (implicit) measure holds fewer beats than the time
-		// signature and ENDS on the barline rather than starting on it.
-		// The score model has no short bar — Bar.Len() is fixed by the
-		// meter — so the bar is kept full and the content slid to its end,
-		// which puts every later note on the beat the notation says and
-		// keeps the count-in and metronome agreeing with the music. The
-		// shift is applied after the walk, when the measure's full extent
-		// is known, and covers the tempo marks inside it too.
+
 		if meas.Implicit && divisions > 0 && maxCursor > 0 && !overLong(maxCursor, divisions) {
 			if off := barTicks - scale(maxCursor); off > 0 {
 				for _, n := range pd.notes[noteBase:] {
@@ -527,9 +410,7 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 				pickups++
 			}
 		}
-		// Compare fill in cross-multiplied form so odd divisions that do
-		// not divide the bar length exactly still compare correctly. A
-		// pickup is underfull by definition, so it is not reported as such.
+
 		if placed && divisions > 0 && !meas.Implicit && maxCursor*int64(den) != int64(num)*4*divisions {
 			if maxCursor*int64(den) < int64(num)*4*divisions {
 				im.warnf("%s measure %s: content does not fill the %d/%d measure; padded with rest", label, mlabel, num, den)
@@ -546,15 +427,6 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 	}
 	pd.end = measureStart
 
-	// Wind classification: the declared General MIDI program is the
-	// primary signal, the part name the fallback for files that carry no
-	// MIDI block at all — never for one that declared a program the
-	// registry does not know as a wind: a part labelled "Flute" whose
-	// file explicitly says guitar is a guitar, and the file's word wins.
-	// An explicit <staff-tuning> overrides both — a real tab staff, with
-	// authored string lines, is stronger evidence of a fretted instrument
-	// than a program number or a label — so the part stays fretted and
-	// the conflict is reported, never silently resolved.
 	wind := score.WindByProgram(pd.program)
 	if wind == nil && !pd.hasProgram {
 		wind = score.WindByName(pd.name)
@@ -600,11 +472,7 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 	if untracked > 0 {
 		im.warnf("%s: %d tie start(s) past the %d unresolved-tie limit were not tracked; their notes are separate attacks", label, untracked, maxOpenTies)
 	}
-	// A wind part has no strings to check an authored fingering against,
-	// so <technical> is not honored there at all — the pitch alone decides
-	// the lane position. One warning covers both the in-range and the
-	// out-of-range kind; the fretted-only warnings below would mislead
-	// (nothing is inferred, and the fingering never wins).
+
 	if pd.wind != nil && authoredFing > 0 {
 		im.warnf("%s: ignored authored <technical> string/fret on %d note(s); a %s has no strings to check them against", label, authoredFing, pd.wind.Name)
 	}
@@ -623,9 +491,6 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 	return pd, nil
 }
 
-// recordDirectionTempo records a tempo change at the direction's position.
-// <sound tempo> is authoritative when present; otherwise the metronome
-// marking is converted to quarter-note BPM.
 func (im *importer) recordDirectionTempo(d *xmlDirection, measureStart, cursor, divisions int64, label, mlabel string) {
 	if d.Sound != nil && d.Sound.Tempo > 0 {
 		im.recordTempo(measureStart, cursor, divisions, d.Sound.Tempo)
@@ -642,18 +507,11 @@ func (im *importer) recordDirectionTempo(d *xmlDirection, measureStart, cursor, 
 	}
 }
 
-// minBPM and maxBPM bound the tempos accepted from a file. The range is
-// deliberately generous — real scores live in roughly 20-400 — because
-// past it USPerQuarter degenerates (rounds to 0 or overflows) and
-// Validate would hard-fail the whole import over one absurd marking.
 const (
 	minBPM float64 = 1
 	maxBPM float64 = 4000
 )
 
-// recordTempo appends a tempo entry at the cursor's score tick. Absurd
-// tempos degrade to a warning and are skipped, mirroring the MIDI
-// importer; the tick-0 120 BPM default covers any gap.
 func (im *importer) recordTempo(measureStart, cursor, divisions int64, bpm float64) {
 	tick := measureStart
 	if divisions > 0 {
@@ -670,13 +528,6 @@ func (im *importer) recordTempo(measureStart, cursor, divisions int64, bpm float
 	im.tempos = append(im.tempos, score.Tempo{Tick: tick, USPerQuarter: score.USPerQuarter(bpm)})
 }
 
-// finish completes a parsed part. Notes are sorted, then placed: on a
-// fretted part, notes without authored fingering get one from
-// internal/fretting (marked Inferred; unplayable keys are dropped with a
-// warning) placed around the fingerings the authored notes at the same
-// onset already hold; on a wind part, finishWind computes the single-lane
-// placement instead — no heuristic runs. Overlapping notes on the same
-// string are then truncated (strings, and the wind lane, are monophonic).
 func (im *importer) finish(pd *partData) {
 	label := fmt.Sprintf("part %d (%s)", pd.index+1, pd.id)
 	sort.SliceStable(pd.notes, func(i, j int) bool {
@@ -692,10 +543,6 @@ func (im *importer) finish(pd *partData) {
 		im.finishFretted(pd, label)
 	}
 
-	// A new attack on a string still ringing cuts the ringing note off.
-	// On a wind part every note sits on lane 1, so this same rule is what
-	// makes overlapping notes sequential — the one-note-per-beat shape
-	// Validate demands of a monophonic instrument.
 	truncated := 0
 	last := map[int]*rawNote{}
 	for _, n := range pd.notes {
@@ -708,9 +555,7 @@ func (im *importer) finish(pd *partData) {
 	if truncated > 0 {
 		im.warnf("%s: truncated %d note(s) overlapping a later note on the same string", label, truncated)
 	}
-	// Truncating to zero length is a dropped note, not a shortened one —
-	// two attacks on one string at the same tick, which only a file
-	// authoring the same string twice in a chord can produce. Say so.
+
 	collapsed := 0
 	kept := pd.notes[:0]
 	for _, n := range pd.notes {
@@ -726,32 +571,9 @@ func (im *importer) finish(pd *partData) {
 	}
 }
 
-// finishWind places a wind part's notes on the instrument's single
-// chromatic lane: every note gets str 1 and fret key−LowSounding. The
-// lane is arithmetic, not a heuristic, so fretting.AssignWith never runs and
-// nothing is marked Inferred. Any authored <technical> fingering was
-// already discounted during parsing (a wind part has no strings to check
-// it against).
-//
-// A <chord> resolves to its HIGHEST key — the melody rides on top of a
-// voicing far more often than under it — and the rest of the chord is
-// dropped, counted once per part. Out-of-range notes are dropped, never
-// octave-rewritten: MusicXML pitch (written plus <transpose>) is
-// authoritative, and rewriting it would silently change the music. Below,
-// the floor is the instrument's lowest note; above, MIDI 127 is the only
-// ceiling — altissimo is real playing and imports fine.
-//
-// A note a slur arc was open across plays without a fresh tongue —
-// TechSlur. The flag was recorded per onset on every chord member, so it
-// survives both filters here no matter which chord note carried the slur
-// elements.
 func (im *importer) finishWind(pd *partData, label string) {
 	w := pd.wind
-	// Range first, chords second: a chord whose TOP note is outside the
-	// instrument must fall back to its highest playable note, not lose
-	// the whole chord to the unplayable one. The ceiling is the written
-	// pitch — a sounding key past 127 - Transpose has no written note
-	// name, so the text format could never save it.
+
 	kept := pd.notes[:0]
 	for _, n := range pd.notes {
 		if n.key < w.LowSounding {
@@ -775,8 +597,7 @@ func (im *importer) finishWind(pd *partData, label string) {
 		if j > i {
 			chords++
 		}
-		// The sort is by start then key, so the group's last note is its
-		// highest.
+
 		kept = append(kept, pd.notes[j])
 		i = j + 1
 	}
@@ -793,16 +614,8 @@ func (im *importer) finishWind(pd *partData, label string) {
 	}
 }
 
-// finishFretted assigns a fretted part's missing fingerings with
-// internal/fretting and drops what stays unplayable.
 func (im *importer) finishFretted(pd *partData, label string) {
-	// The fingerings an authored note already holds, per onset. A chord
-	// that mixes authored and unfingered notes used to lose a note here:
-	// the heuristic, told nothing about the authored notes, could put an
-	// inferred one on a string an authored note already held, and the
-	// same-string truncation below then shortened the earlier note to
-	// nothing and dropped it. The player was shown an incomplete chord and
-	// scored on it.
+
 	claimed := map[int64][]fretting.Position{}
 	for _, n := range pd.notes {
 		if !n.hasFing {
@@ -811,12 +624,6 @@ func (im *importer) finishFretted(pd *partData, label string) {
 		claimed[n.start] = append(claimed[n.start], fretting.Position{String: n.str, Fret: n.fret})
 	}
 
-	// Group the unfingered notes by onset and hand the sequence to the
-	// fretting heuristic, so chords get joint fingerings and consecutive
-	// beats a playable hand path. Onsets that also carry an authored note
-	// are pulled out of that sequence and fingered against those notes'
-	// own positions; the authored notes fix the hand position there
-	// anyway, so little is lost by breaking the chain at them.
 	var plain, mixed [][]*rawNote
 	for _, n := range pd.notes {
 		if n.hasFing {
@@ -849,17 +656,6 @@ func (im *importer) finishFretted(pd *partData, label string) {
 	}
 }
 
-// assignFingerings fingers a sequence of unfingered onsets with
-// internal/fretting.
-//
-// fixed[i] holds the fingerings an authored note already occupies at
-// groups[i]'s onset. The heuristic places around them: it keeps off their
-// strings, and it fingers what is left within reach of the hand they
-// imply, so an inferred note joins the authored shape instead of landing
-// at whatever fret is cheapest on its own. A mixed chord is therefore
-// fingered by the same machinery as a fully unfingered one rather than by
-// a second, divergent placement rule. A note that still finds no position
-// is warned about, never dropped in silence.
 func (im *importer) assignFingerings(pd *partData, label string, groups [][]*rawNote, fixed [][]fretting.Position) {
 	beats := make([][]int, len(groups))
 	for i, g := range groups {
@@ -873,15 +669,9 @@ func (im *importer) assignFingerings(pd *partData, label string, groups [][]*raw
 		for j, n := range g {
 			p := positions[i][j]
 			if p.String < 1 {
-				continue // unplayable; reported below and filtered out
+				continue
 			}
-			// The heuristic places by pitch arithmetic (open+capo+fret ==
-			// key) with no MIDI ceiling of its own, so an extreme tuning or
-			// capo can hand back a fingering whose derived pitch falls
-			// outside 0-127 — which Validate would reject, killing the whole
-			// import over one unwritable note. Drop the note instead, the
-			// same recovery the authored-fingering path (usableFingering)
-			// and the wind lane already apply.
+
 			if k := pd.tuning[p.String-1] + pd.capo + p.Fret; k < 0 || k > 127 {
 				im.warnf("%s: dropped note (key %d) at tick %d: string %d fret %d sounds MIDI key %d, outside 0-127",
 					label, n.key, n.start, p.String, p.Fret, k)

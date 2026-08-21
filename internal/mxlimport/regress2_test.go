@@ -1,9 +1,5 @@
 package mxlimport
 
-// Round-2 sweep regressions: bounds the importer must share with the rest
-// of the app (gpimport's capo clamp, textfmt's fret and label limits),
-// slur arcs closed on rests, and tie chains renumbered mid-note.
-
 import (
 	"strings"
 	"testing"
@@ -12,16 +8,8 @@ import (
 	"github.com/S95F/musicTutor/internal/score/textfmt"
 )
 
-// TestCapoBeyondLimitUsesNone: <capo> had no upper bound, so a capo of 40
-// imported verbatim into Track.Capo — a piece \capo refuses to write
-// (the format stops at fret 30, gpimport clamps at 12), so the import
-// could never be saved. Out-of-range capos now degrade to "no capo" with
-// a warning, exactly as gpimport's trackSetup does; the boundary value 12
-// is still honored.
 func TestCapoBeyondLimitUsesNone(t *testing.T) {
-	// The written pitch matches open low E under the capo actually in
-	// effect (none after the clamp; E3 = 40+12 at the boundary), so the
-	// mismatch warning stays out of the way.
+
 	build := func(capo string, octave int) []byte {
 		m := `<attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time>` +
 			`<staff-details><capo>` + capo + `</capo></staff-details></attributes>` +
@@ -55,18 +43,11 @@ func TestCapoBeyondLimitUsesNone(t *testing.T) {
 	}
 }
 
-// restNote builds a voice-1 <rest/> of the given duration carrying raw
-// slur elements in its <notations>.
 func restNote(dur int, slurs string) string {
 	return `<note><rest/><duration>` + itoa(dur) + `</duration><voice>1</voice>` +
 		`<notations>` + slurs + `</notations></note>`
 }
 
-// TestRestSlurStopClosesArc: a slur stop authored on a rest was filtered
-// out with the rest before slur handling ran, so the arc stayed open and
-// every note after the rest imported slurred — TechSlur attacks the
-// player never authored. The stop must close the arc: notes after the
-// rest attack fresh.
 func TestRestSlurStopClosesArc(t *testing.T) {
 	m := attrs44div480 +
 		slurNote("C", 5, 480, "", `<slur type="start"/>`) +
@@ -83,9 +64,6 @@ func TestRestSlurStopClosesArc(t *testing.T) {
 	eventTechs(t, s, []score.Technique{0, 0, 0})
 }
 
-// TestRestInsideArcKeepsItOpen is the control: a plain rest under a
-// phrase mark does not end the arc — only an authored stop does — so the
-// notes on both sides of the rest stay covered.
 func TestRestInsideArcKeepsItOpen(t *testing.T) {
 	m := attrs44div480 +
 		slurNote("C", 5, 480, "", `<slur type="start"/>`) +
@@ -102,12 +80,6 @@ func TestRestInsideArcKeepsItOpen(t *testing.T) {
 	eventTechs(t, s, []score.Technique{0, score.TechSlur, score.TechSlur})
 }
 
-// TestTieChainRenumberedMidNote: a mid-chain note may carry tie stop
-// number=1 and tie start number=2 — the chain is renumbered as it
-// continues. tie() used to hand ONE number for both sides (the first
-// positive one, the stop's 1), so the chain re-registered under 1 and
-// the final stop numbered 2 found nothing: the last note degraded to a
-// fresh attack with a bad-tie warning.
 func TestTieChainRenumberedMidNote(t *testing.T) {
 	m1 := attrs44div480 +
 		note("B", 3, 1920, -1, 0, `<tie type="start" number="1"/>`)
@@ -126,12 +98,6 @@ func TestTieChainRenumberedMidNote(t *testing.T) {
 	}
 }
 
-// TestAuthoredFretPastFormatLimitInferred: an authored <technical> fret
-// needed only a MIDI-range check to be honored, but the text format
-// refuses any fret past 30 — so string 6 fret 31 (a legal B4) imported a
-// piece that plays and validates and then fails every save. Such a
-// fingering now falls back to inference like the other out-of-range
-// shapes, and the piece formats.
 func TestAuthoredFretPastFormatLimitInferred(t *testing.T) {
 	m := attrs44div480 + note("B", 4, 1920, 6, 31, "")
 	s, warns, err := Import(wrap(m))
@@ -153,10 +119,6 @@ func TestAuthoredFretPastFormatLimitInferred(t *testing.T) {
 	}
 }
 
-// TestImportedLabelsAlwaysSave: a title or part name holding "//" or a
-// line break flowed verbatim into Score.Title and Track.Name, and
-// textfmt.Format refuses both — an import that plays but can never be
-// saved. Labels are now cleaned with a warning.
 func TestImportedLabelsAlwaysSave(t *testing.T) {
 	doc := `<?xml version="1.0" encoding="UTF-8"?><score-partwise version="4.0">` +
 		`<work><work-title>Song // Take 2</work-title></work>` +

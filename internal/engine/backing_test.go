@@ -5,11 +5,6 @@ import (
 	"testing"
 )
 
-// rampBacking builds a backing track whose sample values equal their file
-// position: left[i] = i, right[i] = i + 0.5. Integer values up to 2^24
-// are exact in float32, so at scale 1 output frames must reproduce file
-// positions bit-exactly, and linear interpolation at scale 0.5 lands on
-// exactly representable halves.
 func rampBacking(n int) (l, r []float32) {
 	l = make([]float32, n)
 	r = make([]float32, n)
@@ -20,8 +15,6 @@ func rampBacking(n int) (l, r []float32) {
 	return l, r
 }
 
-// newBackingEngine builds a fixture engine with the synth track muted and
-// no metronome, so the output is the backing track alone.
 func newBackingEngine(t *testing.T, opts Options) (*Engine, *stubVoice) {
 	t.Helper()
 	e, v := newFixtureEngine(t, opts)
@@ -29,7 +22,6 @@ func newBackingEngine(t *testing.T, opts Options) (*Engine, *stubVoice) {
 	return e, v
 }
 
-// renderCollect drives the engine and returns the full output.
 func renderCollect(e *Engine, frames, block int) (l, r []float32) {
 	l = make([]float32, frames)
 	r = make([]float32, frames)
@@ -43,8 +35,6 @@ func renderCollect(e *Engine, frames, block int) (l, r []float32) {
 	return l, r
 }
 
-// TestBackingExactFramesScale1 plays from tick 0 at scale 1 with a ramp
-// backing: output frame k must be exactly file sample k on both channels.
 func TestBackingExactFramesScale1(t *testing.T) {
 	e, _ := newBackingEngine(t, Options{})
 	bl, br := rampBacking(200000)
@@ -58,14 +48,12 @@ func TestBackingExactFramesScale1(t *testing.T) {
 	}
 }
 
-// TestBackingSeek seeks to bar 2 (tick 3840 = 2 s = file sample 96000 at
-// 120 BPM): the backing must jump exactly with the score position.
 func TestBackingSeek(t *testing.T) {
 	e, _ := newBackingEngine(t, Options{})
 	bl, br := rampBacking(200000)
 	e.SetBackingTrack(bl, br, 0)
 	e.Play()
-	renderCollect(e, 1000, 480) // move off tick 0 first
+	renderCollect(e, 1000, 480)
 	e.SeekTick(3840)
 	l, _ := renderCollect(e, 1000, 480)
 	for k := range l {
@@ -75,9 +63,6 @@ func TestBackingSeek(t *testing.T) {
 	}
 }
 
-// TestBackingLoopWrap loops bar 2 [3840, 7680): every pass must restart
-// the backing exactly at the loop start's score time (file sample 96000),
-// with a 96000-frame pass period.
 func TestBackingLoopWrap(t *testing.T) {
 	e, _ := newBackingEngine(t, Options{})
 	bl, br := rampBacking(400000)
@@ -97,9 +82,6 @@ func TestBackingLoopWrap(t *testing.T) {
 	}
 }
 
-// TestBackingHalfSpeed plays at scale 0.5: output frame k reads file
-// position k*0.5, linearly interpolated (pitch shifts — the documented
-// limitation), so the ramp yields exactly k*0.5.
 func TestBackingHalfSpeed(t *testing.T) {
 	e, _ := newBackingEngine(t, Options{})
 	bl, br := rampBacking(200000)
@@ -114,10 +96,6 @@ func TestBackingHalfSpeed(t *testing.T) {
 	}
 }
 
-// TestBackingHalfSpeedFromLoopStart combines scale and a mid-score start:
-// looping bar 2 at scale 0.5, frame k of each pass reads file position
-// 96000 + k*0.5 (the loop start's score time is unscaled; only the
-// advance rate is).
 func TestBackingHalfSpeedFromLoopStart(t *testing.T) {
 	e, _ := newBackingEngine(t, Options{})
 	bl, br := rampBacking(400000)
@@ -126,7 +104,7 @@ func TestBackingHalfSpeedFromLoopStart(t *testing.T) {
 	e.SetLoop(3840, 7680)
 	e.SeekTick(3840)
 	e.Play()
-	const pass = 192000 // 96000 frames at scale 1, doubled at 0.5
+	const pass = 192000
 	l, _ := renderCollect(e, pass+1000, 480)
 	for k := range l {
 		if want := float32(96000) + float32(k%pass)*0.5; l[k] != want {
@@ -135,11 +113,6 @@ func TestBackingHalfSpeedFromLoopStart(t *testing.T) {
 	}
 }
 
-// TestBackingSilentDuringCountIn compares an engine with a backing track
-// against an identical one without: during the count-in (position frozen)
-// the outputs must be identical (backing silent while clicks sound), and
-// from the count-in's end output frame 96000+k must differ by exactly
-// backing sample k.
 func TestBackingSilentDuringCountIn(t *testing.T) {
 	eb, _ := newFixtureEngine(t, Options{CountInBeats: 4})
 	e0, _ := newFixtureEngine(t, Options{CountInBeats: 4})
@@ -147,7 +120,7 @@ func TestBackingSilentDuringCountIn(t *testing.T) {
 	eb.SetBackingTrack(bl, br, 0)
 	eb.Play()
 	e0.Play()
-	const ci = 4 * 24000 // 4 beats at 120 BPM
+	const ci = 4 * 24000
 	lb, _ := renderCollect(eb, ci+10000, 480)
 	l0, _ := renderCollect(e0, ci+10000, 480)
 	for k := 0; k < ci; k++ {
@@ -155,10 +128,7 @@ func TestBackingSilentDuringCountIn(t *testing.T) {
 			t.Fatalf("frame %d during count-in: %v with backing vs %v without, want identical (backing silent)", k, lb[k], l0[k])
 		}
 	}
-	// After the count-in the difference is the backing ramp. The voices
-	// sound in both engines, so subtracting them back out rounds in
-	// float32; allow one ulp of the backing's magnitude (the bit-exact
-	// contract is covered by the muted-track tests).
+
 	for k := ci; k < len(lb); k++ {
 		want := float64(k - ci)
 		tol := want/(1<<23) + 1e-6
@@ -168,9 +138,6 @@ func TestBackingSilentDuringCountIn(t *testing.T) {
 	}
 }
 
-// TestBackingSilentWhileWaiting freezes at the first user note in wait
-// mode: while waiting the backing is silent (no DC hold), voices still
-// render, and the release resumes the file exactly where the score froze.
 func TestBackingSilentWhileWaiting(t *testing.T) {
 	e, v := newBackingEngine(t, Options{})
 	bl, br := rampBacking(200000)
@@ -186,14 +153,12 @@ func TestBackingSilentWhileWaiting(t *testing.T) {
 			t.Fatalf("frame %d while waiting = %v, want silence from the backing", k, l[k])
 		}
 	}
-	// Voices still render while waiting: the voice's frame clock advanced
-	// through the frozen frames (its Render is called for tails).
+
 	if v.frame != 1000 {
 		t.Fatalf("voice rendered %d frames during the wait, want 1000", v.frame)
 	}
 	e.ConfirmWait()
-	// Wait mode re-arms at the next user note (tick 480 = frame 12000
-	// after the release); render only up to it.
+
 	l2, _ := renderCollect(e, 12000, 480)
 	for k := range l2 {
 		if want := float32(k); l2[k] != want {
@@ -202,9 +167,6 @@ func TestBackingSilentWhileWaiting(t *testing.T) {
 	}
 }
 
-// TestBackingOffsets checks both offset signs at scale 1 from tick 0:
-// +0.5 s starts 24000 samples into the file; -0.5 s holds silence for
-// 24000 frames and then starts the file's beginning.
 func TestBackingOffsets(t *testing.T) {
 	bl, br := rampBacking(200000)
 
@@ -234,8 +196,6 @@ func TestBackingOffsets(t *testing.T) {
 	}
 }
 
-// TestBackingPastEOFSilent plays a backing shorter than the score: reads
-// past its last sample are silent.
 func TestBackingPastEOFSilent(t *testing.T) {
 	e, _ := newBackingEngine(t, Options{})
 	bl, br := rampBacking(100)
@@ -254,8 +214,6 @@ func TestBackingPastEOFSilent(t *testing.T) {
 	}
 }
 
-// TestBackingGainAndClear scales the backing by SetBackingGain and
-// removes it with ClearBackingTrack.
 func TestBackingGainAndClear(t *testing.T) {
 	e, _ := newBackingEngine(t, Options{})
 	bl, br := rampBacking(200000)
@@ -277,9 +235,6 @@ func TestBackingGainAndClear(t *testing.T) {
 	}
 }
 
-// TestBackingPauseSilent pauses mid-play: the backing contributes silence
-// while paused (no DC hold at the frozen file position) and resumes from
-// the frozen score time.
 func TestBackingPauseSilent(t *testing.T) {
 	e, _ := newBackingEngine(t, Options{})
 	bl, br := rampBacking(200000)
@@ -302,15 +257,6 @@ func TestBackingPauseSilent(t *testing.T) {
 	}
 }
 
-// TestMixBackingNonFinitePositionSilent drives the render loop's bounds
-// guard directly. Regression: the guard was `p < 0 || p > last`, and every
-// comparison involving NaN is false, so a NaN file position fell through
-// to j := int(p) — MinInt64 on amd64 — and indexed backL out of range,
-// panicking the audio thread ("index out of range
-// [-9223372036854775808]"). A position that is not a real number names no
-// sample, so every non-finite position must read as silence. scale is
-// covered as well as backBase: SetTempoScale's clamp has the same NaN
-// blindness, so a NaN can still reach this loop from there.
 func TestMixBackingNonFinitePositionSilent(t *testing.T) {
 	e, _ := newBackingEngine(t, Options{})
 	bl, br := rampBacking(1000)
@@ -331,7 +277,7 @@ func TestMixBackingNonFinitePositionSilent(t *testing.T) {
 		r := make([]float32, 16)
 		e.mu.Lock()
 		e.backBase, e.scale = tc.base, tc.scale
-		e.mixBacking(l, r, 0) // must not panic
+		e.mixBacking(l, r, 0)
 		e.mu.Unlock()
 		for k := range l {
 			if l[k] != 0 || r[k] != 0 {
@@ -342,14 +288,6 @@ func TestMixBackingNonFinitePositionSilent(t *testing.T) {
 	}
 }
 
-// TestBackingNonFiniteOffsetRefused pins the boundary check that keeps a
-// non-finite position out of the engine in the first place. Regression:
-// `render -backing-offset NaN` reached SetBackingTrack unfiltered, stored
-// NaN in backOffset, and made every file position NaN — a panic on the
-// audio thread from processFrames. The offset is refused (treated as 0),
-// so playback must match an aligned backing exactly; +Inf is refused for
-// the same reason, having pinned the position outside the file forever
-// and made the backing silently inaudible.
 func TestBackingNonFiniteOffsetRefused(t *testing.T) {
 	for _, off := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
 		e, _ := newBackingEngine(t, Options{})
@@ -365,15 +303,6 @@ func TestBackingNonFiniteOffsetRefused(t *testing.T) {
 	}
 }
 
-// TestBackingNonFiniteGainRefused pins the gain clamp. Regression: the
-// clamp was `if g < 0`, false for NaN, so `render -backing-gain NaN`
-// stored NaN; mixBacking's `backGain == 0` early-out is false for NaN
-// too, so every backing sample became NaN, the whole mix followed, and
-// the rendered WAV was eight seconds of full-scale noise (every sample at
-// the -1.0 rail). +Inf is the same hazard by multiplication. The engine
-// must hold only a gain it can multiply by, so all of these store 0, and
-// with the track muted the output must be silence — not NaN, which the
-// exact comparison below also rejects.
 func TestBackingNonFiniteGainRefused(t *testing.T) {
 	for _, g := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), -1} {
 		e, _ := newBackingEngine(t, Options{})
@@ -390,8 +319,6 @@ func TestBackingNonFiniteGainRefused(t *testing.T) {
 	}
 }
 
-// TestBackingRenderFramesDoesNotAllocate is the steady-state allocation
-// contract with a backing track in the mix: still zero.
 func TestBackingRenderFramesDoesNotAllocate(t *testing.T) {
 	var reg []*stubVoice
 	sc := fixtureScore(t)
@@ -404,19 +331,13 @@ func TestBackingRenderFramesDoesNotAllocate(t *testing.T) {
 	l := make([]float32, 512)
 	r := make([]float32, 512)
 	for i := 0; i < 50; i++ {
-		e.RenderFrames(l, r) // reach steady state
+		e.RenderFrames(l, r)
 	}
 	if allocs := testing.AllocsPerRun(100, func() { e.RenderFrames(l, r) }); allocs != 0 {
 		t.Errorf("RenderFrames with a backing track allocates %v times per run, want 0", allocs)
 	}
 }
 
-// TestBackingNonFiniteSamplesSilenced is the fix-verification regression
-// for the backing mixer. Guarding the POSITION and the GAIN still left the
-// samples themselves: mixBacking adds `gain * backL[j]` into the output,
-// so one NaN in the buffer makes the entire mix non-finite from that frame
-// on, and the live path writes float32 straight to the device — a
-// full-scale rail in the player's headphones.
 func TestBackingNonFiniteSamplesSilenced(t *testing.T) {
 	e, _ := newFixtureEngine(t, Options{})
 	back := make([]float32, 4800)

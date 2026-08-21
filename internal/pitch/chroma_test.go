@@ -5,8 +5,6 @@ import (
 	"testing"
 )
 
-// singleStrum feeds x through a strum-enabled detector and requires
-// exactly one Strum, returning it.
 func singleStrum(t *testing.T, x []float32) Strum {
 	t.Helper()
 	d := NewDetector(strumConfig())
@@ -17,11 +15,6 @@ func singleStrum(t *testing.T, x []float32) Strum {
 	return strums[0]
 }
 
-// TestChromaPureSinePitchClass: a pure sine lands in its own pitch class,
-// in any octave. A2 is the interesting one — at 110 Hz the semitone
-// spacing is 6 Hz while the detector's FFT bins are 11.7 Hz apart, so a
-// nearest-bin fold would file it under G# or A#; only the interpolated
-// peak position gets it right.
 func TestChromaPureSinePitchClass(t *testing.T) {
 	tests := []struct {
 		name string
@@ -34,7 +27,7 @@ func TestChromaPureSinePitchClass(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := singleStrum(t, append(silence(0.2), sine(tt.freq, 0.4, 0.6)...))
-			const wantClass = 9 // A
+			const wantClass = 9
 			rank := chromaRank(s.Chroma)
 			if rank[0] != wantClass {
 				t.Fatalf("strongest class %s, want A;%s", pitchClassNames[rank[0]], formatChroma(s.Chroma))
@@ -47,19 +40,8 @@ func TestChromaPureSinePitchClass(t *testing.T) {
 	}
 }
 
-// TestChromaTriadSoundedClasses points the fold at a strummed E5-shaped
-// triad — low E, B, E an octave up (keys 40, 47, 52), i.e. pitch classes E
-// and B — and requires both to stand clear of the ten classes nobody
-// played, by a margin rather than by ordering alone.
-//
-// The unsounded classes are not zero and never will be: the third harmonic
-// of E is B, the fifth is G#, the ninth is F#, and a chroma fold cannot
-// tell a partial from a fundamental. That is exactly why Phase 4 verifies
-// against the EXPECTED chord's template (Oudre et al., docs/DECISIONS.md
-// D4) instead of thresholding classes one at a time — the template carries
-// the same harmonic bleed.
 func TestChromaTriadSoundedClasses(t *testing.T) {
-	sounded := map[int]bool{4: true, 11: true} // E, B
+	sounded := map[int]bool{4: true, 11: true}
 	s := singleStrum(t, append(silence(0.2), ksChord(0.6, 40, 47, 52)...))
 
 	minSounded, maxOther := 1.0, 0.0
@@ -83,10 +65,6 @@ func TestChromaTriadSoundedClasses(t *testing.T) {
 	}
 }
 
-// TestStrumOnePerPluck: one attack, one Strum, stamped on the onset. The
-// stamp is the onset FRAME's stamp, which sits at its window's center —
-// up to half a window before the physical attack — so the Strum is early
-// by construction, the same way Frame.Onset is.
 func TestStrumOnePerPluck(t *testing.T) {
 	t.Run("single pluck", func(t *testing.T) {
 		lead := silence(0.3)
@@ -122,7 +100,7 @@ func TestStrumOnePerPluck(t *testing.T) {
 
 	t.Run("two plucks a second apart", func(t *testing.T) {
 		lead := silence(0.2)
-		first := ksNote(45, 1.0) // exactly 1 s, so the attacks are 1 s apart
+		first := ksNote(45, 1.0)
 		x := append(append(lead, first...), ksNote(52, 0.5)...)
 		attacks := []int64{int64(len(lead)), int64(len(lead) + len(first))}
 
@@ -131,42 +109,30 @@ func TestStrumOnePerPluck(t *testing.T) {
 		if len(strums) != 2 {
 			t.Fatalf("got %d strums from two plucks, want 2", len(strums))
 		}
-		// Each stamp lands on its own attack, up to the window-center
-		// offset. The two are NOT exactly a second apart: the second
-		// attack has to climb over the first note still ringing, which
-		// can cost the onset detector an extra hop.
+
 		for i, s := range strums {
 			if diff := attacks[i] - s.Frame; diff < 0 || diff > int64(d.cfg.Window/2)+int64(d.cfg.Hop) {
 				t.Errorf("strum %d at %d, attack at %d: %+d samples off",
 					i, s.Frame, attacks[i], -diff)
 			}
 		}
-		if got, want := chromaRank(strums[0].Chroma)[0], 9; got != want { // A
+		if got, want := chromaRank(strums[0].Chroma)[0], 9; got != want {
 			t.Errorf("first strum's strongest class %s, want A;%s",
 				pitchClassNames[got], formatChroma(strums[0].Chroma))
 		}
-		if got, want := chromaRank(strums[1].Chroma)[0], 4; got != want { // E
+		if got, want := chromaRank(strums[1].Chroma)[0], 4; got != want {
 			t.Errorf("second strum's strongest class %s, want E;%s",
 				pitchClassNames[got], formatChroma(strums[1].Chroma))
 		}
 	})
 }
 
-// TestStrumChordVersusSingleNote is the chord-vs-single signal the scorer
-// keys on: three strings struck together produce ONE Strum whose chroma
-// covers all three pitch classes and whose Clarity is far below a single
-// note's, because no one period explains the waveform.
 func TestStrumChordVersusSingleNote(t *testing.T) {
-	// E major: E2, B2, G#3 — three distinct pitch classes.
+
 	chord := singleStrum(t, append(silence(0.2), ksChord(0.6, 40, 47, 56)...))
 	single := singleStrum(t, append(silence(0.2), ksNote(40, 0.6)...))
 
-	// Measured: G# 1.00, B 0.88, E 0.81, then a 0.30 gap down to the
-	// strongest unsounded class (D#). The chord-shape corpus in
-	// chordshapes_test.go covers this property across every open shape
-	// and four strum spreads; this case stays because it is the fixture
-	// the clarity comparison below needs.
-	want := []int{4, 11, 8} // E, B, G#
+	want := []int{4, 11, 8}
 	top := chromaRank(chord.Chroma)[:3]
 	for _, class := range want {
 		if chord.Chroma[class] < 0.65 {
@@ -200,10 +166,6 @@ func contains(xs []int, v int) bool {
 	return false
 }
 
-// TestStrumsDisabledMatchesEnabled: Config.Strums is purely additive.
-// Without it Strums() is always empty, and with it every Frame — f0,
-// clarity, RMS, onset — is bit-for-bit what it was, because the fold reads
-// the same power spectrum the autocorrelation does and writes nothing back.
 func TestStrumsDisabledMatchesEnabled(t *testing.T) {
 	x := append(silence(0.2), ksChord(0.6, 40, 47, 52)...)
 
@@ -228,8 +190,6 @@ func TestStrumsDisabledMatchesEnabled(t *testing.T) {
 	}
 }
 
-// TestStrumsEmptyWithoutOnsets: silence produces no strums, and Strums()
-// only ever reports what the LAST Process call completed.
 func TestStrumsEmptyWithoutOnsets(t *testing.T) {
 	d := NewDetector(strumConfig())
 	_, strums := feedStrums(d, silence(1.0), 480)
@@ -253,20 +213,15 @@ func TestStrumsEmptyWithoutOnsets(t *testing.T) {
 	if completing != 1 {
 		t.Errorf("%d Process calls reported a strum, want exactly 1", completing)
 	}
-	// The last call reported nothing, so Strums() is empty again.
+
 	if got := len(d.Strums()); got != 0 {
 		t.Errorf("Strums() = %d after a call that completed none, want 0", got)
 	}
 }
 
-// TestStrumTruncatedByNextOnset: with a span longer than the onset
-// refractory period, a second attack arriving mid-span closes the first
-// Strum early rather than merging the two attacks into one.
 func TestStrumTruncatedByNextOnset(t *testing.T) {
 	lead := silence(0.2)
-	// 80 ms apart: inside a 12-hop (120 ms) span but outside the onset
-	// refractory period. The first note is quiet so the second attack
-	// still clears the onset detector's rise threshold over it.
+
 	first := scale(ksNote(45, 0.08), 0.1)
 	x := append(append(lead, first...), ksNote(52, 0.4)...)
 
@@ -280,16 +235,12 @@ func TestStrumTruncatedByNextOnset(t *testing.T) {
 	if strums[0].Frame >= strums[1].Frame {
 		t.Errorf("strums out of order: %d then %d", strums[0].Frame, strums[1].Frame)
 	}
-	if got, want := chromaRank(strums[0].Chroma)[0], 9; got != want { // A
+	if got, want := chromaRank(strums[0].Chroma)[0], 9; got != want {
 		t.Errorf("truncated strum's strongest class %s, want A;%s",
 			pitchClassNames[got], formatChroma(strums[0].Chroma))
 	}
 }
 
-// TestStrumsTinyWindowDoesNotPanic: the chroma tables cope with a window
-// so short that barely any bin falls in the folded range — the same
-// degenerate config TestDetectorTinyWindowDoesNotPanic pins for the f0
-// path.
 func TestStrumsTinyWindowDoesNotPanic(t *testing.T) {
 	cfg := strumConfig()
 	cfg.Window = 16
@@ -300,13 +251,8 @@ func TestStrumsTinyWindowDoesNotPanic(t *testing.T) {
 	}
 }
 
-// TestDetectorProcessDoesNotAllocateWithStrums is the strum-path twin of
-// TestDetectorProcessDoesNotAllocate: chroma folding, accumulation, and
-// Strum emission all run out of preallocated state, so the realtime path
-// stays allocation-free with Phase 4 enabled.
 func TestDetectorProcessDoesNotAllocateWithStrums(t *testing.T) {
-	// Repeated plucks, so the measured calls keep hitting onsets, chroma
-	// folding, and strum completion rather than steady-state sustain.
+
 	var x []float32
 	for i := 0; i < 8; i++ {
 		x = append(x, ksNote(40+i, 0.1)...)
@@ -323,7 +269,7 @@ func TestDetectorProcessDoesNotAllocateWithStrums(t *testing.T) {
 			strums += len(d.Strums())
 		}
 	}
-	feed() // warmup: grows the reused frame and strum slices once
+	feed()
 	if strums == 0 {
 		t.Fatal("no strums in the measured signal; the test would prove nothing")
 	}
@@ -332,9 +278,6 @@ func TestDetectorProcessDoesNotAllocateWithStrums(t *testing.T) {
 	}
 }
 
-// BenchmarkProcess and BenchmarkProcessStrums bound the cost of Phase 4:
-// with Config.Strums false the chroma tables are never built and no fold
-// runs, so the two should be indistinguishable outside strum spans.
 func BenchmarkProcess(b *testing.B) {
 	benchmarkProcess(b, DefaultConfig(testSR))
 }

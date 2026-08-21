@@ -7,10 +7,6 @@ import (
 	"testing"
 )
 
-// These tests are the always-run tier: pure logic with no device, context,
-// or cgo dependency (they compile and pass with CGO_ENABLED=0). The
-// hardware-gated tier lives in malgo_cgo_test.go.
-
 func TestWithDefaults(t *testing.T) {
 	tests := []struct {
 		name string
@@ -47,20 +43,15 @@ func TestWithDefaults(t *testing.T) {
 	}
 }
 
-// TestDeviceIDRoundTrip checks encode → decode reproduces the raw ID bytes
-// exactly, and decode → encode reproduces the string, for the shapes malgo
-// IDs actually take (fixed-size arrays, mostly zero-padded).
 func TestDeviceIDRoundTrip(t *testing.T) {
-	const size = 256 // sizeof(ma_device_id)
+	const size = 256
 
-	// wasapiLike builds a 256-byte array with a UTF-16-ish prefix and
-	// zero padding, the shape WASAPI endpoint IDs have.
 	wasapiLike := make([]byte, size)
 	copy(wasapiLike, []byte{'{', 0, '0', 0, '.', 0, '}', 0, 0xAB, 0xCD})
 
 	full := make([]byte, size)
 	for i := range full {
-		full[i] = byte(i + 1) // no trailing zeros anywhere
+		full[i] = byte(i + 1)
 	}
 
 	tests := []struct {
@@ -90,8 +81,7 @@ func TestDeviceIDRoundTrip(t *testing.T) {
 }
 
 func TestEncodeDeviceIDNeverEmptyForRealIDs(t *testing.T) {
-	// An all-zero identifier must not encode to "", which StreamConfig
-	// reserves for "system default".
+
 	if got := encodeDeviceID(make([]byte, 256)); got != "00" {
 		t.Errorf("encodeDeviceID(all zeros) = %q, want %q", got, "00")
 	}
@@ -144,10 +134,6 @@ func TestInterleaveStereo(t *testing.T) {
 	}
 }
 
-// TestF32View checks the reinterpreting view in both directions: reads see
-// the float32 samples encoded in the bytes, and writes through the view
-// land in the underlying bytes — the property the callback relies on when
-// filling the device's output buffer.
 func TestF32View(t *testing.T) {
 	samples := []float32{0, 1, -1, 0.5, float32(math.Pi)}
 	b := make([]byte, 4*len(samples))
@@ -172,9 +158,6 @@ func TestF32View(t *testing.T) {
 	}
 }
 
-// TestDuplexScratchGrowOnly checks the scratch's allocation discipline:
-// same-size and smaller periods reuse the backing arrays; only a
-// larger-than-ever period reallocates.
 func TestDuplexScratchGrowOnly(t *testing.T) {
 	var sc duplexScratch
 	sc.grow(480)
@@ -184,7 +167,6 @@ func TestDuplexScratchGrowOnly(t *testing.T) {
 		t.Fatalf("stereo(480) lengths = %d, %d, want 480, 480", len(l480), len(r480))
 	}
 
-	// A smaller period must reuse the same arrays.
 	l300, _ := sc.stereo(300)
 	if len(l300) != 300 {
 		t.Fatalf("stereo(300) length = %d, want 300", len(l300))
@@ -196,7 +178,6 @@ func TestDuplexScratchGrowOnly(t *testing.T) {
 		t.Error("silence(300) reallocated despite sufficient capacity")
 	}
 
-	// A larger period grows...
 	lBig, rBig := sc.stereo(512)
 	if len(lBig) != 512 || len(rBig) != 512 {
 		t.Fatalf("stereo(512) lengths = %d, %d, want 512, 512", len(lBig), len(rBig))
@@ -204,13 +185,12 @@ func TestDuplexScratchGrowOnly(t *testing.T) {
 	if &lBig[0] == &l480[0] {
 		t.Error("stereo(512) did not grow past the old capacity")
 	}
-	// ...exactly once: repeating it reuses the grown arrays.
+
 	lBig2, _ := sc.stereo(512)
 	if &lBig2[0] != &lBig[0] {
 		t.Error("second stereo(512) reallocated; grow must be grow-only")
 	}
 
-	// silence stays silent after growing.
 	for i, v := range sc.silence(512) {
 		if v != 0 {
 			t.Fatalf("silence[%d] = %v, want 0", i, v)

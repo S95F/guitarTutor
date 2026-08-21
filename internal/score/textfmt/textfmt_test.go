@@ -9,13 +9,10 @@ import (
 	"github.com/S95F/musicTutor/internal/score"
 )
 
-// fixture returns the path of a fixture in the repository's testdata
-// directory.
 func fixture(name string) string {
 	return filepath.Join("..", "..", "..", "testdata", name)
 }
 
-// mustParse parses src and fails the test on error.
 func mustParse(t *testing.T, src string) *score.Score {
 	t.Helper()
 	s, err := Parse([]byte(src), "test")
@@ -58,7 +55,6 @@ func TestParseCanonicalFixture(t *testing.T) {
 		t.Errorf("meter map = %v, want one entry at tick 0, 4/4", s.Meters)
 	}
 
-	// The canonical event table from docs/TEXTFORMAT.md and the task spec.
 	want := []struct {
 		start, end int64
 		key        int
@@ -106,7 +102,7 @@ func TestParseRichFixture(t *testing.T) {
 		t.Errorf("lead = %q role %v capo %d program %d, want Lead/RoleUser/2/27",
 			lead.Name, lead.Role, lead.Capo, lead.Program)
 	}
-	wantTuning := score.Tuning{64, 59, 55, 50, 45, 38} // drop D, highest first
+	wantTuning := score.Tuning{64, 59, 55, 50, 45, 38}
 	if len(lead.Tuning) != len(wantTuning) {
 		t.Fatalf("lead tuning has %d strings, want %d", len(lead.Tuning), len(wantTuning))
 	}
@@ -147,7 +143,6 @@ func TestParseRichFixture(t *testing.T) {
 		}
 	}
 
-	// Lead bar 1: dotted and (sticky) triplet durations.
 	if len(lead.Bars) != 4 {
 		t.Fatalf("lead has %d bars, want 4", len(lead.Bars))
 	}
@@ -162,7 +157,6 @@ func TestParseRichFixture(t *testing.T) {
 		}
 	}
 
-	// Lead bar 2: all six technique letters, in order.
 	wantTech := []score.Technique{
 		score.TechHammer, score.TechPull, score.TechSlide,
 		score.TechBend, score.TechVibrato, score.TechDead,
@@ -177,11 +171,10 @@ func TestParseRichFixture(t *testing.T) {
 		}
 	}
 
-	// Lead bars 3-4 start under the 3/4 meter.
 	if b3 := lead.Bars[2]; b3.Start != 7680 || b3.Num != 3 || b3.Den != 4 {
 		t.Errorf("lead bar 3 = start %d meter %d/%d, want 7680 3/4", b3.Start, b3.Num, b3.Den)
 	}
-	// Rhythm bar starts and meters follow the same maps.
+
 	wantStarts := []int64{0, 3840, 7680, 10560}
 	if len(rhythm.Bars) != len(wantStarts) {
 		t.Fatalf("rhythm has %d bars, want %d", len(rhythm.Bars), len(wantStarts))
@@ -196,17 +189,14 @@ func TestParseRichFixture(t *testing.T) {
 	}
 
 	evs := s.Events()
-	// Capo + drop D: lead opens on low D (38) + capo 2 = 40 at tick 0;
-	// the rhythm track's standard low E (40) sounds at tick 0 too, and
-	// same-tick order is broken by track.
+
 	if evs[0].Track != 0 || evs[0].Start != 0 || evs[0].Key != 40 {
 		t.Errorf("event 0 = track %d (%d, key %d), want track 0 (0, key 40)", evs[0].Track, evs[0].Start, evs[0].Key)
 	}
 	if evs[1].Track != 1 || evs[1].Start != 0 || evs[1].Key != 40 {
 		t.Errorf("event 1 = track %d (%d, key %d), want track 1 (0, key 40)", evs[1].Track, evs[1].Start, evs[1].Key)
 	}
-	// Lead bar 3: the tied chord merges into three events spanning the
-	// whole bar. Keys include the capo: 50+2+2, 55+2+3, 59+2+2.
+
 	var chordKeys []int
 	for _, ev := range evs {
 		if ev.Track == 0 && ev.Start == 7680 {
@@ -225,8 +215,7 @@ func TestParseRichFixture(t *testing.T) {
 			}
 		}
 	}
-	// Lead bar 4: quarter + tied eighth merge into one event on G3 fret 5
-	// (55+2+5 = 62).
+
 	found := false
 	for _, ev := range evs {
 		if ev.Track == 0 && ev.Start == 11520 {
@@ -239,7 +228,7 @@ func TestParseRichFixture(t *testing.T) {
 	if !found {
 		t.Error("no lead event at tick 11520")
 	}
-	// Rhythm bar 3: one dotted-half D3 (50+2) filling the 3/4 bar.
+
 	found = false
 	for _, ev := range evs {
 		if ev.Track == 1 && ev.Start == 7680 {
@@ -334,7 +323,7 @@ func TestStickyDuration(t *testing.T) {
 	tests := []struct {
 		name string
 		src  string
-		want []int64 // beat durations across all bars, in order
+		want []int64
 	}{
 		{"initially a quarter", "0.6 0.6 0.6 0.6", []int64{960, 960, 960, 960}},
 		{"explicit then sticky", "0.6.8 0.6 0.6 0.6 0.6.4 0.6", []int64{480, 480, 480, 480, 960, 960}},
@@ -365,7 +354,7 @@ func TestStickyDuration(t *testing.T) {
 }
 
 func TestTieSemantics(t *testing.T) {
-	// A tie within a bar merges into one event.
+
 	s := mustParse(t, "0.6.2 ~0.6.2")
 	if got := s.Tracks[0].Bars[0].Beats[1].Notes[0]; !got.Tied {
 		t.Error("second beat's note is not marked Tied")
@@ -375,20 +364,17 @@ func TestTieSemantics(t *testing.T) {
 		t.Errorf("events = %+v, want one event (0,3840) key 40", evs)
 	}
 
-	// A tie merges across a bar line.
 	s = mustParse(t, "0.6.1 | ~0.6.1")
 	evs = s.Events()
 	if len(evs) != 1 || evs[0].Start != 0 || evs[0].End != 7680 {
 		t.Errorf("events = %+v, want one event (0,7680)", evs)
 	}
 
-	// A tie to a different fret degrades to a fresh attack.
 	s = mustParse(t, "0.6.2 ~3.6.2")
 	if evs = s.Events(); len(evs) != 2 {
 		t.Errorf("got %d events, want 2 (mismatched tie must not merge)", len(evs))
 	}
 
-	// "~" on a chord ties every note.
 	s = mustParse(t, "(0.6 2.5).2 ~(0.6 2.5).2")
 	evs = s.Events()
 	if len(evs) != 2 {
@@ -401,7 +387,6 @@ func TestTieSemantics(t *testing.T) {
 		}
 	}
 
-	// "~" on a single chord note ties just that string.
 	s = mustParse(t, "(0.6 2.5).2 (~0.6 4.5).2")
 	evs = s.Events()
 	if len(evs) != 3 {
@@ -457,8 +442,7 @@ func TestMIDINumberTuning(t *testing.T) {
 }
 
 func TestMisalignedTimeChange(t *testing.T) {
-	// The \time in the second track's section lands at tick 3840, inside
-	// the first track's already-parsed second 4/4 bar boundary layout.
+
 	src := "0.6.1 | 0.6.1 |\n\\track B\n0.6.1 |\n\\time 3/4\n0.6.2. |"
 	_, err := Parse([]byte(src), "test")
 	if err == nil {
@@ -470,11 +454,7 @@ func TestMisalignedTimeChange(t *testing.T) {
 }
 
 func TestTempoThenTrackAnchorsAtPieceTick(t *testing.T) {
-	// A \tempo written between one track's last bar and a \track directive
-	// takes effect at the piece tick where it was written (the current
-	// track's end), not at the new track's first bar. Applying it at the
-	// new track's first bar — tick 0 — used to silently replace the header
-	// tempo and retroactively re-tempo the whole piece.
+
 	s := mustParse(t, "0.6.1 |\n\\tempo 140\n\\track B\n0.6.1 | 0.6.1 |")
 	want := score.TempoMap{
 		{Tick: 0, USPerQuarter: score.USPerQuarter(120)},
@@ -491,10 +471,7 @@ func TestTempoThenTrackAnchorsAtPieceTick(t *testing.T) {
 }
 
 func TestTimeThenTrackAnchorsAtPieceTick(t *testing.T) {
-	// \time anchors the same way: written between the first track's last
-	// bar and \track, it takes effect at the first track's end (tick
-	// 3840), so the new track's first bar is still 4/4 and its second bar
-	// picks up the 3/4.
+
 	s := mustParse(t, "0.6.1 |\n\\time 3/4\n\\track B\n0.6.1 | 0.6.2. |")
 	wantMeters := score.MeterMap{{Tick: 0, Num: 4, Den: 4}, {Tick: 3840, Num: 3, Den: 4}}
 	if len(s.Meters) != len(wantMeters) {
@@ -516,9 +493,6 @@ func TestTimeThenTrackAnchorsAtPieceTick(t *testing.T) {
 		t.Errorf("track B bar 2 = start %d meter %d/%d, want 3840 3/4", b.Start, b.Num, b.Den)
 	}
 
-	// A \time-then-track whose new track cannot fill the still-4/4 first
-	// bar stays a loud, positioned error rather than silently re-metering
-	// the piece.
 	_, err := Parse([]byte("0.6.1 |\n\\time 3/4\n\\track B\n0.6.2. |"), "test")
 	if err == nil {
 		t.Fatal("misaligned \\time-then-track parsed, want an error")
@@ -530,7 +504,7 @@ func TestTimeThenTrackAnchorsAtPieceTick(t *testing.T) {
 }
 
 func TestNoteAtMIDICeiling(t *testing.T) {
-	// tuning 97 + capo 0 + fret 30 = exactly 127 is still accepted.
+
 	s := mustParse(t, "\\tuning 97\n30.1.1")
 	if evs := s.Events(); len(evs) != 1 || evs[0].Key != 127 {
 		t.Errorf("events = %+v, want one event with key 127", evs)
@@ -563,13 +537,6 @@ func TestNoBars(t *testing.T) {
 	}
 }
 
-// TestPendingDirectiveConflictRejected: the parser holds ONE pending
-// \tempo and one pending \time. Two of a kind at the same anchor are
-// last-wins (the map would replace a same-tick entry anyway), but when a
-// \track switch moves the anchor the two apply at different piece ticks —
-// keeping only the second silently erased the first from the piece (the
-// track-A-end \tempo 140 below simply vanished). That is now a loud,
-// positioned error.
 func TestPendingDirectiveConflictRejected(t *testing.T) {
 	for _, tc := range []struct {
 		name, src, want string
@@ -600,8 +567,6 @@ func TestPendingDirectiveConflictRejected(t *testing.T) {
 		})
 	}
 
-	// Same anchor, no track switch: the second replaces the first, which
-	// is what the map would do with two same-tick entries anyway.
 	s := mustParse(t, "0.6.1 |\n\\tempo 140\n\\tempo 100\n0.6.1 |")
 	want := score.TempoMap{
 		{Tick: 0, USPerQuarter: score.USPerQuarter(120)},
@@ -617,12 +582,6 @@ func TestPendingDirectiveConflictRejected(t *testing.T) {
 	}
 }
 
-// TestEndAnchoredDirectiveRejected: a \tempo or \time whose anchor is the
-// very END of the piece changes nothing audible, and Format refuses to
-// write the entry (no bar starts there) — so accepting it parsed a piece
-// that could never be saved. Both spellings of the trap — flushed through
-// a shorter second track, and still pending at end of input — are now
-// loud, positioned errors.
 func TestEndAnchoredDirectiveRejected(t *testing.T) {
 	for _, tc := range []struct {
 		name, src, want string
@@ -661,10 +620,6 @@ func TestEndAnchoredDirectiveRejected(t *testing.T) {
 		})
 	}
 
-	// The flush itself is the fix's other half: a directive left pending
-	// at end of input whose anchor sits MID-piece (another track goes on
-	// past it) used to be dropped silently — authored text ignored in
-	// playback. It now lands at its anchor like any flushed directive.
 	s := mustParse(t, "0.6.1 | 0.6.1 |\n\\track B\n0.6.1 |\n\\tempo 90")
 	want := score.Tempo{Tick: 3840, USPerQuarter: score.USPerQuarter(90)}
 	found := false
@@ -678,13 +633,8 @@ func TestEndAnchoredDirectiveRejected(t *testing.T) {
 	}
 }
 
-// TestBareCarriageReturnEndsLine: the scanner broke tokens and beats on a
-// bare "\r" everywhere EXCEPT restOfLine and args — so a classic-Mac file
-// (lines terminated by "\r" alone) ran its whole directive line into the
-// title, and a lone "\r" inside a \track line survived into Track.Name,
-// text Format refuses: a piece that parsed and could never be saved.
 func TestBareCarriageReturnEndsLine(t *testing.T) {
-	// A classic-Mac piece parses like its "\n" twin.
+
 	s := mustParse(t, "\\title Mac Piece\r\\tempo 100\r\\track Lead\r0.6.1 |\r")
 	if s.Title != "Mac Piece" {
 		t.Errorf("Title = %q, want the title line ended at the bare CR", s.Title)
@@ -696,14 +646,13 @@ func TestBareCarriageReturnEndsLine(t *testing.T) {
 		t.Errorf("tempo = %d, want 100 BPM applied", got)
 	}
 
-	// Whatever restOfLine now hands back can always be written again.
 	for _, src := range []string{
 		"\\title A\rB\n0.6.1 |",
 		"\\track A\r0.6.1 |\n",
 	} {
 		s, err := Parse([]byte(src), "test")
 		if err != nil {
-			continue // the CR-split remainder may well be a parse error
+			continue
 		}
 		if _, err := Format(s); err != nil {
 			t.Errorf("Parse accepted %q but Format refused: %v", src, err)

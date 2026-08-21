@@ -1,6 +1,3 @@
-// Package integration holds cross-package tests: the cross-format fixture
-// corpus invariant (ROADMAP Phase 0) and an end-to-end offline render
-// through the real engine and synth.
 package integration
 
 import (
@@ -27,11 +24,6 @@ func testdata(t *testing.T, name string) string {
 	return p
 }
 
-// TestCrossFormatFixture asserts the corpus invariant (ROADMAP Phase 0,
-// completed by Phase 3): the canonical riff in every supported format
-// produces identical flattened events. Pitch and timing must agree
-// everywhere; fingering agrees for the formats that author it (.gtab,
-// .gp, .musicxml) while MIDI's is inferred.
 func TestCrossFormatFixture(t *testing.T) {
 	ref, err := textfmt.ParseFile(testdata(t, "fixture_riff.gtab"))
 	if err != nil {
@@ -43,7 +35,7 @@ func TestCrossFormatFixture(t *testing.T) {
 		name      string
 		events    []score.NoteEvent
 		warns     []string
-		fingering bool // format authors string/fret; must match .gtab exactly
+		fingering bool
 	}
 	var all []imported
 	for _, c := range []struct {
@@ -84,9 +76,6 @@ func TestCrossFormatFixture(t *testing.T) {
 	}
 }
 
-// TestEndToEndRender plays the canonical riff through the real engine and
-// Karplus-Strong synth and checks the audio is sane: silence before the
-// first onset, energy after it, and a decaying tail past the last note.
 func TestEndToEndRender(t *testing.T) {
 	sc, err := textfmt.ParseFile(testdata(t, "fixture_riff.gtab"))
 	if err != nil {
@@ -96,7 +85,6 @@ func TestEndToEndRender(t *testing.T) {
 	eng := engine.New(sc, engine.Options{SampleRate: sr, Voices: synth.NewPluck})
 	eng.Play()
 
-	// The riff is 16 quarters at 120 BPM = 8 s; render 10 s for the tail.
 	total := 10 * sr
 	left := make([]float32, total)
 	right := make([]float32, total)
@@ -117,35 +105,31 @@ func TestEndToEndRender(t *testing.T) {
 		return math.Sqrt(sum / float64(2*(to-from)))
 	}
 
-	// First onset is at tick 0 — audio from the very start.
 	if got := rms(0, sr/2); got < 1e-4 {
 		t.Errorf("first half-second is silent (rms %g); expected the riff", got)
 	}
-	// Between 8 s and 8.5 s the last note (whole-note E) is still decaying.
+
 	tail := rms(8*sr, 8*sr+sr/2)
 	if tail <= 0 {
 		t.Error("tail is dead silent; expected KS decay")
 	}
-	// By 9.5-10 s it should have decayed well below the sounding level.
+
 	late := rms(int(9.5*sr), total)
 	if late > tail {
 		t.Errorf("tail is not decaying: late rms %g > early tail rms %g", late, tail)
 	}
-	// Nothing should clip.
+
 	for i := 0; i < total; i++ {
 		if left[i] > 1 || left[i] < -1 || right[i] > 1 || right[i] < -1 {
 			t.Fatalf("sample %d clips: L=%g R=%g", i, left[i], right[i])
 		}
 	}
-	// Playback must have reached the end and stopped (no loop set).
+
 	if eng.Playing() {
 		t.Error("engine still playing 2 s past the score end")
 	}
 }
 
-// TestLoopedRenderIsPeriodic loops bar 2 of the canonical riff at half
-// speed and asserts the engine actually loops (pass count advances) — the
-// audio-level sample-accuracy assertions live in the engine's own tests.
 func TestLoopedRenderIsPeriodic(t *testing.T) {
 	sc, err := textfmt.ParseFile(testdata(t, "fixture_riff.gtab"))
 	if err != nil {
@@ -153,12 +137,11 @@ func TestLoopedRenderIsPeriodic(t *testing.T) {
 	}
 	const sr = 48000
 	eng := engine.New(sc, engine.Options{SampleRate: sr, Voices: synth.NewPluck})
-	eng.SetLoop(4*score.PPQ, 8*score.PPQ) // bar 2
+	eng.SetLoop(4*score.PPQ, 8*score.PPQ)
 	eng.SetTempoScale(0.5)
 	eng.SeekTick(4 * score.PPQ)
 	eng.Play()
 
-	// One pass = 4 quarters at 60 effective BPM = 4 s. Render 13 s ≈ 3 passes.
 	left := make([]float32, 13*sr)
 	right := make([]float32, 13*sr)
 	eng.RenderFrames(left, right)

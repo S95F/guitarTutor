@@ -7,207 +7,108 @@ import (
 	"github.com/hajimehoshi/ebiten/v2"
 )
 
-// A Screen is one full-window mode of the application: the start screen,
-// the settings screen, the practice view. The methods are exactly
-// ebiten.Game's minus Layout (the Shell owns the logical size), so the
-// practice App satisfies this interface without modification.
-//
-// A Screen signals that it is finished by returning errQuit from Update.
-// The Shell pops it and reveals whatever was underneath; when the last
-// screen finishes, the application exits. A Screen that wants to open
-// another one calls Shell.Show — screens are constructed by the package
-// that hosts them, so they may capture the Shell they belong to.
-//
-// A Screen that owns something beyond memory — a background goroutine, an
-// audio device — implements the optional Closer extension below, and the
-// Shell releases it on the way out.
 type Screen interface {
 	Update() error
 	Draw(*ebiten.Image)
 }
 
-// A Closer is the optional extension a Screen implements when leaving it
-// must release something: the Shell calls Close exactly once, when the
-// screen is popped, before the screen beneath resumes.
-//
-// This is how the settings screen cancels a calibration in flight instead
-// of letting it hold the audio device for the rest of its 20 s timeout,
-// long after the screen that started it is gone. Close must return
-// promptly — it runs on the game loop, so any wait it does for a
-// goroutine to unwind has to be bounded.
-//
-// It is declared as its own interface rather than folded into Screen so
-// that every existing screen keeps satisfying Screen unchanged; the Shell
-// probes for it with a type assertion.
 type Closer interface {
 	Close()
 }
 
-// An Opener turns a piece on disk into a practice screen, and tears the
-// audio down again afterwards. It is the seam between the UI and
-// everything that needs an engine, a synth, and an audio device: the UI
-// package knows how to show a file browser, and nothing about how to
-// build a playback pipeline. cmd/musictutor implements it.
 type Opener interface {
-	// Open loads path and returns the practice screen for it, along with
-	// any importer warnings worth showing the user.
 	Open(path string) (Screen, []string, error)
-	// CloseCurrent stops and releases the audio the last Open started.
-	// The Shell calls it when the practice screen is popped, so leaving
-	// a piece never leaks a stream.
+
 	CloseCurrent()
 }
 
-// Services is what screens can ask of the application beyond opening a
-// piece: the persisted preferences, and the audio devices to choose
-// between. Implemented by cmd/musictutor; a nil field means that
-// facility is unavailable in this build or on this machine (no live
-// audio backend, for instance), and screens must degrade rather than
-// assume.
 type Services struct {
-	// Opener loads pieces. Required.
 	Opener Opener
-	// Prefs reads and writes persisted settings. Required.
+
 	Prefs Prefs
-	// Audio enumerates devices and runs calibration. Nil when the build
-	// or machine has no duplex backend: the settings screen then shows
-	// why live mode is unavailable instead of an empty device list.
+
 	Audio AudioServices
-	// Library lists and describes the pieces the application manages —
-	// the ones written in its own editor and kept in its own folder. Nil
-	// means this build manages none, and the start screen shows the two
-	// path-based lists without a library pane rather than an empty one.
+
 	Library Library
 }
 
-// A PieceInfo describes one piece in the library. It is what makes that
-// pane different in kind from the two beside it: a recent is a PATH, and
-// what it points at is anybody's guess until it is opened, whereas the
-// application has read every piece in its own folder and can say what is
-// in it.
 type PieceInfo struct {
-	// Path is the file. Name is its base name without the extension, and
-	// Title the piece's own title, which is usually but not always the
-	// same thing.
 	Path  string
 	Name  string
 	Title string
-	// Summary is one line describing the music: meter, tempo, how many
-	// bars, how many tracks.
+
 	Summary string
-	// Modified is the file's timestamp, for sorting and for saying how
-	// long ago it was touched.
+
 	Modified time.Time
-	// Problem explains why a file in the folder could not be described —
-	// it is listed anyway, because a piece that will not parse is exactly
-	// the one the user needs to find and fix.
+
 	Problem string
 }
 
-// A Library lists the pieces the application manages.
 type Library interface {
-	// Dir is the folder the pieces live in, for display.
 	Dir() string
-	// Scan reads the folder and describes what is in it. It touches the
-	// disk and parses every piece, so callers run it off the game loop.
+
 	Scan() ([]PieceInfo, error)
 }
 
-// Prefs is the persisted-settings facade the UI works against, so no
-// screen has to know about the config file's shape or location.
 type Prefs interface {
-	// Recents returns recently-opened piece paths, most recent first.
 	Recents() []string
-	// Created returns recently-WRITTEN piece paths, most recent first.
-	// The two lists answer different questions — what was I practising,
-	// and what was I working on — and a piece legitimately appears in
-	// both.
+
 	Created() []string
-	// AddCreated records a piece as written.
+
 	AddCreated(path string)
-	// HintHidden reports whether the start screen's getting-started strip
-	// has been dismissed, and SetHintHidden puts it away (or back).
-	// Everything the strip points at is also in settings, so it has to be
-	// possible to be done with it for good.
+
 	HintHidden() bool
 	SetHintHidden(hidden bool)
-	// AddRecent records a piece as opened.
+
 	AddRecent(path string)
-	// SoundFont returns the configured .sf2 path ("" = built-in pluck).
+
 	SoundFont() string
-	// SetSoundFont records the .sf2 path ("" selects the built-in).
+
 	SetSoundFont(path string)
-	// CountIn returns the configured count-in beats.
+
 	CountIn() int
-	// SetCountIn records the count-in beats.
+
 	SetCountIn(beats int)
-	// Devices returns the preferred capture and playback device IDs.
+
 	Devices() (captureID, playbackID string)
-	// SetDevices records the preferred device IDs.
+
 	SetDevices(captureID, playbackID string)
-	// Save persists the current values, returning any write error for
-	// the screen to surface.
+
 	Save() error
 }
 
-// A DeviceOption is one selectable audio endpoint.
 type DeviceOption struct {
 	ID      string
 	Name    string
 	Default bool
 }
 
-// AudioServices exposes device selection and latency calibration.
 type AudioServices interface {
-	// BackendName identifies the audio backend for display.
 	BackendName() string
-	// Devices lists the capture and playback endpoints.
+
 	Devices() (capture, playback []DeviceOption, err error)
-	// CalibratedOffset reports the stored round-trip offset in frames
-	// for a device pair and whether one has been measured.
+
 	CalibratedOffset(captureID, playbackID string) (frames int, ok bool)
-	// Calibrate measures the round trip for a device pair, storing the
-	// result. It blocks for several seconds, so screens must run it off
-	// the game loop and poll; progress is reported in [0, 1].
+
 	Calibrate(captureID, playbackID string, progress func(float64)) (frames int, confidence float64, err error)
 }
 
-// A Shell hosts a stack of screens and is the ebiten.Game the window
-// actually runs. The screen on top receives Update and Draw; the ones
-// beneath it are suspended, not destroyed, so returning from settings or
-// from a piece lands exactly where the user left off.
 type Shell struct {
 	svc   Services
 	stack []Screen
-	// pending defers stack edits made during Update until the end of the
-	// frame, so a screen can Show or finish from inside its own Update
-	// without the slice changing under the caller.
+
 	pending []func()
-	// quitting is set by Quit's deferred edit and makes it terminal: any
-	// stack edit queued after the quit in the same frame becomes a no-op,
-	// so nothing can resurrect an emptied stack and leave the application
-	// running with its screens gone.
+
 	quitting bool
 	title    string
 }
 
-// NewShell creates the application host with root as its first screen.
 func NewShell(svc Services, root Screen) *Shell {
 	return &Shell{svc: svc, stack: []Screen{root}, title: "musicTutor"}
 }
 
-// Services exposes the application facilities to screens.
 func (s *Shell) Services() Services { return s.svc }
 
-// Show pushes a screen on top of the current one. Safe to call from
-// inside a screen's Update: the push takes effect at the end of the frame.
-//
-// The quitting guard here (and in Replace) is what makes Quit terminal:
-// pending edits run in the order they were queued, so a Show queued in
-// the same frame AFTER a Quit — the Q key and a chip click can both fire
-// in one Update — would otherwise re-populate the stack Quit just
-// emptied, and the application would go on running with the piece's
-// audio orphaned instead of exiting.
 func (s *Shell) Show(sc Screen) {
 	s.pending = append(s.pending, func() {
 		if s.quitting {
@@ -217,8 +118,6 @@ func (s *Shell) Show(sc Screen) {
 	})
 }
 
-// Pop finishes the current screen and reveals the one beneath. Popping
-// the last screen exits the application. Safe to call from inside Update.
 func (s *Shell) Pop() {
 	s.pending = append(s.pending, func() {
 		if n := len(s.stack); n > 0 {
@@ -227,7 +126,6 @@ func (s *Shell) Pop() {
 	})
 }
 
-// Replace swaps the current screen for another without growing the stack.
 func (s *Shell) Replace(sc Screen) {
 	s.pending = append(s.pending, func() {
 		if s.quitting {
@@ -241,7 +139,6 @@ func (s *Shell) Replace(sc Screen) {
 	})
 }
 
-// SetTitle updates the window title (e.g. to the open piece's name).
 func (s *Shell) SetTitle(t string) {
 	if t == s.title {
 		return
@@ -250,19 +147,8 @@ func (s *Shell) SetTitle(t string) {
 	ebiten.SetWindowTitle(t)
 }
 
-// Depth reports how many screens are stacked; 1 means the root is
-// showing. Screens use it to decide whether "back" or "quit" is the
-// honest label for leaving.
 func (s *Shell) Depth() int { return len(s.stack) }
 
-// Quit ends the application at the end of the frame: every screen is
-// dropped — releasing what each owns, top-down, exactly as popping them
-// one at a time would — and Update then reports errQuit to Ebitengine.
-// It is what the practice view's Q key does under the Shell; the binding
-// reads "Quit musicTutor", and until this existed nothing an integrator
-// could wire made that true (audit D4). The Opener's audio is not
-// released here: the application's run function owns that teardown (it
-// deferred CloseCurrent), and the process is ending either way.
 func (s *Shell) Quit() {
 	s.pending = append(s.pending, func() {
 		s.quitting = true
@@ -275,9 +161,6 @@ func (s *Shell) Quit() {
 	})
 }
 
-// OpenPiece loads a piece through the Opener and shows its practice
-// screen, recording it as recently used. The returned warnings are the
-// importer's; the error is for the caller to display.
 func (s *Shell) OpenPiece(path string) ([]string, error) {
 	sc, warns, err := s.loadPiece(path)
 	if err != nil {
@@ -287,18 +170,6 @@ func (s *Shell) OpenPiece(path string) ([]string, error) {
 	return warns, nil
 }
 
-// ReopenPiece loads a piece again and puts the fresh screen where the
-// current one is, rather than stacking a second copy on top of it. It is
-// what the practice view's reload does after a setting that is only read
-// at open time — the audio device, the SoundFont, the count-in — has
-// changed underneath a piece already playing.
-//
-// A load that fails leaves the stack alone: the caller still has the
-// screen it had, and gets the error to show on it. That is why the
-// replacement is queued only after Open has succeeded, and why this is
-// not simply a Pop followed by an OpenPiece — the stack edits are applied
-// in the order they were queued, so a pop queued first would take the
-// current screen away even when nothing arrived to replace it.
 func (s *Shell) ReopenPiece(path string) ([]string, error) {
 	sc, warns, err := s.loadPiece(path)
 	if err != nil {
@@ -308,8 +179,6 @@ func (s *Shell) ReopenPiece(path string) ([]string, error) {
 	return warns, nil
 }
 
-// loadPiece opens a piece through the Opener and records it as recently
-// used, without touching the screen stack.
 func (s *Shell) loadPiece(path string) (Screen, []string, error) {
 	if s.svc.Opener == nil {
 		return nil, nil, errNoOpener
@@ -320,37 +189,32 @@ func (s *Shell) loadPiece(path string) (Screen, []string, error) {
 	}
 	if s.svc.Prefs != nil {
 		s.svc.Prefs.AddRecent(path)
-		// A failed save must not block practice; the settings screen
-		// surfaces persistence problems.
+
 		_ = s.svc.Prefs.Save()
 	}
 	return sc, warns, nil
 }
 
-// errNoOpener is what a build with no importer wired reports rather than
-// panicking on a nil interface.
 var errNoOpener = fmt.Errorf("no importer is available in this build")
 
-// Update advances the top screen and applies any stack changes it made.
 func (s *Shell) Update() error {
 	if len(s.stack) == 0 {
 		return errQuit
 	}
 	top := s.stack[len(s.stack)-1]
 	err := top.Update()
-	// A screen that finished pops itself; the last one ends the app.
+
 	if err == errQuit {
 		if len(s.stack) == 1 && len(s.pending) == 0 {
 			return errQuit
 		}
 		s.Pop()
-		// Leaving a practice screen releases its audio.
+
 		if _, isPractice := top.(*App); isPractice && s.svc.Opener != nil {
 			s.svc.Opener.CloseCurrent()
 			s.SetTitle("musicTutor")
 		}
-		// A screen that owns resources of its own releases them here, so
-		// nothing it started outlives it (see Closer).
+
 		if c, ok := top.(Closer); ok {
 			c.Close()
 		}
@@ -369,17 +233,14 @@ func (s *Shell) Update() error {
 	return nil
 }
 
-// Draw renders the top screen.
 func (s *Shell) Draw(dst *ebiten.Image) {
 	if n := len(s.stack); n > 0 {
 		s.stack[n-1].Draw(dst)
 	}
 }
 
-// Layout fixes the logical resolution for every screen.
 func (s *Shell) Layout(int, int) (int, int) { return screenW, screenH }
 
-// Run opens the window and blocks until the user quits.
 func (s *Shell) Run() error {
 	ebiten.SetWindowSize(screenW, screenH)
 	ebiten.SetWindowTitle(s.title)

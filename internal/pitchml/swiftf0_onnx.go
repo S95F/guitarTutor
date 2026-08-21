@@ -14,19 +14,8 @@ import (
 	"github.com/S95F/musicTutor/internal/pitch"
 )
 
-// This file is the only place in musicTutor that touches
-// github.com/yalue/onnxruntime_go, and it exists only under the onnx build
-// tag. The binding dlopen's the ONNX Runtime at run time from a path we
-// hand it, which is why D4 chose it: no import library, no headers, no
-// system install, and a default build that has never heard of it.
-
-// Available reports whether this build includes the ONNX backend.
 func Available() bool { return true }
 
-// New loads the SwiftF0 model and returns it as a pitch.F0Estimator.
-// Resolution of both files is described on Options; every failure names
-// the path it tried and the action that fixes it. The result also
-// satisfies Estimator, so a caller owning its lifetime should Close it.
 func New(opts Options) (pitch.F0Estimator, error) {
 	res, err := osResolver().resolve(opts)
 	if err != nil {
@@ -47,16 +36,11 @@ func New(opts Options) (pitch.F0Estimator, error) {
 	return est, nil
 }
 
-// The ONNX environment is process-global in the C API: one shared library,
-// one OrtEnv, initialized once. Guard it so two New calls (settings
-// reopened, two detectors) cannot race the loader.
 var (
 	runtimeMu   sync.Mutex
 	runtimePath string
 )
 
-// initRuntime loads the ONNX Runtime shared library from path, once per
-// process.
 func initRuntime(path string) error {
 	runtimeMu.Lock()
 	defer runtimeMu.Unlock()
@@ -75,25 +59,13 @@ func initRuntime(path string) error {
 	return nil
 }
 
-// An ortRunner is the modelRunner backed by a real ONNX session.
-//
-// Steady state must not allocate, so the session is an AdvancedSession
-// with fixed input and output tensors — its Run passes pointers it already
-// holds and allocates nothing, unlike the dynamic session, which builds
-// value slices per call. The catch is that fixed output tensors need the
-// output shape up front, and SwiftF0's output length depends on the input
-// length. resize therefore runs the model once through a throwaway dynamic
-// session, keeps the output tensors that run allocated, and builds the
-// fixed session around them. The .onnx bytes are held for the lifetime of
-// the runner so that this can be redone (cheaply, from memory) if the
-// analysis window length ever changes.
 type ortRunner struct {
 	label     string
 	data      []byte
 	inputName string
-	outNames  []string // exactly two: pitch, then confidence
+	outNames  []string
 	inputRank int
-	staticLen int // >0 when the model fixes its own input length
+	staticLen int
 
 	session *ort.AdvancedSession
 	in      *ort.Tensor[float32]
@@ -102,9 +74,6 @@ type ortRunner struct {
 	confT   *ort.Tensor[float32]
 }
 
-// newORTRunner reads the model and works out its input and output layout
-// from the graph's own metadata rather than hard-coding SwiftF0's tensor
-// names, which have changed across its exports.
 func newORTRunner(modelPath string) (*ortRunner, error) {
 	data, err := os.ReadFile(modelPath)
 	if err != nil {
@@ -125,8 +94,6 @@ func newORTRunner(modelPath string) (*ortRunner, error) {
 	return r, nil
 }
 
-// describeInput validates the single audio input and records its rank and
-// (if fixed) its length.
 func (r *ortRunner) describeInput(modelPath string, inputs []ort.InputOutputInfo) error {
 	if len(inputs) != 1 {
 		return fmt.Errorf("%w: %s has %d inputs, want 1 audio input (%s)", ErrModelLayout, modelPath, len(inputs), describeAll(inputs))
@@ -150,9 +117,6 @@ func (r *ortRunner) describeInput(modelPath string, inputs []ort.InputOutputInfo
 	return nil
 }
 
-// describeOutputs picks the pitch and confidence outputs by name, falling
-// back to positional order when the names are unfamiliar. Requesting only
-// these two means extra outputs (timestamps, voicing masks) cost nothing.
 func (r *ortRunner) describeOutputs(modelPath string, outputs []ort.InputOutputInfo) error {
 	pitchIdx := indexMatching(outputs, "pitch", "f0", "freq")
 	confIdx := indexMatching(outputs, "conf", "voic", "prob")
@@ -160,7 +124,7 @@ func (r *ortRunner) describeOutputs(modelPath string, outputs []ort.InputOutputI
 		if len(outputs) != 2 {
 			return fmt.Errorf("%w: cannot tell which of %s's outputs are pitch and confidence (%s)", ErrModelLayout, modelPath, describeAll(outputs))
 		}
-		// Two unnamed-ish outputs: SwiftF0 emits pitch first.
+
 		pitchIdx, confIdx = 0, 1
 	}
 	for _, i := range []int{pitchIdx, confIdx} {
@@ -173,8 +137,6 @@ func (r *ortRunner) describeOutputs(modelPath string, outputs []ort.InputOutputI
 	return nil
 }
 
-// indexMatching returns the first output whose name contains any of the
-// substrings, case-insensitively, or -1.
 func indexMatching(infos []ort.InputOutputInfo, substrings ...string) int {
 	for i, info := range infos {
 		name := strings.ToLower(info.Name)
@@ -187,7 +149,6 @@ func indexMatching(infos []ort.InputOutputInfo, substrings ...string) int {
 	return -1
 }
 
-// describeAll renders a model's inputs or outputs for an error message.
 func describeAll(infos []ort.InputOutputInfo) string {
 	parts := make([]string, len(infos))
 	for i := range infos {
@@ -198,10 +159,6 @@ func describeAll(infos []ort.InputOutputInfo) string {
 
 func (r *ortRunner) name() string { return r.label }
 
-// sessionOptions pins ONNX Runtime to a single thread. EstimateF0 runs on
-// the analysis goroutine once per hop (every ~10 ms); a thread pool spun
-// up per inference would add scheduling jitter to a real-time path and
-// oversubscribe a machine that is also rendering audio and a UI.
 func sessionOptions() (*ort.SessionOptions, error) {
 	o, err := ort.NewSessionOptions()
 	if err != nil {
@@ -218,7 +175,6 @@ func sessionOptions() (*ort.SessionOptions, error) {
 	return o, nil
 }
 
-// resize implements modelRunner.
 func (r *ortRunner) resize(samples int) (int, error) {
 	n := samples
 	if r.staticLen > 0 {
@@ -241,8 +197,6 @@ func (r *ortRunner) resize(samples int) (int, error) {
 		return 0, fmt.Errorf("pitchml: allocating a %s input tensor: %w", shape, err)
 	}
 
-	// Probe: one run through a dynamic session tells us the output
-	// shapes and hands back tensors already sized for them.
 	outs, err := r.probeOutputs(in)
 	if err != nil {
 		in.Destroy()
@@ -280,9 +234,6 @@ func (r *ortRunner) resize(samples int) (int, error) {
 	return n, nil
 }
 
-// probeOutputs runs the model once through a throwaway dynamic session so
-// ONNX Runtime allocates output tensors of the right shape, which the
-// fixed session then reuses forever.
 func (r *ortRunner) probeOutputs(in *ort.Tensor[float32]) ([]ort.Value, error) {
 	opts, err := sessionOptions()
 	if err != nil {
@@ -310,7 +261,6 @@ func (r *ortRunner) probeOutputs(in *ort.Tensor[float32]) ([]ort.Value, error) {
 	return outs, nil
 }
 
-// destroyAll releases every non-nil value in vs.
 func destroyAll(vs []ort.Value) {
 	for _, v := range vs {
 		if v != nil {
@@ -319,7 +269,6 @@ func destroyAll(vs []ort.Value) {
 	}
 }
 
-// input implements modelRunner.
 func (r *ortRunner) input() []float32 {
 	if r.in == nil {
 		return nil
@@ -327,8 +276,6 @@ func (r *ortRunner) input() []float32 {
 	return r.in.GetData()
 }
 
-// run implements modelRunner. No allocation: the session, its tensors and
-// their backing slices were all built by resize.
 func (r *ortRunner) run() ([]float32, []float32, error) {
 	if r.session == nil {
 		return nil, nil, fmt.Errorf("pitchml: run before resize")
@@ -339,8 +286,6 @@ func (r *ortRunner) run() ([]float32, []float32, error) {
 	return r.pitchT.GetData(), r.confT.GetData(), nil
 }
 
-// releaseSession tears down the session and its tensors, in that order:
-// the tensors must outlive the session that points at them.
 func (r *ortRunner) releaseSession() {
 	if r.session != nil {
 		r.session.Destroy()
@@ -354,9 +299,6 @@ func (r *ortRunner) releaseSession() {
 	}
 }
 
-// close implements modelRunner. The process-global ONNX environment is
-// deliberately left initialized: another estimator may still be running,
-// and tearing down the OrtEnv while one is would crash the process.
 func (r *ortRunner) close() error {
 	r.releaseSession()
 	r.data = nil

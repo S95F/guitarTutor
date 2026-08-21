@@ -1,25 +1,3 @@
-// Command gengp writes testdata/fixture_riff.gp: the canonical 4-bar
-// fixture riff (see docs/TEXTFORMAT.md) as a Guitar Pro 7/8-style .gp
-// file — a plain ZIP archive holding Content/score.gpif, the
-// id-referential GPIF XML document. It is the .gp member of the
-// cross-format fixture corpus (ROADMAP Phase 0/3); internal/gpimport is
-// tested against its exact tick content.
-//
-// The archive holds only the gpif entry. Real Guitar Pro 8 exports also
-// carry sidecar entries (a VERSION marker, binary stylesheets, layout
-// and part configuration) that we cannot reproduce faithfully, so they
-// are omitted rather than faked; the importer ignores non-gpif entries
-// either way, and its tests cover archives with extra entries.
-//
-// Honesty note: this fixture is self-authored from the publicly
-// documented structure of the format (clean-room, docs/DECISIONS.md D3),
-// so the generator and the importer share one understanding of the
-// format. Files exported by Guitar Pro itself remain the untested gap —
-// see testdata/README-gp.txt.
-//
-// Bar 4 is authored as two tied half notes, exactly as the .gtab source
-// writes it; score.Events() merging them into one whole-note event is
-// the round-trip invariant the corpus pins down.
 package main
 
 import (
@@ -31,24 +9,18 @@ import (
 	"path/filepath"
 )
 
-// A gnote is one authored note: string and fret in the score convention
-// (string 1 = highest-pitched) plus tie flags. The generator converts to
-// GP's convention (string 0 = lowest-pitched) when emitting.
 type gnote struct {
 	str, fret  int
-	tieO, tieD bool // tie origin (into next) / destination (from previous)
+	tieO, tieD bool
 }
 
-// A gbeat is one authored beat: a rhythm name and its notes (none = rest).
 type gbeat struct {
 	rhythm string
 	notes  []gnote
 }
 
-// bars is the canonical fixture riff, bar by bar, matching
-// docs/TEXTFORMAT.md and the .gtab/.mid fixtures.
 var bars = [][]gbeat{
-	{ // Bar 1: eight eighth notes.
+	{
 		{"Eighth", []gnote{{str: 6, fret: 0}}},
 		{"Eighth", []gnote{{str: 6, fret: 3}}},
 		{"Eighth", []gnote{{str: 5, fret: 5}}},
@@ -58,23 +30,22 @@ var bars = [][]gbeat{
 		{"Eighth", []gnote{{str: 6, fret: 3}}},
 		{"Eighth", []gnote{{str: 6, fret: 0}}},
 	},
-	{ // Bar 2: quarter, quarter, half.
+	{
 		{"Quarter", []gnote{{str: 5, fret: 2}}},
 		{"Quarter", []gnote{{str: 5, fret: 0}}},
 		{"Half", []gnote{{str: 5, fret: 2}}},
 	},
-	{ // Bar 3: E5 power chord for a half, quarter rest, quarter note.
+	{
 		{"Half", []gnote{{str: 6, fret: 0}, {str: 5, fret: 2}, {str: 4, fret: 2}}},
 		{"Quarter", nil},
 		{"Quarter", []gnote{{str: 6, fret: 3}}},
 	},
-	{ // Bar 4: whole-note low E as two tied halves.
+	{
 		{"Half", []gnote{{str: 6, fret: 0, tieO: true}}},
 		{"Half", []gnote{{str: 6, fret: 0, tieD: true}}},
 	},
 }
 
-// nStrings is the fixture's string count (standard six-string tuning).
 const nStrings = 6
 
 func main() {
@@ -86,12 +57,10 @@ func main() {
 	}
 }
 
-// run writes the fixture .gp archive to path.
 func run(path string) error {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
-	// CreateHeader with a zero Modified time keeps the archive bytes
-	// reproducible run to run.
+
 	w, err := zw.CreateHeader(&zip.FileHeader{Name: "Content/score.gpif", Method: zip.Deflate})
 	if err != nil {
 		return err
@@ -112,17 +81,12 @@ func run(path string) error {
 	return nil
 }
 
-// buildGPIF emits the id-referential GPIF document for the riff. Ids are
-// assigned in emission order: rhythms by first use, notes and beats
-// sequentially, one voice and one bar per master bar.
 func buildGPIF() []byte {
 	var b bytes.Buffer
 	w := func(format string, args ...any) {
 		fmt.Fprintf(&b, format+"\n", args...)
 	}
 
-	// Pre-assign ids so referencing sections can be emitted in the
-	// conventional order (masters first, leaf tables last).
 	rhythmID := map[string]int{}
 	var rhythmOrder []string
 	type beatRec struct {
@@ -135,7 +99,7 @@ func buildGPIF() []byte {
 	}
 	var beatRecs []beatRec
 	var noteRecs []noteRec
-	voiceBeats := make([][]int, len(bars)) // beat ids per bar's voice
+	voiceBeats := make([][]int, len(bars))
 	for bi, bar := range bars {
 		for _, bt := range bar {
 			rid, ok := rhythmID[bt.rhythm]
@@ -183,7 +147,7 @@ func buildGPIF() []byte {
 	w(`        <Staff>`)
 	w(`          <Properties>`)
 	w(`            <Property name="Tuning">`)
-	// Open-string MIDI notes, low to high: standard EADGBE.
+
 	w(`              <Pitches>40 45 50 55 59 64</Pitches>`)
 	w(`            </Property>`)
 	w(`            <Property name="CapoFret">`)
@@ -236,8 +200,7 @@ func buildGPIF() []byte {
 		w(`    <Note id="%d">`, nr.id)
 		w(`      <Properties>`)
 		w(`        <Property name="String">`)
-		// GP counts string 0 at the lowest-pitched string; the score
-		// model counts string 1 at the highest.
+
 		w(`          <String>%d</String>`, nStrings-nr.n.str)
 		w(`        </Property>`)
 		w(`        <Property name="Fret">`)
@@ -262,7 +225,6 @@ func buildGPIF() []byte {
 	return b.Bytes()
 }
 
-// joinInts renders ids as the space-separated list GPIF uses.
 func joinInts(ids []int) string {
 	var b bytes.Buffer
 	for i, id := range ids {

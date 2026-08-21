@@ -23,8 +23,6 @@ func TestAddRecentOrdering(t *testing.T) {
 		t.Fatalf("after three adds Recents =\n %v\nwant %v", c.Recents, want)
 	}
 
-	// Re-opening a listed piece moves it to the front rather than
-	// duplicating it: the list stays a most-recent-first history.
 	c.AddRecent(p("a.gp"))
 	want = []string{p("a.gp"), p("c.gp"), p("b.gp")}
 	if !reflect.DeepEqual(c.Recents, want) {
@@ -44,18 +42,17 @@ func TestAddRecentIgnoresBlankPaths(t *testing.T) {
 func TestAddRecentCollapsesSpellingsOfOnePath(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
-	// Resolved working directory: on systems where the temp dir is behind
-	// a symlink, Getwd is what filepath.Abs will agree with.
+
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("Getwd: %v", err)
 	}
 
 	var c Config
-	c.AddRecent("song.gp")                                 // relative
-	c.AddRecent(filepath.Join(wd, "sub", "..", "song.gp")) // absolute, uncleaned
+	c.AddRecent("song.gp")
+	c.AddRecent(filepath.Join(wd, "sub", "..", "song.gp"))
 	if runtime.GOOS == "windows" {
-		c.AddRecent(strings.ReplaceAll(filepath.Join(wd, "song.gp"), `\`, "/")) // forward slashes
+		c.AddRecent(strings.ReplaceAll(filepath.Join(wd, "song.gp"), `\`, "/"))
 	}
 	if len(c.Recents) != 1 {
 		t.Fatalf("one file reached several ways gave %d entries: %v", len(c.Recents), c.Recents)
@@ -75,8 +72,7 @@ func TestAddRecentCaseSensitivityFollowsPlatform(t *testing.T) {
 	c.AddRecent(upper)
 
 	if runtime.GOOS == "windows" {
-		// One file on a case-insensitive file system: one entry, spelled
-		// the way it was most recently opened.
+
 		if !reflect.DeepEqual(c.Recents, []string{upper}) {
 			t.Errorf("Recents = %v, want [%q] (Windows folds case)", c.Recents, upper)
 		}
@@ -101,7 +97,7 @@ func TestAddRecentEnforcesCap(t *testing.T) {
 	if c.Recents[0] != newest {
 		t.Errorf("Recents[0] = %q, want the newest %q", c.Recents[0], newest)
 	}
-	// The oldest additions fell off the back, not the front.
+
 	oldest := filepath.Join(dir, "song00.gp")
 	for _, r := range c.Recents {
 		if r == oldest {
@@ -135,15 +131,12 @@ func TestForgetRecent(t *testing.T) {
 	c.AddRecent(p("b.gp"))
 	c.AddRecent(p("c.gp"))
 
-	// Forgetting a path that was never listed changes nothing.
 	before := append([]string(nil), c.Recents...)
 	c.ForgetRecent(p("nope.gp"))
 	if !reflect.DeepEqual(c.Recents, before) {
 		t.Errorf("forgetting an unlisted path changed Recents: %v, want %v", c.Recents, before)
 	}
 
-	// Forgetting matches the same way adding de-duplicates: uncleaned and
-	// (on Windows) differently-cased spellings still find the entry.
 	c.ForgetRecent(filepath.Join(dir, "sub", "..", "b.gp"))
 	want := []string{p("c.gp"), p("a.gp")}
 	if !reflect.DeepEqual(c.Recents, want) {
@@ -158,12 +151,11 @@ func TestForgetRecent(t *testing.T) {
 		c.ForgetRecent(p("c.gp"))
 	}
 
-	// Draining the list leaves nil, matching the zero Config.
 	c.ForgetRecent(p("a.gp"))
 	if c.Recents != nil {
 		t.Errorf("emptied Recents = %v, want nil", c.Recents)
 	}
-	// And on an already-empty list it is still a no-op.
+
 	c.ForgetRecent(p("a.gp"))
 	c.ForgetRecent("")
 	if c.Recents != nil {

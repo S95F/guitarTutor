@@ -14,8 +14,6 @@ import (
 	"github.com/S95F/musicTutor/internal/ui"
 )
 
-// oneBarScore builds a validated one-bar 4/4 piece at 120 BPM: exactly two
-// seconds long at scale 1.0 (PPQ*4 ticks at 500000 us per quarter).
 func oneBarScore(t *testing.T) *score.Score {
 	t.Helper()
 	sc := &score.Score{
@@ -40,9 +38,6 @@ func newEngine(sc *score.Score, opts engine.Options) *engine.Engine {
 	return engine.New(sc, opts)
 }
 
-// TestValidateScale is the regression test for finding A1's flag half:
-// -scale 0 and negative values used to panic runRender (division by zero /
-// negative allocation) and out-of-range values silently clamped.
 func TestValidateScale(t *testing.T) {
 	for _, s := range []float64{0.25, 0.7, 1.0, 2.0} {
 		if err := validateScale(s); err != nil {
@@ -61,8 +56,6 @@ func TestValidateScale(t *testing.T) {
 	}
 }
 
-// TestEnsureTracks is the regression test for finding A2: a valid track-less
-// score (reachable via MIDI import) used to crash play instead of erroring.
 func TestEnsureTracks(t *testing.T) {
 	empty := &score.Score{
 		Tempos: score.TempoMap{{Tick: 0, USPerQuarter: 500000}},
@@ -79,14 +72,10 @@ func TestEnsureTracks(t *testing.T) {
 	}
 }
 
-// TestRenderAllClampedScale is the regression test for finding A1: the old
-// runRender sized its buffer by the raw -scale flag while the engine clamps
-// to [0.25, 2.0]. renderAll must yield the full piece at the engine's actual
-// speed plus the exact tail, for the extreme accepted scale.
 func TestRenderAllClampedScale(t *testing.T) {
 	sc := oneBarScore(t)
 	eng := newEngine(sc, engine.Options{})
-	eng.SetTempoScale(0.25) // 2 s piece -> 8 s of audio
+	eng.SetTempoScale(0.25)
 
 	const tailSec = 2.0
 	left, right, err := renderAll(eng, tailSec, maxRenderFrames)
@@ -97,7 +86,7 @@ func TestRenderAllClampedScale(t *testing.T) {
 		t.Fatalf("channel length mismatch: %d vs %d", len(left), len(right))
 	}
 
-	const chunk = 4800 // renderAll's block size: max overshoot per pass
+	const chunk = 4800
 	wantPlay := 8 * sampleRate
 	wantTail := int(tailSec * sampleRate)
 	if len(left) < wantPlay+wantTail {
@@ -110,8 +99,6 @@ func TestRenderAllClampedScale(t *testing.T) {
 		t.Fatal("engine still playing after renderAll")
 	}
 
-	// The last beat (a half note, second half of the piece) must actually
-	// sound: the old truncation cut it off entirely at small scales.
 	var sum float64
 	for _, v := range left[wantPlay/2 : wantPlay] {
 		sum += float64(v) * float64(v)
@@ -121,14 +108,9 @@ func TestRenderAllClampedScale(t *testing.T) {
 	}
 }
 
-// TestRenderAllCountInAndTempoChange is the regression test for finding A4:
-// the old count-in-seconds formula integrated tempo changes inside the first
-// beat (the engine uses the constant tick-0 tempo) and divided by scale in
-// the wrong place, truncating the tail. renderAll must include the full
-// count-in, both tempo segments, and the exact tail.
 func TestRenderAllCountInAndTempoChange(t *testing.T) {
 	sc := oneBarScore(t)
-	// Tempo doubles mid-first-beat: the exact case the formula got wrong.
+
 	sc.Tempos = score.TempoMap{
 		{Tick: 0, USPerQuarter: 500000},
 		{Tick: 480, USPerQuarter: 250000},
@@ -144,10 +126,6 @@ func TestRenderAllCountInAndTempoChange(t *testing.T) {
 		t.Fatalf("renderAll: %v", err)
 	}
 
-	// Engine semantics: count-in beats use the tick-0 tempo (one beat =
-	// PPQ ticks * 500000us/PPQ = 0.5 s = 24000 frames), then the piece is
-	// 480 ticks at 500000 (12000 frames) + 3360 ticks at 250000 (42000
-	// frames).
 	const chunk = 4800
 	wantPlay := 2*24000 + 12000 + 42000
 	wantTail := int(tailSec * sampleRate)
@@ -159,11 +137,6 @@ func TestRenderAllCountInAndTempoChange(t *testing.T) {
 	}
 }
 
-// TestFlagFirstDiagnostic: a flag in command position ("musictutor
-// -listen song.gtab") used to print only the generic usage text, leaving
-// the actual mistake — flags follow a subcommand — for the user to
-// deduce. The diagnostic must name the argument and show the invocation
-// that would have worked.
 func TestFlagFirstDiagnostic(t *testing.T) {
 	got := flagFirstDiagnostic("-listen")
 	for _, want := range []string{`"-listen"`, "musictutor play -listen <file>"} {
@@ -173,12 +146,6 @@ func TestFlagFirstDiagnostic(t *testing.T) {
 	}
 }
 
-// TestCheckPieceArgument covers the bare-argument dispatch: a mistyped
-// subcommand used to reach the importer and die as `unsupported file
-// type ""` — a message that named neither the typo nor the fix. The two
-// failure shapes are told apart by a stat, and anything with a piece
-// extension passes through to the shell (even when it does not exist:
-// the start screen is where that error belongs).
 func TestCheckPieceArgument(t *testing.T) {
 	existing := filepath.Join(t.TempDir(), "notes.txt")
 	if err := os.WriteFile(existing, []byte("not a piece"), 0o644); err != nil {
@@ -187,7 +154,7 @@ func TestCheckPieceArgument(t *testing.T) {
 	cases := []struct {
 		name      string
 		arg       string
-		wantParts []string // nil means the argument must be accepted
+		wantParts []string
 	}{
 		{name: "mistyped subcommand", arg: "devcies",
 			wantParts: []string{`"devcies" is not a command or a piece file`, "musictutor help", ".gtab"}},
@@ -219,11 +186,6 @@ func TestCheckPieceArgument(t *testing.T) {
 	}
 }
 
-// TestLoadAgreesWithPieceExtensions pins the two extension lists to each
-// other: checkPieceArgument admits what ui.PieceExtensions lists, and
-// load must then import every one of them — an extension admitted by one
-// and rejected by the other would open a window just to say
-// "unsupported".
 func TestLoadAgreesWithPieceExtensions(t *testing.T) {
 	dir := t.TempDir()
 	for _, ext := range ui.PieceExtensions() {
@@ -237,10 +199,6 @@ func TestLoadAgreesWithPieceExtensions(t *testing.T) {
 	}
 }
 
-// TestSetUsageNamesThePositionalArgument: Go's default -h dump lists the
-// flags and nothing else, so 'musictutor play -h' never said a <file>
-// was required or what kind of file it takes. The replacement must lead
-// with the synopsis, carry the extra lines, and still include the flags.
 func TestSetUsageNamesThePositionalArgument(t *testing.T) {
 	fs := flag.NewFlagSet("play", flag.ContinueOnError)
 	fs.String("sf2", "", "SoundFont file")
@@ -259,9 +217,6 @@ func TestSetUsageNamesThePositionalArgument(t *testing.T) {
 	}
 }
 
-// TestDeviceFlagHelpNamesTheDevicesCommand: "name fragment" alone left
-// the user to guess which names the fragment was a fragment of. Every
-// device flag's help must say where the names are listed.
 func TestDeviceFlagHelpNamesTheDevicesCommand(t *testing.T) {
 	for _, help := range []string{inFlagHelp, outFlagHelp} {
 		if !strings.Contains(help, "musictutor devices") {
@@ -270,8 +225,6 @@ func TestDeviceFlagHelpNamesTheDevicesCommand(t *testing.T) {
 	}
 }
 
-// TestRenderAllRunawayGuard: an engine that never stops (loop enabled) must
-// hit the frame cap and error instead of growing the buffers forever.
 func TestRenderAllRunawayGuard(t *testing.T) {
 	sc := oneBarScore(t)
 	eng := newEngine(sc, engine.Options{})
@@ -286,20 +239,17 @@ func TestCheckExtraArguments(t *testing.T) {
 	for _, tt := range []struct {
 		name, piece string
 		rest        []string
-		wantNote    []string // substrings the note must carry; nil = no note
-		wantErr     []string // substrings the error must carry; nil = no error
+		wantNote    []string
+		wantErr     []string
 	}{
 		{name: "nothing extra", piece: "song.gtab"},
 		{
-			// The suggestion is the generic shape, never the user's
-			// arguments respliced: 'play -scale song.gtab' would feed the
-			// file to the flag.
+
 			name: "trailing flag", piece: "song.gtab", rest: []string{"-listen"},
 			wantErr: []string{"play [flags]", `"song.gtab"`},
 		},
 		{
-			// A flag hiding behind another file must not be counted as a
-			// file and dropped.
+
 			name: "flag after extra file", piece: "a.gtab", rest: []string{"b.gtab", "-listen"},
 			wantErr: []string{"play [flags]"},
 		},

@@ -1,40 +1,5 @@
 package ui
 
-// The editor's toolbar: what you press to write music.
-//
-// It used to be a flat row of fifteen small text chips reading
-//
-//	−  1/4  +  dot  trip  tie  h  p  s  b  v  x  rest  +beat  +bar
-//
-// and the letters in the middle of that are not abbreviations, they are
-// the .gtab file format's technique characters. A guitarist who has never
-// opened the format documentation has no way to know that `p` is a
-// pull-off rather than "play", and no way to find out except by pressing
-// it. That is the whole of what "you have to know the format to use the
-// editor" means, and it was true.
-//
-// So the toolbar is symbols now. Every one of them is a mark a guitarist
-// has already met — a filled notehead with a flag is an eighth note, an
-// arc between two heads is a tie, a line between two heads is a slide, an
-// arrow curving up is a bend, a cross is a muted string — and the ones
-// that are letters in real notation (the H of a hammer-on, the P of a
-// pull-off) are letters here for the same reason they are letters there.
-// Resting on any of them names it and gives its key (tooltip.go).
-//
-// Three other things changed with it, and each is a decision rather than
-// a tidy-up:
-//
-//   - The note value is PICKED, not stepped. Six buttons, one lit. The old
-//     −/+ pair meant finding a value took up to five presses and reading a
-//     fraction to know where you were, and "+" made the note shorter,
-//     which is exactly backwards from what a plus should do.
-//   - The controls are GROUPED under captions, because what a control acts
-//     on — the note under the cursor, the beat, the piece — is the first
-//     thing you need to know about it and was previously not shown at all.
-//   - Undo and redo are on the toolbar. They were keyboard-only, which is
-//     a strange thing to hide from somebody who is learning by pressing
-//     buttons to see what they do.
-
 import (
 	"fmt"
 	"strings"
@@ -44,38 +9,26 @@ import (
 	"github.com/S95F/musicTutor/internal/score"
 )
 
-// An edButton is one control in the toolbar: a symbol, what it is called,
-// and what it does.
 type edButton struct {
-	// id is stable across frames and independent of the label, so the
-	// animation and the tooltip follow the control rather than its text.
 	id    string
 	glyph glyphID
-	// name is what the tooltip calls it — the guitarist's word, never the
-	// format's letter.
+
 	name string
 	key  string
-	// label puts text beside the symbol, for the few controls that carry a
-	// value (the tempo, the meter, a track's name).
+
 	label    string
 	on       bool
 	disabled bool
-	// why explains a control that is greyed. A disabled icon with no name
-	// is the worst thing on a toolbar — it is precisely the control the
-	// user does not understand — so the tooltip still answers, and says
-	// what would make it available.
+
 	why string
 	act func()
 }
 
-// An edGroup is a cluster of related controls under one caption.
 type edGroup struct {
 	caption string
 	buttons []edButton
 }
 
-// noteValueButtons is the note-length picker: the six values, each drawn
-// as the note it writes, with the current one lit.
 func (e *Editor) noteValueButtons() []edButton {
 	base, dot, trip := baseOf(e.doc.Duration())
 	values := []struct {
@@ -97,8 +50,7 @@ func (e *Editor) noteValueButtons() []edButton {
 			id:    fmt.Sprintf("value%d", v.ticks),
 			glyph: v.glyph,
 			name:  v.name,
-			// The bracket keys still step through them, so the tooltip
-			// teaches the pair rather than a key each.
+
 			key: "[  ]",
 			on:  v.ticks == base,
 			act: func() { e.setDuration(ticks) },
@@ -112,9 +64,6 @@ func (e *Editor) noteValueButtons() []edButton {
 	)
 }
 
-// noteButtons are the marks that go ON the note under the cursor. They
-// are disabled when there is no note there, which is most of how a
-// first-timer learns that a fret number comes first.
 func (e *Editor) noteButtons() []edButton {
 	tech := e.cursorTech()
 	note, hasNote := e.doc.NoteAt(e.doc.Cursor().Str)
@@ -147,7 +96,6 @@ func (e *Editor) noteButtons() []edButton {
 	return out
 }
 
-// beatButtons change what is in the bar rather than what is on a note.
 func (e *Editor) beatButtons() []edButton {
 	return []edButton{
 		{id: "rest", glyph: glyphRest, name: "Rest — silence for this beat", key: "R",
@@ -161,7 +109,6 @@ func (e *Editor) beatButtons() []edButton {
 	}
 }
 
-// historyButtons are undo and redo, which were keyboard-only.
 func (e *Editor) historyButtons() []edButton {
 	return []edButton{
 		{id: "undo", glyph: glyphUndo, name: "Undo", key: "ctrl+Z",
@@ -171,10 +118,6 @@ func (e *Editor) historyButtons() []edButton {
 	}
 }
 
-// toolbarGroups is the whole first row, in the order the work happens:
-// choose a length, type a note, mark it, then shape the bar. The marks
-// group is the edited track's instrument family's — a wind part slurs
-// and scoops where a guitar hammers and mutes.
 func (e *Editor) toolbarGroups() []edGroup {
 	marks := e.noteButtons()
 	if e.doc.Track().Wind != nil {
@@ -189,11 +132,7 @@ func (e *Editor) toolbarGroups() []edGroup {
 	if e.text == nil {
 		return groups
 	}
-	// The raw text is showing: these all edit the document underneath it,
-	// and the text is applied over that document when the view closes, so
-	// the edit would be discarded a moment later. The why has to change
-	// with the reason — "type a fret first" is the grid's answer, and here
-	// it would send the user hunting for a fret cell that is not on screen.
+
 	for gi := range groups {
 		for bi := range groups[gi].buttons {
 			groups[gi].buttons[bi].disabled = true
@@ -203,17 +142,8 @@ func (e *Editor) toolbarGroups() []edGroup {
 	return groups
 }
 
-// edTextViewWhy is what a greyed notation control answers while the raw
-// text is showing: the way to use it is to leave the text view.
 const edTextViewWhy = "go back to the notation first (F2)"
 
-// --- the piece row -----------------------------------------------------
-
-// pieceButtons is the second row's left half: which track is being
-// edited, and the three settings that belong to the piece rather than to
-// a note. These carry labels as well as symbols, because their VALUE is
-// the information — a metronome icon says "tempo" and "112" says what it
-// is.
 func (e *Editor) pieceButtons() []edButton {
 	var out []edButton
 	for i, tr := range e.doc.Score().Tracks {
@@ -224,10 +154,7 @@ func (e *Editor) pieceButtons() []edButton {
 		tip := "Edit this track"
 		if tr.Role == score.RoleBacking {
 			tip = "Edit this track (accompaniment, not the part you practise)"
-			// The role stays on the ROW as well as in the tooltip: which
-			// part is the one you play is a fact about the piece, and a
-			// fact you have to hover to learn is a fact most people never
-			// learn.
+
 			name += " (backing)"
 		}
 		idx := i
@@ -241,11 +168,7 @@ func (e *Editor) pieceButtons() []edButton {
 		edButton{id: "addtrack", glyph: glyphAddTrack, name: "Add another track", key: "shift+A",
 			act: func() { e.openInstrumentPicker(pickAddTrack) }})
 	if w := e.doc.Track().Wind; w != nil {
-		// A wind track's pitch reference is its instrument, so the chip
-		// that says what the track IS replaces the tuning and capo chips a
-		// wind part has no use for. It is a fact, not a control: changing
-		// a track's instrument under its notes would re-pitch music the
-		// user already wrote, so another instrument means another track.
+
 		out = append(out,
 			edButton{id: "instrument", glyph: glyphWind, name: "This track's instrument", label: w.Name,
 				disabled: true, why: "chosen when the track is made — add a track for another instrument"})
@@ -253,9 +176,7 @@ func (e *Editor) pieceButtons() []edButton {
 		out = append(out,
 			edButton{id: "tuning", glyph: glyphTuning, name: "Tuning for this track", key: "shift+U",
 				label: e.tuningName(), act: e.cycleTuning},
-			// The capo sits beside the tuning it shifts. Without this chip a
-			// piece with a capo rendered exactly like one without, and putting
-			// one on meant knowing the text format's directive.
+
 			edButton{id: "capo", glyph: glyphCapo, name: "Capo for this track",
 				label: e.capoLabel(), act: func() { e.openEntry(edEntryCapo) }})
 	}
@@ -278,9 +199,6 @@ func (e *Editor) pieceButtons() []edButton {
 	return out
 }
 
-// capoLabel is the capo chip's text: the fret when one is on, and just the
-// word when none is — the chip still has to say what it is for, and a
-// symbol-only chip here would be the rebus the piece row exists to avoid.
 func (e *Editor) capoLabel() string {
 	if c := e.doc.Track().Capo; c > 0 {
 		return fmt.Sprintf("capo %d", c)
@@ -288,9 +206,6 @@ func (e *Editor) capoLabel() string {
 	return "capo"
 }
 
-// fileButtons is the second row's right half: what to do with the piece
-// as a whole. They stay live in the text view, because saving and going
-// back are exactly what that view needs.
 func (e *Editor) fileButtons() []edButton {
 	view := edButton{id: "view", glyph: glyphTextView, name: "Show the piece as the text file it saves to", key: "F2",
 		act: e.toggleText}
@@ -299,12 +214,7 @@ func (e *Editor) fileButtons() []edButton {
 	if e.text != nil {
 		view = edButton{id: "view", glyph: glyphGridView, name: "Back to the notation", key: "F2",
 			on: true, act: e.toggleText}
-		// The text on screen is the piece now: saving or practising the
-		// document UNDERNEATH it would act on a version the user is no
-		// longer looking at, and say "saved" about edits that never reached
-		// the file. Both go the way ctrl+S already does — apply the text,
-		// return to the notation, then act. shift+P itself types a P here,
-		// so the practice control shows no key while the text is up.
+
 		save = func() { e.applyTextThen(func() { e.save() }) }
 		practiceKey, practice = "", func() { e.applyTextThen(e.saveAndPractice) }
 	}
@@ -319,8 +229,6 @@ func (e *Editor) fileButtons() []edButton {
 	}
 }
 
-// edPieceTitle is the piece's name for the toolbar, which makes the row
-// read as a summary of the piece as well as a set of things to press.
 func edPieceTitle(e *Editor) string {
 	name := strings.TrimSpace(e.doc.Score().Title)
 	if name == "" {
@@ -329,8 +237,6 @@ func edPieceTitle(e *Editor) string {
 	return truncateW(name, 130)
 }
 
-// saveTip says whether there is anything to save, so the lit state of the
-// save button has words behind it.
 func (e *Editor) saveTip() string {
 	if e.doc.Dirty() {
 		return "Save — there are unsaved changes"
@@ -338,17 +244,6 @@ func (e *Editor) saveTip() string {
 	return "Save"
 }
 
-// --- layout ------------------------------------------------------------
-
-// An edToolbarLayout is one frame's toolbar geometry: where every control
-// and every caption goes. Drawing and hit testing both read it.
-// The rects and the controls they belong to are built together and kept
-// together. Drawing used to lay the toolbar out and then ask for the
-// controls a second time; the two calls agreed, because nothing changes
-// between them inside one frame — but "agree because nothing happens to
-// change them" is a property somebody has to keep true, and every one of
-// these slices is indexed in parallel with another. Building them once
-// removes the question along with the work.
 type edToolbarLayout struct {
 	groups  []edGroup
 	rects   [][]rect
@@ -359,7 +254,6 @@ type edToolbarLayout struct {
 	filesAt []rect
 }
 
-// layoutToolbar places the icon row, the piece row and the file row.
 func (e *Editor) layoutToolbar() edToolbarLayout {
 	var l edToolbarLayout
 	l.groups = e.toolbarGroups()
@@ -375,8 +269,6 @@ func (e *Editor) layoutToolbar() edToolbarLayout {
 		l.rects = append(l.rects, rects)
 	}
 
-	// The file row is laid out from the right so that adding a track can
-	// never push Save off the screen.
 	l.files = e.fileButtons()
 	total := float64(len(l.files)) * (iconBtnSize + iconBtnGap)
 	fx := screenW - uiPadX - total + iconBtnGap
@@ -389,11 +281,7 @@ func (e *Editor) layoutToolbar() edToolbarLayout {
 	if len(l.filesAt) > 0 {
 		limit = l.filesAt[0].x - iconGrpGap
 	}
-	// The settings and the add-track control are placed FIRST, from the
-	// right, and the track buttons fill what is left. Laid out left to
-	// right the tracks came first and pushed the rest off the end — and
-	// "add a track" has no keyboard binding, so a piece with enough tracks
-	// in it could not gain another one at all.
+
 	tracks, fixed := e.pieceButtons(), []edButton(nil)
 	for len(tracks) > 0 {
 		last := tracks[len(tracks)-1]
@@ -412,7 +300,7 @@ func (e *Editor) layoutToolbar() edToolbarLayout {
 	for _, b := range tracks {
 		w := edPieceWidth(b)
 		if px+w+fixedW > limit {
-			break // out of room; the tab key still reaches this track
+			break
 		}
 		l.piece = append(l.piece, b)
 		l.pieceAt = append(l.pieceAt, rect{px, edTrackY, w, iconBtnSize})
@@ -427,8 +315,6 @@ func (e *Editor) layoutToolbar() edToolbarLayout {
 	return l
 }
 
-// edPieceWidth is how wide a piece-row control needs to be for its symbol
-// and its value.
 func edPieceWidth(b edButton) float64 {
 	if b.label == "" {
 		return iconBtnSize
@@ -440,11 +326,6 @@ func edPieceWidth(b edButton) float64 {
 	return w + 12
 }
 
-// --- drawing -----------------------------------------------------------
-
-// drawChrome paints both toolbar rows from one layout. tips are offered
-// only when nothing modal is up: a name floating over a dimmed screen
-// belongs to a control that cannot be pressed.
 func (e *Editor) drawChrome(screen *ebiten.Image, l edToolbarLayout) {
 	dt := uiFrameSeconds()
 	live := !e.modalUp()
@@ -473,8 +354,6 @@ func (e *Editor) drawChrome(screen *ebiten.Image, l edToolbarLayout) {
 	}
 }
 
-// tipTextFor is what a control's tooltip says: its name, and — when it is
-// greyed — what would make it available.
 func tipTextFor(b edButton) string {
 	if b.disabled && b.why != "" {
 		return b.name + " — " + b.why
@@ -482,9 +361,6 @@ func tipTextFor(b edButton) string {
 	return b.name
 }
 
-// drawValueButton paints a control that carries a value: its symbol on
-// the left and the value beside it, so the row reads as a summary of the
-// piece as well as a set of things to press.
 func drawValueButton(dst *ebiten.Image, r rect, b edButton, av animValues) {
 	if b.label == "" {
 		drawIconGlyphButton(dst, r, b.glyph, b.on, b.disabled, av)
@@ -493,9 +369,7 @@ func drawValueButton(dst *ebiten.Image, r rect, b edButton, av animValues) {
 	fill, edge, ink := colPanel, colPanelEdge, colHUD
 	switch {
 	case b.disabled:
-		// colDisabled, not colBarline, for the same reason as the icon
-		// buttons: the piece row spends the whole text view disabled, and
-		// a rule colour is not readable ink.
+
 		fill, edge, ink = colBG, colBarline, colDisabled
 	case b.on:
 		fill, edge, ink = colOn, colOnEdge, colNote
@@ -520,9 +394,6 @@ func drawValueButton(dst *ebiten.Image, r rect, b edButton, av animValues) {
 	}
 }
 
-// --- hit testing -------------------------------------------------------
-
-// hotspots is every clickable control on the editor's chrome.
 func (e *Editor) hotspots() []hotspot {
 	var out []hotspot
 	l := e.layoutToolbar()

@@ -5,12 +5,6 @@ import (
 	"testing"
 )
 
-// The articulation contract: a slide travels, a hammer-on arrives at once,
-// neither re-strikes the string, and anything with nothing to continue from
-// falls back to being picked.
-
-// pitchOver estimates the fundamental of a window of the rendered signal,
-// in Hz. from and to are seconds.
 func pitchOver(t *testing.T, mono []float32, sr int, from, to float64) float64 {
 	t.Helper()
 	lo, hi := int(from*float64(sr)), int(to*float64(sr))
@@ -20,19 +14,16 @@ func pitchOver(t *testing.T, mono []float32, sr int, from, to float64) float64 {
 	return estimateFundamental(t, mono[lo:hi], sr)
 }
 
-// TestPluckSlideReachesTheDestination is the headline: a note marked as
-// slid into ends up sounding the note it was slid to, without the string
-// ever being picked again.
 func TestPluckSlideReachesTheDestination(t *testing.T) {
 	const sr = 48000
 	v := NewPluck(sr, 25).(*pluck)
-	v.NoteOn(52, 0.8) // E3
+	v.NoteOn(52, 0.8)
 	left, right := renderFrames(v, sr/2, 512)
-	v.NoteOnSpec(NoteSpec{Key: 57, Velocity: 0.8, Attack: AttackSlide, From: 52}) // up to A3
+	v.NoteOnSpec(NoteSpec{Key: 57, Velocity: 0.8, Attack: AttackSlide, From: 52})
 	l2, r2 := renderFrames(v, sr, 512)
 
 	mono := monoSum(append(left, l2...), append(right, r2...))
-	// Before the slide the string is at E3; well after it, at A3.
+
 	if got, want := pitchOver(t, mono, sr, 0.25, 0.5), keyFreq(52); math.Abs(centsBetween(want, got)) > 10 {
 		t.Errorf("before the slide: %.2f Hz, want E3 %.2f Hz", got, want)
 	}
@@ -41,9 +32,6 @@ func TestPluckSlideReachesTheDestination(t *testing.T) {
 	}
 }
 
-// TestPluckSlideDoesNotRestrike is what separates a slide from two notes.
-// A pick puts a broadband burst of energy into the string; a slide puts in
-// none at all, so the envelope over the slide must keep falling.
 func TestPluckSlideDoesNotRestrike(t *testing.T) {
 	const sr = 48000
 	v := NewPluck(sr, 25).(*pluck)
@@ -58,7 +46,6 @@ func TestPluckSlideDoesNotRestrike(t *testing.T) {
 		t.Errorf("energy rose across the slide (%.4f -> %.4f): the string was re-struck", pre, post)
 	}
 
-	// A plucked note at the same moment, by contrast, must add energy.
 	w := NewPluck(sr, 25).(*pluck)
 	w.NoteOn(52, 0.8)
 	_, _ = renderFrames(w, sr/4, 512)
@@ -70,17 +57,13 @@ func TestPluckSlideDoesNotRestrike(t *testing.T) {
 	}
 }
 
-// TestPluckSlideTravels pins the middle of the gesture: partway through,
-// the pitch is between the two notes rather than already arrived. A slide
-// that jumped would pass the destination test above and still be wrong.
 func TestPluckSlideTravels(t *testing.T) {
 	const sr = 48000
 	v := NewPluck(sr, 25).(*pluck)
-	v.NoteOn(40, 0.9) // low E, slow enough to measure mid-glide
+	v.NoteOn(40, 0.9)
 	_, _ = renderFrames(v, sr/4, 512)
 	v.NoteOnSpec(NoteSpec{Key: 47, Velocity: 0.9, Attack: AttackSlide, From: 40})
 
-	// Halfway through the slide, in samples.
 	half := int(pluckSlideSeconds * sr / 2)
 	l, r := renderFrames(v, half, 64)
 	mid := v.voices[0].d
@@ -92,16 +75,12 @@ func TestPluckSlideTravels(t *testing.T) {
 		t.Error("the string fell silent during the slide")
 	}
 
-	// And it arrives exactly, not approximately: a glide that overshot
-	// would leave the note permanently out of tune.
 	_, _ = renderFrames(v, sr/4, 512)
 	if got := v.voices[0].d; got != lo {
 		t.Errorf("after the slide the delay is %.6f, want exactly the destination %.6f", got, lo)
 	}
 }
 
-// TestPluckLegatoArrivesAtOnce: a hammer-on takes the new pitch
-// immediately, unlike a slide.
 func TestPluckLegatoArrivesAtOnce(t *testing.T) {
 	const sr = 48000
 	v := NewPluck(sr, 25).(*pluck)
@@ -116,9 +95,6 @@ func TestPluckLegatoArrivesAtOnce(t *testing.T) {
 	}
 }
 
-// TestPluckContinuationKeepsOneVoice: a slid or hammered note is the same
-// string still ringing, so it must not take a second voice out of the pool
-// — and the destination key is what NoteOff has to name afterwards.
 func TestPluckContinuationKeepsOneVoice(t *testing.T) {
 	const sr = 48000
 	for _, tt := range []struct {
@@ -136,11 +112,7 @@ func TestPluckContinuationKeepsOneVoice(t *testing.T) {
 			if got := v.voices[0].key; got != 57 {
 				t.Errorf("the voice reports key %d, want the destination 57", got)
 			}
-			// The origin key must no longer stop it; the destination must.
-			// The decay is compared against the one the note is actually
-			// holding at rather than against a constant: how fast a string
-			// rings out depends on its pitch and its loop length, and what
-			// this test is about is WHICH key stops it.
+
 			held := v.voices[0].decay
 			v.NoteOff(52)
 			if v.voices[0].decay != held {
@@ -155,10 +127,6 @@ func TestPluckContinuationKeepsOneVoice(t *testing.T) {
 	}
 }
 
-// TestPluckContinuationWithoutOriginPlucks: a score that slides into the
-// first note of a piece, or whose previous note has already decayed away,
-// has nothing to continue from. Sounding nothing would be the one
-// unacceptable answer.
 func TestPluckContinuationWithoutOriginPlucks(t *testing.T) {
 	const sr = 48000
 	v := NewPluck(sr, 25).(*pluck)
@@ -172,9 +140,6 @@ func TestPluckContinuationWithoutOriginPlucks(t *testing.T) {
 	}
 }
 
-// TestPluckVibratoMovesThePitchAroundTheNote: vibrato is an oscillation
-// ABOUT the written pitch, so the note is still the note — the average must
-// land on it while the instantaneous delay moves either side.
 func TestPluckVibratoMovesThePitchAroundTheNote(t *testing.T) {
 	const sr = 48000
 	v := NewPluck(sr, 25).(*pluck)
@@ -183,7 +148,7 @@ func TestPluckVibratoMovesThePitchAroundTheNote(t *testing.T) {
 	rest := v.delayFor(45)
 	var lo, hi float64 = math.Inf(1), math.Inf(-1)
 	sum, n := 0.0, 0
-	// One vibrato cycle, sampled finely.
+
 	cycle := int(math.Round(float64(sr) / pluckVibratoHz))
 	for i := 0; i < cycle; i++ {
 		v.voices[0].tick()
@@ -200,8 +165,6 @@ func TestPluckVibratoMovesThePitchAroundTheNote(t *testing.T) {
 	}
 }
 
-// TestPluckArticulatedRenderDoesNotAllocate: the articulated paths are on
-// the same realtime thread as everything else.
 func TestPluckArticulatedRenderDoesNotAllocate(t *testing.T) {
 	const sr = 48000
 	v := NewPluck(sr, 25).(*pluck)
@@ -218,7 +181,6 @@ func TestPluckArticulatedRenderDoesNotAllocate(t *testing.T) {
 	}
 }
 
-// activeVoices counts the sounding voices in a pool.
 func activeVoices(p *pluck) int {
 	n := 0
 	for i := range p.voices {

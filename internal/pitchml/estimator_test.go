@@ -8,20 +8,13 @@ import (
 	"github.com/S95F/musicTutor/internal/pitch"
 )
 
-// fakeRunner stands in for the ONNX session so the whole front end —
-// sizing, decimation, centering, aggregation, error handling — is testable
-// with no runtime and no model on disk. It records what it was fed.
 type fakeRunner struct {
 	label string
 
-	// fixedLen, when > 0, makes the fake behave like a model with a
-	// static input length, ignoring what resize asks for.
 	fixedLen int
-	// adoptZero makes resize claim an input length of 0, which no real
-	// runner should do but the front end must survive.
+
 	adoptZero bool
-	// shrinkTo, when > 0, makes input() hand back a shorter buffer after
-	// the first run — a runner misbehaving under the front end's feet.
+
 	shrinkTo int
 	resizeEr error
 	runEr    error
@@ -29,7 +22,7 @@ type fakeRunner struct {
 	buf     []float32
 	resizes int
 	runs    int
-	seen    []float32 // copy of the input at the last run
+	seen    []float32
 
 	pitchOut []float32
 	confOut  []float32
@@ -72,7 +65,6 @@ func (f *fakeRunner) run() ([]float32, []float32, error) {
 
 func (f *fakeRunner) close() error { return nil }
 
-// newFake builds a runner that echoes one voiced frame.
 func newFake() *fakeRunner {
 	return &fakeRunner{
 		label:    EstimatorName,
@@ -90,8 +82,6 @@ func mustEstimator(t *testing.T, r modelRunner, rate int) *estimator {
 	return e
 }
 
-// The concrete type must satisfy both the frozen pitch contract and this
-// package's richer one.
 var (
 	_ pitch.F0Estimator = (*estimator)(nil)
 	_ Estimator         = (*estimator)(nil)
@@ -106,8 +96,7 @@ func TestEstimatorNameComesFromTheBackend(t *testing.T) {
 
 func TestEstimateF0ReportsMedianOfConfidentFrames(t *testing.T) {
 	f := newFake()
-	// One low-confidence outlier must not drag the answer: only frames
-	// within selectConfidenceRatio of the best confidence vote.
+
 	f.pitchOut = []float32{40, 219, 220, 221, 3000}
 	f.confOut = []float32{0.1, 0.95, 0.99, 0.90, 0.2}
 	e := mustEstimator(t, f, 48000)
@@ -158,7 +147,7 @@ func TestEstimateF0UnvoicedCases(t *testing.T) {
 func TestEstimateF0ClampsClarityIntoRange(t *testing.T) {
 	f := newFake()
 	f.pitchOut = []float32{220}
-	f.confOut = []float32{1.7} // a logit-shaped export, not a probability
+	f.confOut = []float32{1.7}
 	e := mustEstimator(t, f, 48000)
 
 	if _, clarity := e.EstimateF0(make([]float32, 2048)); clarity != 1 {
@@ -167,8 +156,7 @@ func TestEstimateF0ClampsClarityIntoRange(t *testing.T) {
 }
 
 func TestEstimateF0IgnoresRaggedOutputTails(t *testing.T) {
-	// A model whose two outputs disagree in length must not index past
-	// the shorter one.
+
 	f := newFake()
 	f.pitchOut = []float32{220, 440, 880}
 	f.confOut = []float32{0.9}
@@ -187,8 +175,7 @@ func TestEstimateF0DecimatesToTheModelRate(t *testing.T) {
 	if got, want := len(f.buf), 2048/3; got != want {
 		t.Fatalf("model input length = %d, want %d (2048 samples at 48 kHz decimated 3:1)", got, want)
 	}
-	// The content must be the same 440 Hz tone at 16 kHz, not silence and
-	// not the raw window.
+
 	if rms := middleRMS(f.seen); math.Abs(rms-math.Sqrt2/2) > 0.05 {
 		t.Errorf("decimated RMS = %.4f, want ~0.707", rms)
 	}
@@ -199,9 +186,7 @@ func TestEstimateF0DecimatesToTheModelRate(t *testing.T) {
 }
 
 func TestEstimateF0CentersInAnOversizedModelInput(t *testing.T) {
-	// A model with a fixed input longer than the window: the audio must
-	// be centered, with symmetric zero padding, so the window's midpoint
-	// stays the model's midpoint.
+
 	f := newFake()
 	f.fixedLen = 1024
 	e := mustEstimator(t, f, 48000)
@@ -215,7 +200,7 @@ func TestEstimateF0CentersInAnOversizedModelInput(t *testing.T) {
 	if len(f.seen) != 1024 {
 		t.Fatalf("model input length = %d, want the model's fixed 1024", len(f.seen))
 	}
-	dsLen := 2048 / 3 // 682
+	dsLen := 2048 / 3
 	lead := (1024 - dsLen) / 2
 	for i := 0; i < lead; i++ {
 		if f.seen[i] != 0 {
@@ -227,8 +212,7 @@ func TestEstimateF0CentersInAnOversizedModelInput(t *testing.T) {
 			t.Fatalf("trailing pad at %d = %v, want 0", i, f.seen[i])
 		}
 	}
-	// A DC window through a unity-gain filter comes back as DC, away
-	// from the filter's edge ramps.
+
 	mid := lead + dsLen/2
 	if math.Abs(float64(f.seen[mid])-1) > 1e-4 {
 		t.Errorf("center sample = %v, want ~1", f.seen[mid])
@@ -236,8 +220,7 @@ func TestEstimateF0CentersInAnOversizedModelInput(t *testing.T) {
 }
 
 func TestEstimateF0CropsCenteredIntoAnUndersizedModelInput(t *testing.T) {
-	// The opposite: a model that only accepts 300 samples gets the
-	// middle 300 of the decimated window, not its first 300.
+
 	f := newFake()
 	f.fixedLen = 300
 	e := mustEstimator(t, f, 48000)
@@ -253,9 +236,7 @@ func TestEstimateF0CropsCenteredIntoAnUndersizedModelInput(t *testing.T) {
 	}
 	dsLen := 2048 / 3
 	srcOff := (dsLen - 300) / 2
-	// Decimated sample k is input sample k*3 (unity DC gain, linear
-	// phase), so the first sample the model sees should be about
-	// (srcOff)*3.
+
 	want := float64((srcOff) * 3)
 	if got := float64(f.seen[0]); math.Abs(got-want) > 3 {
 		t.Errorf("first model sample = %.1f, want ~%.1f (centered crop)", got, want)
@@ -287,7 +268,7 @@ func TestEstimateF0IsAllocationFreeInSteadyState(t *testing.T) {
 	f.confOut = []float32{0.95, 0.99, 0.9}
 	e := mustEstimator(t, f, 48000)
 	win := sine(2048, 440, 48000)
-	e.EstimateF0(win) // first call sizes everything
+	e.EstimateF0(win)
 
 	if n := testing.AllocsPerRun(200, func() { e.EstimateF0(win) }); n != 0 {
 		t.Errorf("EstimateF0 allocated %v times per call in steady state, want 0", n)
@@ -295,9 +276,7 @@ func TestEstimateF0IsAllocationFreeInSteadyState(t *testing.T) {
 }
 
 func TestEstimateF0FloorsTheModelInputLength(t *testing.T) {
-	// A tiny window would decimate to a handful of samples; the model is
-	// asked for at least minModelSamples so it always has a frame to
-	// work with.
+
 	f := newFake()
 	e := mustEstimator(t, f, 48000)
 	e.EstimateF0(make([]float32, 120))
@@ -411,8 +390,7 @@ func TestRunnerShrinkingItsBufferIsCaughtNotIndexedPast(t *testing.T) {
 	if e.Err() == nil {
 		t.Error("Err = nil, want a complaint about the shrunken input buffer")
 	}
-	// And it stays refused rather than re-deriving against a runner that
-	// broke its own contract.
+
 	before := f.runs
 	if f0, _ := e.EstimateF0(make([]float32, 2048)); f0 != 0 {
 		t.Errorf("f0 = %v on a later call, want 0", f0)
@@ -428,8 +406,6 @@ func TestNewEstimatorRejectsBadSampleRate(t *testing.T) {
 	}
 }
 
-// periodEstimate measures a strong sine's frequency by counting positive
-// zero crossings; good enough to prove the decimator kept the tone.
 func periodEstimate(x []float32, rate int) float64 {
 	lo, hi := len(x)/4, 3*len(x)/4
 	crossings, first, last := 0, -1, -1

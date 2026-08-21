@@ -1,10 +1,5 @@
 package ui
 
-// Cross-screen tests: the getting-started strip, the settings screen's
-// mouse, and re-opening a piece in place. These are the paths that used
-// to dead-end — the ones where the only way forward was to quit and
-// retype a command line.
-
 import (
 	"os"
 	"path/filepath"
@@ -13,9 +8,6 @@ import (
 	"unicode/utf8"
 )
 
-// ---- the getting-started strip -------------------------------------------
-
-// TestHintShowsOnAFirstRun.
 func TestHintShowsOnAFirstRun(t *testing.T) {
 	sh := NewShell(Services{Prefs: &settingsFakePrefs{}, Audio: newSettingsAudio()}, nil)
 	b := NewBrowser(sh)
@@ -33,8 +25,6 @@ func TestHintShowsOnAFirstRun(t *testing.T) {
 	}
 }
 
-// TestChecklistTicksOffAsTheConfigurationFills is the point of the
-// checklist over a static leaflet: it reports what is actually done.
 func TestChecklistTicksOffAsTheConfigurationFills(t *testing.T) {
 	pr := &settingsFakePrefs{}
 	audio := newSettingsAudio()
@@ -60,8 +50,6 @@ func TestChecklistTicksOffAsTheConfigurationFills(t *testing.T) {
 	}
 }
 
-// TestChecklistWithoutAnAudioBackendStatesTheFactInstead: a step nobody
-// can take is not a step. It becomes a statement, with no action.
 func TestChecklistWithoutAnAudioBackendStatesTheFactInstead(t *testing.T) {
 	sh := NewShell(Services{Prefs: &settingsFakePrefs{}}, nil)
 	b := NewBrowser(sh)
@@ -77,8 +65,6 @@ func TestChecklistWithoutAnAudioBackendStatesTheFactInstead(t *testing.T) {
 	}
 }
 
-// TestChecklistStepsAreActivatable: Enter on a configuration step opens
-// settings, and Enter on the last one launches the OS file dialog.
 func TestChecklistStepsAreActivatable(t *testing.T) {
 	sh := NewShell(Services{Prefs: &settingsFakePrefs{}, Audio: newSettingsAudio()}, nil)
 	b := NewBrowser(sh)
@@ -87,8 +73,6 @@ func TestChecklistStepsAreActivatable(t *testing.T) {
 	launches := 0
 	b.SetOpenDialog(func(string) { launches++ })
 
-	// The steps are their own controls now — they are clicked, not
-	// selected — so they are activated by index.
 	b.activateStep(0)
 	if opened != 1 {
 		t.Errorf("step 1 opened settings %d times, want 1", opened)
@@ -99,14 +83,10 @@ func TestChecklistStepsAreActivatable(t *testing.T) {
 		t.Errorf(`the "open a piece" step launched the file dialog %d times, want 1`, launches)
 	}
 
-	// An index off either end is a no-op rather than a panic.
 	b.activateStep(-1)
 	b.activateStep(99)
 }
 
-// TestHintTicksItselfOff: the strip stays, because it can be dismissed
-// on purpose — but its last step reports done once there is a piece to
-// hand, so it stops asking for something that has happened.
 func TestHintTicksItselfOff(t *testing.T) {
 	pr := &browserFakePrefs{recents: []string{filepath.Join(t.TempDir(), "song.gp")}}
 	sh := NewShell(Services{Opener: &browserFakeOpener{}, Prefs: pr}, nil)
@@ -120,9 +100,6 @@ func TestHintTicksItselfOff(t *testing.T) {
 	}
 }
 
-// TestHintCanBePutAwayForGood: dismissing it writes to preferences, so a
-// new screen over the same preferences comes up without it. A dismissal
-// that has to be repeated every launch is not a dismissal.
 func TestHintCanBePutAwayForGood(t *testing.T) {
 	pr := &settingsFakePrefs{}
 	sh := NewShell(Services{Prefs: pr, Audio: newSettingsAudio()}, nil)
@@ -140,17 +117,13 @@ func TestHintCanBePutAwayForGood(t *testing.T) {
 	if got := NewBrowser(sh); got.hintOpen {
 		t.Error("a fresh screen brought the dismissed strip back")
 	}
-	// And it can be brought back.
+
 	b.toggleHint()
 	if !b.hintOpen || pr.hideHint {
 		t.Error("toggling again did not restore the strip")
 	}
 }
 
-// ---- settings: cursor placement and mouse --------------------------------
-
-// TestSettingsOpensOnTheFirstUnconfiguredRow: the checklist says "choose
-// your audio interface" and the screen it opens should already be there.
 func TestSettingsOpensOnTheFirstUnconfiguredRow(t *testing.T) {
 	audio := newSettingsAudio()
 	s, pr := newSettingsFixture(t, audio)
@@ -158,14 +131,12 @@ func TestSettingsOpensOnTheFirstUnconfiguredRow(t *testing.T) {
 		t.Errorf("with no device chosen the cursor sits on row %v, want %v", got, want)
 	}
 
-	// With a device chosen but never measured, calibration is next.
 	pr.SetDevices("cap-focus", "play-focus")
 	s = NewSettings(s.sh)
 	if got, want := s.rows[s.cur], srCalibrate; got != want {
 		t.Errorf("with an unmeasured pair the cursor sits on row %v, want %v", got, want)
 	}
 
-	// Fully configured: leave the cursor at the top.
 	audio.offsets = map[string]settingsOffset{"cap-focus|play-focus": {frames: 480, ok: true}}
 	s = NewSettings(s.sh)
 	if s.cur != 0 {
@@ -173,7 +144,6 @@ func TestSettingsOpensOnTheFirstUnconfiguredRow(t *testing.T) {
 	}
 }
 
-// settingsRowItem finds the display-list entry for a row kind.
 func settingsRowItem(t *testing.T, s *Settings, kind settingsRow) settingsItem {
 	t.Helper()
 	want := s.rowIndex(kind)
@@ -189,8 +159,6 @@ func settingsRowItem(t *testing.T, s *Settings, kind settingsRow) settingsItem {
 	return settingsItem{}
 }
 
-// TestSettingsClickSelectsTheWholeRow: a setting is a line, and the line
-// is the target — not just its label.
 func TestSettingsClickSelectsTheWholeRow(t *testing.T) {
 	s, _ := newSettingsFixture(t, newSettingsAudio())
 	it := settingsRowItem(t, s, srCountIn)
@@ -201,8 +169,6 @@ func TestSettingsClickSelectsTheWholeRow(t *testing.T) {
 	}
 }
 
-// TestSettingsButtonsAdjustTheirOwnRow, wherever the cursor happened to
-// be: pressing a row's button should not need the row selected first.
 func TestSettingsButtonsAdjustTheirOwnRow(t *testing.T) {
 	s, pr := newSettingsFixture(t, newSettingsAudio())
 	s.cur = 0
@@ -224,7 +190,6 @@ func TestSettingsButtonsAdjustTheirOwnRow(t *testing.T) {
 	}
 }
 
-// TestSettingsDeviceButtonsCycle covers the two pickers.
 func TestSettingsDeviceButtonsCycle(t *testing.T) {
 	s, pr := newSettingsFixture(t, newSettingsAudio())
 	it := settingsRowItem(t, s, srCapture)
@@ -239,8 +204,6 @@ func TestSettingsDeviceButtonsCycle(t *testing.T) {
 	}
 }
 
-// TestSettingsSoundFontRowOffersBrowseOnlyWithAPicker: the row used to
-// be able to clear a SoundFont and never choose one.
 func TestSettingsSoundFontRowOffersBrowseOnlyWithAPicker(t *testing.T) {
 	s, _ := newSettingsFixture(t, newSettingsAudio())
 	if got := len(settingsRowItem(t, s, srSoundFont).buttons); got != 1 {
@@ -260,8 +223,6 @@ func TestSettingsSoundFontRowOffersBrowseOnlyWithAPicker(t *testing.T) {
 	}
 }
 
-// TestSettingsOnCloseRunsOnce: it is how the practice view learns that
-// what it was built from has changed.
 func TestSettingsOnCloseRunsOnce(t *testing.T) {
 	s, _ := newSettingsFixture(t, nil)
 	closes := 0
@@ -273,11 +234,6 @@ func TestSettingsOnCloseRunsOnce(t *testing.T) {
 	}
 }
 
-// ---- reopening a piece ---------------------------------------------------
-
-// flowOpener hands back a distinct screen from every Open, so a test can
-// tell a replaced screen from the one it replaced. browserFakeOpener
-// returns an empty struct value, and two of those compare equal.
 type flowOpener struct {
 	opened []string
 	closed int
@@ -294,16 +250,13 @@ func (o *flowOpener) Open(path string) (Screen, []string, error) {
 
 func (o *flowOpener) CloseCurrent() { o.closed++ }
 
-// TestReopenPieceReplacesInPlace: reloading a piece must swap the
-// practice screen, not stack a second one on top of it — otherwise
-// leaving the reloaded piece would land on the stale one underneath.
 func TestReopenPieceReplacesInPlace(t *testing.T) {
 	op := &flowOpener{}
 	sh := NewShell(Services{Opener: op, Prefs: &browserFakePrefs{}}, &shellPlainScreen{})
 	if _, err := sh.OpenPiece("song.gp"); err != nil {
 		t.Fatalf("OpenPiece: %v", err)
 	}
-	_ = sh.Update() // apply the queued push
+	_ = sh.Update()
 	if sh.Depth() != 2 {
 		t.Fatalf("depth %d after opening a piece, want 2", sh.Depth())
 	}
@@ -324,8 +277,6 @@ func TestReopenPieceReplacesInPlace(t *testing.T) {
 	}
 }
 
-// TestReopenPieceLeavesTheStackAloneOnFailure: a load that fails must
-// not take the screen the user is looking at away with it.
 func TestReopenPieceLeavesTheStackAloneOnFailure(t *testing.T) {
 	op := &flowOpener{}
 	sh := NewShell(Services{Opener: op, Prefs: &browserFakePrefs{}}, &shellPlainScreen{})
@@ -345,11 +296,6 @@ func TestReopenPieceLeavesTheStackAloneOnFailure(t *testing.T) {
 	}
 }
 
-// ---- help on every screen ------------------------------------------------
-
-// TestEveryScreenHasACompleteControlTable: pressing ? used to do nothing
-// on two screens out of three. Every table now has to be complete enough
-// to render, and to produce a footer hint that fits the window.
 func TestEveryScreenHasACompleteControlTable(t *testing.T) {
 	app := newApp(t, 4)
 	brw := NewBrowser(NewShell(Services{Prefs: &settingsFakePrefs{}}, nil))
@@ -385,7 +331,6 @@ func TestEveryScreenHasACompleteControlTable(t *testing.T) {
 	}
 }
 
-// TestHelpSectionsKeepTableOrderAndGroupContiguously.
 func TestHelpSectionsKeepTableOrderAndGroupContiguously(t *testing.T) {
 	rows := []helpBinding{
 		{Group: "a", Keys: "1"}, {Group: "a", Keys: "2"},
@@ -400,9 +345,6 @@ func TestHelpSectionsKeepTableOrderAndGroupContiguously(t *testing.T) {
 	}
 }
 
-// TestHintLineDropsUnavailableBindings: the footer has no room to
-// explain itself, so a key that does nothing right now is left out —
-// while the overlay still lists it, greyed.
 func TestHintLineDropsUnavailableBindings(t *testing.T) {
 	rows := []helpBinding{
 		{Keys: "A", Hint: "A here"},
@@ -414,9 +356,6 @@ func TestHintLineDropsUnavailableBindings(t *testing.T) {
 	}
 }
 
-// TestHintIsClickable (audit A1's successor): the strip was mouse-dead
-// for exactly the users it exists for once before. Its steps are laid out
-// by the same layout() the mouse reads, so a click on one runs it.
 func TestHintIsClickable(t *testing.T) {
 	sh := NewShell(Services{Prefs: &settingsFakePrefs{}, Audio: newSettingsAudio()}, nil)
 	b := NewBrowser(sh)
@@ -427,24 +366,19 @@ func TestHintIsClickable(t *testing.T) {
 	if len(l.steps) < 2 {
 		t.Fatalf("the strip laid out %d steps, want at least 2", len(l.steps))
 	}
-	// The second step is the calibration one, and it opens settings.
+
 	r := l.steps[1]
 	b.handleMouse(pointer{x: r.x + 4, y: r.y + 4, pressed: true, down: true})
 	if opened != 1 {
 		t.Errorf("clicking the calibration step opened settings %d times, want 1", opened)
 	}
 
-	// And the hide button is reachable the same way.
 	b.handleMouse(pointer{x: l.hintBtn.x + 4, y: l.hintBtn.y + 4, pressed: true, down: true})
 	if b.hintOpen {
 		t.Error("clicking hide left the strip showing")
 	}
 }
 
-// TestTextMetricsMeasureWhatIsDrawn (audit A9's successor): with real
-// typefaces the measurement is the shaper's advance, so widths must be
-// positive and monotone-ish, non-ASCII must measure like any other text,
-// and a cut must never split a rune or blow its pixel budget.
 func TestTextMetricsMeasureWhatIsDrawn(t *testing.T) {
 	if w := textW("étude"); w <= 0 {
 		t.Errorf("textW(étude) = %v, want a positive advance", w)
@@ -452,12 +386,11 @@ func TestTextMetricsMeasureWhatIsDrawn(t *testing.T) {
 	if textW("wide text here") <= textW("a") {
 		t.Error("a longer string measured narrower than a single glyph")
 	}
-	// The scaled measurement must track the scaled face drawTextScaled
-	// actually uses, or centred headings drift off centre.
+
 	if textWScaled("Title", 2) <= textW("Title") {
 		t.Error("a heading at scale 2 should measure wider than body text")
 	}
-	// A cut must never split a rune and never exceed its budget.
+
 	for _, s := range []string{"ααααααα", "日本語のタブ譜", "naïve—song.gp", "héllo wörld"} {
 		for _, px := range []float64{0, 10, 30, 60, 200} {
 			for name, f := range map[string]func(string, float64) string{"truncateW": truncateW, "ellipsizeW": ellipsizeW} {
@@ -473,17 +406,11 @@ func TestTextMetricsMeasureWhatIsDrawn(t *testing.T) {
 	}
 }
 
-// ---- verification follow-ups ----------------------------------------------
-
-// TestQuitBeatsSameFrameStackEdits: pending edits run in queue order, so
-// a Show queued after a Quit in the same frame — Q and a chip click can
-// both fire in one Update — must not resurrect the emptied stack and
-// leave the application running with its screens gone.
 func TestQuitBeatsSameFrameStackEdits(t *testing.T) {
 	root := &shellPlainScreen{}
 	sh := NewShell(Services{}, root)
 	sh.Quit()
-	sh.Show(&shellPlainScreen{}) // queued after the quit, same frame
+	sh.Show(&shellPlainScreen{})
 	if err := sh.Update(); err != errQuit {
 		t.Fatalf("Update = %v, want errQuit — the later Show must not undo the quit", err)
 	}
@@ -491,34 +418,27 @@ func TestQuitBeatsSameFrameStackEdits(t *testing.T) {
 		t.Errorf("depth = %d after quit, want 0", sh.Depth())
 	}
 
-	// And edits queued on LATER frames stay inert too: quitting is
-	// terminal, not a one-frame race winner.
 	sh.Replace(&shellPlainScreen{})
 	if err := sh.Update(); err != errQuit {
 		t.Errorf("Update after a post-quit Replace = %v, want errQuit", err)
 	}
 }
 
-// TestCountInRoundTripWithdrawsThePrompt: pending is a comparison against
-// the engine's constructed count-in, not a latch — toggling C twice is no
-// change, and the F5 offer it raised must go away with it.
 func TestCountInRoundTripWithdrawsThePrompt(t *testing.T) {
 	a := newApp(t, 1)
 	a.SetCountIn(4)
 	a.SetReloader(func() {})
-	a.SetCountInApplier(func(int) bool { return false }) // the shell's shape
+	a.SetCountInApplier(func(int) bool { return false })
 
-	a.toggleCountIn() // 4 -> off: genuinely pending
+	a.toggleCountIn()
 	if a.reloadPrompt() == "" {
 		t.Fatal("a pending count-in change should offer F5")
 	}
-	a.toggleCountIn() // off -> 4: back to what the engine was built with
+	a.toggleCountIn()
 	if got := a.reloadPrompt(); got != "" {
 		t.Errorf("after a round trip the offer is still up: %q", got)
 	}
 
-	// A change the settings screen reported is NOT withdrawn by count-in
-	// arithmetic: the two conditions are independent.
 	a.MarkSettingsChanged()
 	a.toggleCountIn()
 	a.toggleCountIn()
@@ -527,10 +447,6 @@ func TestCountInRoundTripWithdrawsThePrompt(t *testing.T) {
 	}
 }
 
-// TestSettingsFallbackNoteClearsOnSelection: the "saved device is not
-// connected" note describes the current saved ID; explicitly selecting a
-// connected device makes that device the saved one, and the note must go
-// with the staleness it described.
 func TestSettingsFallbackNoteClearsOnSelection(t *testing.T) {
 	audio := newSettingsAudio()
 	s, pr := newSettingsFixture(t, audio)
@@ -540,7 +456,7 @@ func TestSettingsFallbackNoteClearsOnSelection(t *testing.T) {
 		t.Fatal("a stale saved capture ID should raise the fallback note")
 	}
 
-	s.cycleCapture(+1) // an explicit selection commits and saves
+	s.cycleCapture(+1)
 	if s.capMissing {
 		t.Error("selecting a connected device left the not-connected note up")
 	}
@@ -549,10 +465,6 @@ func TestSettingsFallbackNoteClearsOnSelection(t *testing.T) {
 	}
 }
 
-// TestSoundFontBrowseBusyGuard (verification follow-up): repeated
-// activation of the SoundFont browse must not stack OS dialogs — the
-// picker contract is one dialog at a time, re-armed by the outcome
-// callback, which fires with "" on cancel.
 func TestSoundFontBrowseBusyGuard(t *testing.T) {
 	s, _ := newSettingsFixture(t, newSettingsAudio())
 	asked := 0
@@ -560,12 +472,11 @@ func TestSoundFontBrowseBusyGuard(t *testing.T) {
 	s.SetFilePicker(func(_ []string, chosen func(string)) { asked++; done = chosen })
 
 	s.chooseSoundFont()
-	s.chooseSoundFont() // a second Enter while the dialog floats
+	s.chooseSoundFont()
 	if asked != 1 {
 		t.Fatalf("two activations opened %d dialogs, want 1", asked)
 	}
 
-	// A cancel re-arms without changing the setting.
 	done("")
 	s.syncSettings()
 	if s.sfBusy {
@@ -575,7 +486,6 @@ func TestSoundFontBrowseBusyGuard(t *testing.T) {
 		t.Errorf("a cancel changed the soundfont to %q", s.soundFont)
 	}
 
-	// And the re-armed browse works: a real pick applies.
 	s.chooseSoundFont()
 	if asked != 2 {
 		t.Fatalf("the re-armed browse did not open a dialog (%d)", asked)
@@ -590,12 +500,6 @@ func TestSoundFontBrowseBusyGuard(t *testing.T) {
 	}
 }
 
-// ---- UI re-review follow-ups ----------------------------------------------
-
-// TestBindingsDescribeTheFocusedPane: Delete forgets a shortcut, and the
-// library has none to forget — it lists what is in a folder. A footer
-// teaching a key that cannot work on the pane the user is looking at is
-// the same fault the first-run checklist had.
 func TestBindingsDescribeTheFocusedPane(t *testing.T) {
 	sh := NewShell(Services{Prefs: &settingsFakePrefs{}, Audio: newSettingsAudio(),
 		Library: stubLibrary{}}, nil)
@@ -609,13 +513,6 @@ func TestBindingsDescribeTheFocusedPane(t *testing.T) {
 	}
 }
 
-// TestDialogOpenStopsTheRestOfTheFrame: a piece opened by the file
-// dialog's result has to halt the frame exactly like one opened by
-// Enter. The one-action-per-frame baseline used to be sampled AFTER the
-// mailbox drained, folding the dialog's own push into the baseline — so
-// an Escape in the same frame reached the Shell with a push already
-// queued, and it built a practice screen it discarded without releasing
-// the audio.
 func TestDialogOpenStopsTheRestOfTheFrame(t *testing.T) {
 	op := &flowOpener{}
 	sh := NewShell(Services{Opener: op, Prefs: &browserFakePrefs{}}, nil)
@@ -629,8 +526,6 @@ func TestDialogOpenStopsTheRestOfTheFrame(t *testing.T) {
 	b.launchOpenDialog("")
 	b.OfferDialogResult(piece, "")
 
-	// The frame the result lands on: Update must apply the open and stop,
-	// reporting no quit even though a key would otherwise be read.
 	if err := b.Update(); err != nil {
 		t.Fatalf("Update on the drain frame = %v, want nil", err)
 	}
@@ -642,18 +537,14 @@ func TestDialogOpenStopsTheRestOfTheFrame(t *testing.T) {
 	}
 }
 
-// TestCountInSyncsFromSettings: the view keeps its own mirror of the
-// count-in, and that mirror is what the next press of C writes back — so
-// a count-in changed in settings has to reach it, or C restores the
-// open-time value over the user's new choice.
 func TestCountInSyncsFromSettings(t *testing.T) {
 	a := newApp(t, 1)
-	a.SetCountIn(4) // the engine was built with 4
+	a.SetCountIn(4)
 	a.SetReloader(func() {})
 	var saved []int
 	a.SetCountInApplier(func(b int) bool { saved = append(saved, b); return false })
 
-	a.SyncCountIn(2) // settings changed it to 2 while the piece runs
+	a.SyncCountIn(2)
 	if got := a.CountInBeats(); got != 2 {
 		t.Fatalf("after the settings change the view offers %d, want 2", got)
 	}
@@ -661,8 +552,8 @@ func TestCountInSyncsFromSettings(t *testing.T) {
 		t.Error("2 differs from the engine's 4, so the reload should still be offered")
 	}
 
-	a.toggleCountIn() // off
-	a.toggleCountIn() // back on: must restore 2, not the open-time 4
+	a.toggleCountIn()
+	a.toggleCountIn()
 	if len(saved) != 2 || saved[0] != 0 || saved[1] != 2 {
 		t.Errorf("applier saw %v, want [0 2] — the settings value, not the open-time one", saved)
 	}

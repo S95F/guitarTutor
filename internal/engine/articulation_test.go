@@ -7,19 +7,11 @@ import (
 	"github.com/S95F/musicTutor/internal/synth"
 )
 
-// The engine's half of articulation: which notes are handed to a voice as
-// continuations of a ringing string, and — the part that matters most —
-// that turning any of it on changes nothing about WHEN events fire, since
-// the scorer is watching the same schedule.
-
-// specRec is one NoteOnSpec as an articulating voice received it.
 type specRec struct {
 	frame int64
 	spec  synth.NoteSpec
 }
 
-// articVoice is a stubVoice that can also sound a NoteSpec, so a test can
-// see exactly what the engine asked for.
 type articVoice struct {
 	stubVoice
 	specs []specRec
@@ -45,10 +37,6 @@ func newArticFactory(reg *[]*articVoice) synth.Factory {
 	}
 }
 
-// techScore is two consecutive quarter notes on one string, the second
-// carrying tech. Consecutive beats tile, so the first note's end and the
-// second note's start are the same tick — the case a continuation has to
-// survive, because the note-off would otherwise land on the same frame.
 func techScore(t *testing.T, str, fret1, fret2 int, tech score.Technique) *score.Score {
 	t.Helper()
 	s := &score.Score{
@@ -67,7 +55,6 @@ func techScore(t *testing.T, str, fret1, fret2 int, tech score.Technique) *score
 	return s
 }
 
-// renderBar drives e through one 4/4 bar at 120 BPM plus a little slack.
 func renderBar(e *Engine) {
 	l, r := make([]float32, 512), make([]float32, 512)
 	e.Play()
@@ -95,8 +82,7 @@ func TestTechniqueBecomesAContinuation(t *testing.T) {
 			if len(v.specs) != 3 {
 				t.Fatalf("got %d note-ons, want 3", len(v.specs))
 			}
-			// The first note is picked; the second continues it; the third
-			// carries no technique and is picked again.
+
 			if got := v.specs[0].spec.Attack; got != synth.AttackPluck {
 				t.Errorf("first note attack = %v, want a pluck", got)
 			}
@@ -114,19 +100,12 @@ func TestTechniqueBecomesAContinuation(t *testing.T) {
 	}
 }
 
-// TestContinuationSuppressesTheRelease is the regression guard for the
-// interaction that makes or breaks a slide: the ringing note's NoteOff
-// falls on the very frame the slide fires, and note-offs are applied first.
-// Left alone it damps the string a moment before the note that is supposed
-// to keep it ringing.
 func TestContinuationSuppressesTheRelease(t *testing.T) {
 	var reg []*articVoice
 	e := New(techScore(t, 6, 0, 3, score.TechSlide), Options{Voices: newArticFactory(&reg)})
 	renderBar(e)
 	v := reg[0]
 
-	// Three note-ons, but only two releases: the slid-into note inherits
-	// the first note's entry and is released once, at its own end.
 	if len(v.offs) != 2 {
 		t.Fatalf("got %d note-offs for 3 notes, want 2 (the slide inherits the first)", len(v.offs))
 	}
@@ -135,18 +114,12 @@ func TestContinuationSuppressesTheRelease(t *testing.T) {
 			t.Error("the origin note was released on the very frame it was slid away from")
 		}
 	}
-	// The release that does happen names the destination key, not the
-	// origin: the string moved, and NoteOff has to follow it.
+
 	if got := v.offs[0].key; got != 43 {
 		t.Errorf("first note-off names key %d, want the slide destination 43", got)
 	}
 }
 
-// TestArticulationLeavesTheScheduleAlone is the one that protects the
-// scorer. Wiring that judges timing hangs off the event tap and the wait
-// points; articulation is about timbre and must not move either. The same
-// score is rendered through a voice that articulates and one that does not,
-// and the tapped frames must match exactly.
 func TestArticulationLeavesTheScheduleAlone(t *testing.T) {
 	sc := techScore(t, 6, 0, 3, score.TechSlide)
 
@@ -178,9 +151,6 @@ func TestArticulationLeavesTheScheduleAlone(t *testing.T) {
 	}
 }
 
-// TestPlainVoiceStillSoundsEveryNote: a Voice that cannot articulate is
-// driven exactly as it always was, including the notes carrying techniques
-// — which must be attacked, not skipped.
 func TestPlainVoiceStillSoundsEveryNote(t *testing.T) {
 	var reg []*stubVoice
 	e := New(techScore(t, 6, 0, 3, score.TechSlide), Options{Voices: newStubFactory(&reg)})
@@ -194,10 +164,6 @@ func TestPlainVoiceStillSoundsEveryNote(t *testing.T) {
 	}
 }
 
-// TestContinuationNeedsTheSameString: a technique on one string cannot
-// continue a note ringing on another. Two strings sounding at once is the
-// ordinary case, and picking the wrong one to slide would silence a note
-// and bend an unrelated one.
 func TestContinuationNeedsTheSameString(t *testing.T) {
 	s := &score.Score{
 		Tempos: score.TempoMap{{Tick: 0, USPerQuarter: score.USPerQuarter(120)}},
@@ -206,7 +172,7 @@ func TestContinuationNeedsTheSameString(t *testing.T) {
 	tr := &score.Track{Name: "Guitar", Tuning: score.StandardTuning}
 	s.Tracks = []*score.Track{tr}
 	b := tr.AppendBar(4, 4)
-	b.AddBeat(score.Quarter, score.Note{String: 5, Fret: 2}) // ringing on string 5
+	b.AddBeat(score.Quarter, score.Note{String: 5, Fret: 2})
 	b.AddBeat(score.Quarter, score.Note{String: 6, Fret: 3, Tech: score.TechSlide})
 	b.AddBeat(score.Half, score.Note{String: 6, Fret: 0})
 	if err := s.Validate(); err != nil {
@@ -225,8 +191,6 @@ func TestContinuationNeedsTheSameString(t *testing.T) {
 	}
 }
 
-// TestVibratoReachesTheVoice: vibrato is a sustain-phase technique and
-// rides along on an otherwise ordinary attack.
 func TestVibratoReachesTheVoice(t *testing.T) {
 	var reg []*articVoice
 	e := New(techScore(t, 6, 0, 3, score.TechVibrato), Options{Voices: newArticFactory(&reg)})

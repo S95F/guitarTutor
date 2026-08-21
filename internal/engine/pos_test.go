@@ -8,10 +8,6 @@ import (
 	"github.com/S95F/musicTutor/internal/score"
 )
 
-// Pos is the snapshot a UI interpolates from, so what it has to guarantee
-// is not just a number but a CONSISTENT set: the tick, the rate it is
-// moving at, and whether it is moving at all, all describing one instant.
-
 func TestPosMatchesPosTick(t *testing.T) {
 	var reg []*stubVoice
 	e := New(fixtureScore(t), Options{Voices: newStubFactory(&reg)})
@@ -26,9 +22,6 @@ func TestPosMatchesPosTick(t *testing.T) {
 	}
 }
 
-// TestPosRateIsTheSoundingTempo: the rate has to be the one the position is
-// actually advancing at, practice scaling included, or an interpolating
-// caller glides at the written tempo while the audio plays at another.
 func TestPosRateIsTheSoundingTempo(t *testing.T) {
 	var reg []*stubVoice
 	e := New(fixtureScore(t), Options{Voices: newStubFactory(&reg)})
@@ -38,7 +31,7 @@ func TestPosRateIsTheSoundingTempo(t *testing.T) {
 		e.SetTempoScale(scale)
 		e.Play()
 		e.RenderFrames(l, r)
-		// 120 BPM is two quarter notes a second.
+
 		want := 2 * float64(score.PPQ) * scale
 		if got := e.Pos().TicksPerSecond; math.Abs(got-want) > 1e-6 {
 			t.Errorf("at scale %.2f the rate is %.3f ticks/s, want %.3f", scale, got, want)
@@ -46,9 +39,6 @@ func TestPosRateIsTheSoundingTempo(t *testing.T) {
 	}
 }
 
-// TestPosAdvancingTracksTheFrozenStates: frames keep flowing through a
-// count-in, a wait and a pause while the position deliberately does not,
-// and only this flag tells them apart from playback.
 func TestPosAdvancingTracksTheFrozenStates(t *testing.T) {
 	l, r := make([]float32, 1024), make([]float32, 1024)
 
@@ -101,8 +91,6 @@ func TestPosAdvancingTracksTheFrozenStates(t *testing.T) {
 	})
 }
 
-// TestPosSeekIsADiscontinuity: a caller that interpolates needs to tell a
-// jump it must follow instantly from motion it should glide through.
 func TestPosSeekIsADiscontinuity(t *testing.T) {
 	var reg []*stubVoice
 	e := New(fixtureScore(t), Options{Voices: newStubFactory(&reg)})
@@ -125,24 +113,11 @@ func TestPosSeekIsADiscontinuity(t *testing.T) {
 	}
 }
 
-// TestPosUnderConcurrentPublishes reads the snapshot from one goroutine
-// while another renders, seeks and changes tempo — the arrangement Pos
-// exists for, since the UI polls it every display frame while the audio
-// thread is inside a block.
-//
-// What it establishes: the reader never hangs in the sequence lock's retry
-// loop, and never comes back with a value no publish wrote — a torn float64
-// is not a slightly wrong number but a garbage one, so reading only
-// published rates is a real check on the bit halves. Tear-freedom ACROSS
-// fields is a structural property of the lock rather than something a test
-// can catch by sampling, and the run under -race is what proves the reads
-// are synchronized at all.
 func TestPosUnderConcurrentPublishes(t *testing.T) {
 	var reg []*stubVoice
 	e := New(fixtureScore(t), Options{Voices: newStubFactory(&reg)})
 	e.Play()
 
-	// Every rate any publish can produce: 120 BPM at each scale used below.
 	rates := map[float64]bool{}
 	for _, s := range []float64{1.0, 0.5, 1.5} {
 		rates[2*float64(score.PPQ)*s] = true

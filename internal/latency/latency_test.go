@@ -9,10 +9,6 @@ import (
 
 const sr = 48000
 
-// loopback builds a synthetic capture the way the wizard's hardware loop
-// would: the train scaled by scale, delayed by delay frames, over a bed of
-// Gaussian noise of RMS noiseRMS with a constant DC offset, followed by
-// tail extra frames. Deterministic per seed.
 func loopback(train []float32, delay int, scale, noiseRMS, dc float64, tail int, seed uint64) []float32 {
 	rng := rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15))
 	out := make([]float32, delay+len(train)+tail)
@@ -77,9 +73,9 @@ func TestClickTrainInvalidArgs(t *testing.T) {
 }
 
 func TestEstimateRecoversKnownDelay(t *testing.T) {
-	const n, spacing = 6, 24000 // 0.5 s spacing: above every delay under test
+	const n, spacing = 6, 24000
 	train := ClickTrain(sr, n, spacing)
-	noise := math.Pow(10, -30.0/20) // -30 dBFS RMS white noise
+	noise := math.Pow(10, -30.0/20)
 
 	tests := []struct {
 		name  string
@@ -93,8 +89,7 @@ func TestEstimateRecoversKnownDelay(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// 50% amplitude, noise floor, optional DC — the messy but
-			// workable capture a real loopback produces.
+
 			captured := loopback(train, tt.delay, 0.5, noise, tt.dc, clickLen(sr), 1)
 			off, conf, err := Estimate(sr, train, captured, spacing, n)
 			if err != nil {
@@ -118,7 +113,7 @@ func TestEstimateRejectsGarbage(t *testing.T) {
 		captured []float32
 	}{
 		{"silence", make([]float32, len(train)+sr/2)},
-		// scale 0 drops the train, leaving -20 dBFS noise only.
+
 		{"pure noise", loopback(train, 0, 0, 0.1, 0, sr/2, 2)},
 	}
 	for _, tt := range tests {
@@ -135,15 +130,10 @@ func TestEstimateRejectsGarbage(t *testing.T) {
 }
 
 func TestEstimateRejectsAliasedDelay(t *testing.T) {
-	const n, spacing = 6, 9600 // 200 ms spacing
+	const n, spacing = 6, 9600
 	train := ClickTrain(sr, n, spacing)
 	noise := math.Pow(10, -30.0/20)
 
-	// True delay one spacing plus 10 ms: each click's search window
-	// holds only the PREVIOUS click's arrival, so clicks 1..n-1 cluster
-	// tightly at the aliased lag while click 0 matches nothing. This
-	// used to return the aliased 480-frame offset with high confidence
-	// (the unmatched first click cost only 1/n).
 	delay := spacing + 480
 	captured := loopback(train, delay, 0.5, noise, 0, clickLen(sr), 4)
 	off, conf, err := Estimate(sr, train, captured, spacing, n)
@@ -154,7 +144,6 @@ func TestEstimateRejectsAliasedDelay(t *testing.T) {
 		t.Errorf("error %q does not point at the click spacing", err)
 	}
 
-	// A delay just inside the spacing still estimates normally.
 	delay = spacing - 100
 	captured = loopback(train, delay, 0.5, noise, 0, clickLen(sr), 5)
 	off, conf, err = Estimate(sr, train, captured, spacing, n)
@@ -173,8 +162,7 @@ func TestEstimatePartialCapture(t *testing.T) {
 	const n, spacing, delay = 8, 24000, 480
 	train := ClickTrain(sr, n, spacing)
 	full := loopback(train, delay, 0.5, 0.01, 0, clickLen(sr), 3)
-	// Recording stopped right after the third click's arrival: clicks
-	// 3..7 are gone, but the three present clicks still carry the vote.
+
 	captured := full[:2*spacing+delay+clickLen(sr)]
 	off, conf, err := Estimate(sr, train, captured, spacing, n)
 	if err != nil {

@@ -10,8 +10,6 @@ import (
 
 var le = binary.LittleEndian
 
-// chunk frames body as a RIFF chunk with the given four-byte id, adding
-// the pad byte a well-formed file carries after an odd-sized chunk.
 func chunk(id string, body []byte) []byte {
 	out := make([]byte, 8, 8+len(body)+1)
 	copy(out, id)
@@ -23,7 +21,6 @@ func chunk(id string, body []byte) []byte {
 	return out
 }
 
-// wavFile wraps chunks in a RIFF/WAVE container.
 func wavFile(chunks ...[]byte) []byte {
 	var body []byte
 	for _, c := range chunks {
@@ -36,7 +33,6 @@ func wavFile(chunks ...[]byte) []byte {
 	return append(out, body...)
 }
 
-// fmtChunk builds a 16-byte fmt chunk body.
 func fmtChunk(format, channels, sampleRate, bits int) []byte {
 	b := make([]byte, 16)
 	le.PutUint16(b[0:], uint16(format))
@@ -48,7 +44,6 @@ func fmtChunk(format, channels, sampleRate, bits int) []byte {
 	return b
 }
 
-// pcm16Data encodes samples as interleaved 16-bit PCM data.
 func pcm16Data(samples ...int16) []byte {
 	b := make([]byte, 2*len(samples))
 	for i, s := range samples {
@@ -57,7 +52,6 @@ func pcm16Data(samples ...int16) []byte {
 	return b
 }
 
-// floatData encodes samples as interleaved 32-bit IEEE-float data.
 func floatData(samples ...float32) []byte {
 	b := make([]byte, 4*len(samples))
 	for i, s := range samples {
@@ -66,7 +60,6 @@ func floatData(samples ...float32) []byte {
 	return b
 }
 
-// ramp fills n samples with a deterministic waveform inside [-1, 1].
 func ramp(n int, phase float64) []float32 {
 	s := make([]float32, n)
 	for i := range s {
@@ -75,12 +68,10 @@ func ramp(n int, phase float64) []float32 {
 	return s
 }
 
-// The quantization step: 16-bit round-trips must be exact to within it.
 const step = 1.0 / 32768
 
 func TestWriteHeader(t *testing.T) {
-	// Write output must byte-equal a hand-assembled canonical 44-byte
-	// header plus quantized data.
+
 	var buf bytes.Buffer
 	if err := Write(&buf, 48000, []float32{0, 1}, []float32{0.5, -1}); err != nil {
 		t.Fatalf("Write: %v", err)
@@ -98,7 +89,7 @@ func TestWriteHeader(t *testing.T) {
 }
 
 func TestStereoRoundTrip(t *testing.T) {
-	// Odd and even lengths, including a single frame and empty.
+
 	for _, n := range []int{0, 1, 3, 16, 481} {
 		left := ramp(n, 0)
 		right := ramp(n, 1.3)
@@ -162,8 +153,7 @@ func TestMonoRoundTrip(t *testing.T) {
 }
 
 func TestClamping(t *testing.T) {
-	// Out-of-range samples clamp to full scale; no dither means the
-	// results are exact.
+
 	var buf bytes.Buffer
 	if err := WriteMono(&buf, 48000, []float32{2, -2, 1, -1}); err != nil {
 		t.Fatalf("WriteMono: %v", err)
@@ -180,14 +170,6 @@ func TestClamping(t *testing.T) {
 	}
 }
 
-// TestQuantizeNonFinite pins the total float64 -> int16 mapping.
-// Regression: saturation ran on v := int(math.Round(x)), and a
-// float-to-int conversion of a value that does not fit is undefined in Go
-// — on amd64 it yields MinInt64 for NaN and for +Inf alike. So the
-// `v > MaxInt16` test never fired and `v < MinInt16` did: positive
-// over-range input saturated to the NEGATIVE rail and NaN became -32768
-// instead of silence. This is the last step before a sample reaches a
-// speaker, so every input must have a defined answer.
 func TestQuantizeNonFinite(t *testing.T) {
 	tests := []struct {
 		name string
@@ -214,11 +196,6 @@ func TestQuantizeNonFinite(t *testing.T) {
 	}
 }
 
-// TestWriteNonFiniteSamples is the same regression at file level: a mix
-// that went non-finite upstream (a NaN backing sample, an infinite gain)
-// used to be written as -32768 for BOTH the NaN and the +Inf sample — the
-// -1.0 rail at maximum amplitude, i.e. full-scale noise in the user's
-// headphones. Finite neighbours must be unaffected.
 func TestWriteNonFiniteSamples(t *testing.T) {
 	in := []float32{float32(math.NaN()), float32(math.Inf(1)), float32(math.Inf(-1)), 0.5, -0.5}
 	var buf bytes.Buffer
@@ -254,7 +231,7 @@ func TestWriteArgErrors(t *testing.T) {
 }
 
 func TestReadFloat32(t *testing.T) {
-	// A 32-bit float stereo file built by hand: values survive exactly.
+
 	want := []float32{0.25, -0.75, 1, -1, 0.001, 0.5}
 	file := wavFile(
 		chunk("fmt ", fmtChunk(3, 2, 96000, 32)),
@@ -298,12 +275,11 @@ func TestReadFloat32Mono(t *testing.T) {
 }
 
 func TestReadSkipsExtraChunks(t *testing.T) {
-	// LIST/INFO metadata and an odd-sized chunk (whose pad byte must be
-	// consumed) sit between fmt and data.
+
 	file := wavFile(
 		chunk("fmt ", fmtChunk(1, 1, 22050, 16)),
 		chunk("LIST", append([]byte("INFO"), chunk("IART", []byte("musicTutor"))...)),
-		chunk("junk", []byte{1, 2, 3}), // odd size: pad byte follows
+		chunk("junk", []byte{1, 2, 3}),
 		chunk("data", pcm16Data(-16384, 8192)),
 	)
 	rate, l, _, err := Read(bytes.NewReader(file))
@@ -318,8 +294,6 @@ func TestReadSkipsExtraChunks(t *testing.T) {
 	}
 }
 
-// allocBytes reports the bytes allocated while fn runs (TotalAlloc is
-// cumulative, so garbage collection cannot lower the delta).
 func allocBytes(fn func()) uint64 {
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
@@ -328,8 +302,6 @@ func allocBytes(fn func()) uint64 {
 	return after.TotalAlloc - before.TotalAlloc
 }
 
-// forgeChunkSize overwrites the declared size of the first chunk with the
-// given four-byte id inside a built WAV file.
 func forgeChunkSize(t *testing.T, file []byte, id string, size uint32) {
 	t.Helper()
 	off := bytes.Index(file, []byte(id))
@@ -339,15 +311,12 @@ func forgeChunkSize(t *testing.T, file []byte, id string, size uint32) {
 	le.PutUint32(file[off+4:], size)
 }
 
-// TestReadHugeDeclaredDataChunk is a regression test for hostile input:
-// a tiny file whose data chunk declares ~4 GiB. Read must fail at the
-// real end of input without allocating anywhere near the declared size.
 func TestReadHugeDeclaredDataChunk(t *testing.T) {
 	file := wavFile(
 		chunk("fmt ", fmtChunk(1, 2, 48000, 16)),
-		chunk("data", pcm16Data(1, 2, 3, 4)), // 8 real bytes
+		chunk("data", pcm16Data(1, 2, 3, 4)),
 	)
-	// Multiple of the 4-byte stereo frame, so it passes alignment.
+
 	forgeChunkSize(t, file, "data", 0xFFFFF000)
 	var err error
 	alloc := allocBytes(func() {
@@ -361,9 +330,6 @@ func TestReadHugeDeclaredDataChunk(t *testing.T) {
 	}
 }
 
-// TestReadHugeDeclaredFmtChunk is a regression test for hostile input:
-// a fmt chunk declaring ~4 GiB while carrying only its real 16 bytes.
-// Read must fail without a declared-size allocation.
 func TestReadHugeDeclaredFmtChunk(t *testing.T) {
 	file := wavFile(
 		chunk("fmt ", fmtChunk(1, 1, 48000, 16)),
@@ -382,11 +348,8 @@ func TestReadHugeDeclaredFmtChunk(t *testing.T) {
 	}
 }
 
-// TestReadDataAcrossScratchBuffers round-trips more data than the
-// incremental scratch buffer holds in one pass (a full pass plus a
-// partial tail), guarding the chunked data-reading loop.
 func TestReadDataAcrossScratchBuffers(t *testing.T) {
-	const n = 40000 // 80000 mono PCM bytes: one full 64 KiB pass plus a tail
+	const n = 40000
 	if 2*n <= dataBufLen || (2*n)%dataBufLen == 0 {
 		t.Fatal("fixture must span multiple scratch buffers with a partial tail")
 	}
@@ -440,16 +403,16 @@ func TestReadErrors(t *testing.T) {
 		{"zero sample rate", wavFile(chunk("fmt ", fmtChunk(1, 1, 0, 16)), chunk("data", nil))},
 		{"truncated data chunk", func() []byte {
 			f := wavFile(chunk("fmt ", valid16), chunk("data", pcm16Data(1, 2, 3)))
-			return f[:len(f)-2] // fewer bytes than the data size declares
+			return f[:len(f)-2]
 		}()},
 		{"data not frame aligned", func() []byte {
-			// Stereo 16-bit needs 4-byte frames; declare 6 bytes.
+
 			f := wavFile(chunk("fmt ", fmtChunk(1, 2, 48000, 16)), chunk("data", pcm16Data(1, 2, 3)))
 			return f
 		}()},
 		{"truncated fmt chunk", func() []byte {
 			f := wavFile(chunk("fmt ", valid16))
-			return f[:20] // fmt header promises 16 bytes, file ends first
+			return f[:20]
 		}()},
 	}
 	for _, tt := range tests {

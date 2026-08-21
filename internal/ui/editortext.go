@@ -1,24 +1,5 @@
 package ui
 
-// The raw .gtab view: the same piece, as the text that will be saved.
-//
-// It exists because the grid has controls for what a guitarist reaches for
-// most and the format has more than that — a General MIDI program, a
-// backing flag, an arbitrary tuning, a comment explaining a passage to
-// yourself. Rather than grow a control for each, F2 shows the file.
-// Nothing here is a second source of truth: switching in serialises the
-// document, switching out parses the text back into one, and a text that
-// will not parse simply does not switch — with the line and column the
-// parser named. The one other way in is a broken file from the library
-// (NewEditorForText), which opens straight into this view because the
-// text it already is happens to be the only form it has.
-//
-// The editing is deliberately small: a caret, insertion, deletion, and
-// movement. There is no selection and no clipboard, because Ebitengine
-// offers no clipboard and a half-working copy-and-paste is worse than an
-// absent one. The grid is where the real work happens; this is the escape
-// hatch.
-
 import (
 	"fmt"
 	"image/color"
@@ -34,12 +15,11 @@ import (
 	"github.com/S95F/musicTutor/internal/score/textfmt"
 )
 
-// Layout of the text pane.
 const (
 	gtLineH  = 17.0
 	gtPadX   = 12.0
 	gtPadY   = 10.0
-	gtGutter = 46.0 // line numbers
+	gtGutter = 46.0
 )
 
 var (
@@ -48,37 +28,23 @@ var (
 	colGtOK     = color.RGBA{110, 200, 140, 255}
 )
 
-// A gtabPane is the text view's own state: the lines, the caret, and what
-// the parser last made of them.
 type gtabPane struct {
 	lines [][]rune
-	cx    int // caret column, in runes
-	cy    int // caret line
-	top   int // first visible line
+	cx    int
+	cy    int
+	top   int
 
-	// status is the parser's verdict on the text as it stands, refreshed
-	// on every change so the answer is never stale, and ok says whether it
-	// is good news.
 	status string
 	ok     bool
-	// seed is the text the pane opened with, and fromFile marks a pane
-	// seeded from a FILE rather than rendered from the document — see
-	// NewEditorForText. Escape treats a file-seeded pane differently:
-	// unchanged broken text is someone else's problem the user only came
-	// to look at, and may be walked away from; edited text is theirs and
-	// is kept — unless a second Escape says otherwise (escArmed).
+
 	seed     string
 	fromFile bool
-	// escArmed remembers that the last Escape was refused for text that
-	// will not parse, so the next one — with nothing typed in between —
-	// may discard the typing and leave. Any edit disarms it.
+
 	escArmed bool
-	// bars and notes describe a text that parses, so the pane can say what
-	// it would produce rather than only that it is valid.
+
 	bars, notes int
 }
 
-// newGtabPane renders a document to text and readies it for editing.
 func newGtabPane(doc *edit.Doc) (*gtabPane, error) {
 	src, err := textfmt.Format(doc.Score())
 	if err != nil {
@@ -87,17 +53,10 @@ func newGtabPane(doc *edit.Doc) (*gtabPane, error) {
 	return newGtabPaneFromSource(src), nil
 }
 
-// newGtabPaneFromSource readies raw .gtab text for editing — including
-// text that does not parse, which is the whole reason the pane can be
-// seeded from a file rather than only from a document: a broken piece
-// has no document to render, and this pane is where it gets repaired.
 func newGtabPaneFromSource(src []byte) *gtabPane {
 	p := &gtabPane{}
 	for _, line := range strings.Split(strings.TrimRight(string(src), "\r\n"), "\n") {
-		// A file broken by editing in Notepad arrives with \r\n endings;
-		// an invisible \r at the end of every line would put the caret
-		// behind a rune the user cannot see and shift every reported
-		// column by one.
+
 		p.lines = append(p.lines, []rune(strings.TrimRight(line, "\r")))
 	}
 	if len(p.lines) == 0 {
@@ -108,7 +67,6 @@ func newGtabPaneFromSource(src []byte) *gtabPane {
 	return p
 }
 
-// text is the pane's content as one string.
 func (p *gtabPane) text() string {
 	out := make([]string, len(p.lines))
 	for i, l := range p.lines {
@@ -117,10 +75,6 @@ func (p *gtabPane) text() string {
 	return strings.Join(out, "\n") + "\n"
 }
 
-// reparse runs the parser over the current text and records what it said.
-// It is cheap — the format is tiny and pieces are a few kilobytes — so it
-// runs on every keystroke rather than on a timer, which is what makes the
-// error line move as you fix it.
 func (p *gtabPane) reparse() {
 	sc, err := textfmt.Parse([]byte(p.text()), "piece")
 	if err != nil {
@@ -141,10 +95,6 @@ func (p *gtabPane) reparse() {
 	}
 }
 
-// toggleText swaps the grid for the text and back. Going out of the text
-// view parses it; a text that will not parse keeps the view open with the
-// parser's own message, because the alternative is throwing away what was
-// typed.
 func (e *Editor) toggleText() {
 	if e.text == nil {
 		pane, err := newGtabPane(e.doc)
@@ -161,18 +111,12 @@ func (e *Editor) toggleText() {
 	e.text = nil
 }
 
-// applyText parses the text view back into the document, reporting whether
-// it could. An unchanged text is not re-applied, so switching views does
-// not fill the undo history with edits nobody made.
 func (e *Editor) applyText() bool {
 	current, err := textfmt.Format(e.doc.Score())
 	if err == nil && string(current) == e.text.text() {
 		return true
 	}
-	// The source name seeds Score.Title when the text has no \title
-	// directive, so it must be the piece's own name where one exists:
-	// parsing a title-less file under a placeholder would write
-	// "\title piece" back into it on the next save.
+
 	name := "piece"
 	if e.path != "" {
 		name = strings.TrimSuffix(filepath.Base(e.path), filepath.Ext(e.path))
@@ -187,14 +131,7 @@ func (e *Editor) applyText() bool {
 		e.report(derr)
 		return false
 	}
-	// A document opened from text starts its own history, so the grid's
-	// undo stack does not offer to take back edits made to a different
-	// text. The dirty flag is set by hand: edit.Open produces a clean
-	// document, and the text really is a change against what is on disk —
-	// except in a file-seeded pane whose text is still exactly the file's
-	// own: applying that is loading the piece, not editing it, and calling
-	// it dirty would put an unsaved-work prompt between a reader and the
-	// door.
+
 	e.doc = doc
 	e.doc.MarkSaved()
 	if e.text != nil && e.text.fromFile && e.text.text() == e.text.seed {
@@ -204,19 +141,10 @@ func (e *Editor) applyText() bool {
 	return true
 }
 
-// markDirtyFromText records that the piece differs from its file. It is
-// spelled as an edit that changes nothing observable rather than as a flag,
-// so there is exactly one thing in the system that can set the dirty bit.
 func (e *Editor) markDirtyFromText() {
 	_ = e.doc.SetTitle(e.doc.Score().Title)
 }
 
-// applyTextThen applies the text view and, when it parses, runs act. It
-// is the ONE path a file action may take while the text is showing —
-// ctrl+S and the toolbar's save and practice controls all go through it,
-// so none of them can act on the document the on-screen text has
-// diverged from. Text that will not parse keeps the view open with the
-// parser's complaint and does nothing else.
 func (e *Editor) applyTextThen(act func()) {
 	if !e.applyText() {
 		return
@@ -225,14 +153,6 @@ func (e *Editor) applyTextThen(act func()) {
 	act()
 }
 
-// escapeText is what Escape means in the text view: back to the grid
-// rather than out of the editor — the way out of the application is one
-// more Escape, and losing a screenful of typing to a mistaken keypress is
-// not a way out. Text that will not parse holds the view open with the
-// complaint — except when it is exactly the broken file this editor was
-// opened ON (see NewEditorForText) and nothing has been typed over it:
-// the user came to look, decided not to fix it today, and holding them
-// hostage to a parse error they did not make protects nothing.
 func (e *Editor) escapeText() error {
 	if e.applyText() {
 		e.text = nil
@@ -241,14 +161,7 @@ func (e *Editor) escapeText() error {
 	if !e.text.fromFile {
 		return nil
 	}
-	// Edited-and-broken in a file-seeded pane: the first Escape is
-	// refused with the way out named, the second — with nothing typed in
-	// between — takes it. Without this, one exploratory keystroke in
-	// someone else's broken file would re-arm the trap the walk-away
-	// exists to release, and the pane has no undo to escape with. There
-	// is nothing to restore before leaving: the document behind a
-	// file-seeded pane is the pristine blank from NewEditorForText, so
-	// leave() pops without asking and the file on disk is untouched.
+
 	if e.text.text() == e.text.seed || e.text.escArmed {
 		return e.leave()
 	}
@@ -257,7 +170,6 @@ func (e *Editor) escapeText() error {
 	return nil
 }
 
-// updateText runs the text view for one frame.
 func (e *Editor) updateText() error {
 	if err := e.textKeys(); err != nil {
 		return err
@@ -279,8 +191,6 @@ func (e *Editor) updateText() error {
 	return nil
 }
 
-// textKeys applies this frame's typing. Escape and F2 leave, and
-// everything else edits.
 func (e *Editor) textKeys() error {
 	p := e.text
 	m := readMods()
@@ -288,8 +198,7 @@ func (e *Editor) textKeys() error {
 	if m.ctrl {
 		switch {
 		case inpututil.IsKeyJustPressed(ebiten.KeyS):
-			// Saving from the text view has to apply it first, or the file
-			// would be written from the document the text has diverged from.
+
 			e.applyTextThen(func() { e.save() })
 			return nil
 		}
@@ -300,8 +209,7 @@ func (e *Editor) textKeys() error {
 		return nil
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyF1) {
-		// F1 only: the ? key is a printable character here, and a help key
-		// that also typed itself into the piece would be worse than none.
+
 		e.helpOpen = true
 		return nil
 	}
@@ -312,7 +220,7 @@ func (e *Editor) textKeys() error {
 	changed := false
 	for _, r := range ebiten.AppendInputChars(nil) {
 		if r == '\r' || r == '\n' {
-			continue // the Enter key is handled below, once
+			continue
 		}
 		if r < 32 && r != '\t' {
 			continue
@@ -335,14 +243,12 @@ func (e *Editor) textKeys() error {
 	}
 	if changed {
 		p.reparse()
-		// New typing withdraws the second-Escape discard offer: it must
-		// only ever throw away exactly the keystrokes the refusal named.
+
 		p.escArmed = false
 	}
 	return nil
 }
 
-// applyKey handles one editing key and reports whether the text changed.
 func (p *gtabPane) applyKey(k ebiten.Key) bool {
 	switch k {
 	case ebiten.KeyEnter, ebiten.KeyNumpadEnter:
@@ -439,7 +345,6 @@ func (p *gtabPane) deleteForward() bool {
 	return false
 }
 
-// clampCaret keeps the caret on a real character and scrolls to it.
 func (p *gtabPane) clampCaret() {
 	if len(p.lines) == 0 {
 		p.lines = [][]rune{{}}
@@ -471,7 +376,6 @@ func (p *gtabPane) clampCaret() {
 	}
 }
 
-// visibleLines is how many lines the pane shows.
 func (p *gtabPane) visibleLines() int {
 	n := int((gtabPaneRect().h - 2*gtPadY) / gtLineH)
 	if n < 1 {
@@ -480,7 +384,6 @@ func (p *gtabPane) visibleLines() int {
 	return n
 }
 
-// clickAt puts the caret where the pane was clicked.
 func (p *gtabPane) clickAt(px, py float64) {
 	r := gtabPaneRect()
 	if !r.contains(px, py) {
@@ -488,39 +391,23 @@ func (p *gtabPane) clickAt(px, py float64) {
 	}
 	p.cy = p.top + int((py-r.y-gtPadY)/gtLineH)
 	p.clampCaret()
-	// The face is monospaced here, so a column is one advance wide.
+
 	col := int((px - r.x - gtPadX - gtGutter) / textWMono(" "))
 	p.cx = col
 	p.clampCaret()
 }
 
-// gtLegendW is the column beside the text that explains the format.
-//
-// It is the whole reason this view is usable by anybody who has not read
-// docs/TEXTFORMAT.md. The pane shows a file written in a small language,
-// the language is five rules long, and printing those five rules next to
-// it is the difference between an escape hatch and a wall. The pane gives
-// up the width without complaint: .gtab lines are short, and the longest
-// one in a real piece is a bar of sixteenths at about sixty characters.
 const gtLegendW = 340.0
 
 func gtabPaneRect() rect {
 	return rect{uiPadX, edGridTop, screenW - 2*uiPadX - gtLegendW - 16, gridBottom() - edGridTop - 22}
 }
 
-// gtLegendRect is the explanation column, to the right of the text.
 func gtLegendRect() rect {
 	p := gtabPaneRect()
 	return rect{p.x + p.w + 16, p.y, gtLegendW, p.h}
 }
 
-// gtLegend is what the column says: every piece of the format, with what
-// it means in a guitarist's words. An empty example starts a section.
-//
-// One line per entry, with the example in a fixed column, because the
-// whole list has to fit beside the text without scrolling — a legend you
-// have to scroll is a legend you go and read somewhere else, which is the
-// documentation this column exists to save you from opening.
 var gtLegend = []struct{ example, means string }{
 	{"", "NOTES"},
 	{"0.6", "fret 0, string 6 (1 is the thinnest)"},
@@ -549,40 +436,26 @@ var gtLegend = []struct{ example, means string }{
 	{"\\tuning", "open strings, low to high"},
 	{"\\capo 2", "capo fret"},
 	{"\\track", "starts another part"},
-	// The directives the text view is the ONLY place to set. A legend
-	// that omits them makes the one control for them undiscoverable.
+
 	{"\\instrument", "a wind part: soprano sax, flute…"},
 	{"\\backing", "this part is accompaniment, not yours"},
 	{"\\program 25", "instrument voice (General MIDI)"},
 	{"//", "a note to yourself"},
 }
 
-// gtLegendCol is where the meanings start, so every one of them lines up
-// however wide its example is.
 const gtLegendCol = 84.0
 
-// Legend spacing. Tightened twice now, each time the format grew: first
-// when \backing and \program joined (the text view is the only place
-// either can be set), again when the wind rows did (\instrument, the
-// written-pitch note form, the slur letter). The whole list still has to
-// fit beside the text without scrolling.
 const (
-	gtLegendTop    = 34.0 // first row, under the column's own heading
+	gtLegendTop    = 34.0
 	gtLegendRowH   = 14.5
-	gtLegendSecGap = 1.0 // extra air before a section heading
+	gtLegendSecGap = 1.0
 )
 
-// A gtLegendLine is one placed legend row: a section heading when example
-// is empty.
 type gtLegendLine struct {
 	example, means string
 	y              float64
 }
 
-// gtLegendLayout places every legend row inside r, stopping at rows that
-// would run into the footnote at the bottom. Drawing and the fit test
-// both read it, so the test measures what is actually drawn rather than a
-// copy of the arithmetic that can drift away from it.
 func gtLegendLayout(r rect) []gtLegendLine {
 	var out []gtLegendLine
 	y := r.y + gtLegendTop
@@ -602,12 +475,6 @@ func gtLegendLayout(r rect) []gtLegendLine {
 	return out
 }
 
-// drawGtabLegend paints the explanation column.
-// gtLegendLines is the legend's layout, computed once: its inputs (the
-// legend table, the pane rect, the font metrics) are all fixed at
-// compile time, and recomputing 25 rows every frame the text view is up
-// bought nothing. The fit test reads the same layout function, so what
-// is measured is still what is drawn.
 var gtLegendLines = gtLegendLayout(gtLegendRect())
 
 func (e *Editor) drawGtabLegend(screen *ebiten.Image) {
@@ -653,9 +520,6 @@ func (e *Editor) drawTextPane(screen *ebiten.Image) {
 		}
 	}
 
-	// The parser's verdict, under the pane. It is the whole point of
-	// editing the text here rather than in a text editor: the answer to
-	// "did I break it" is always on screen.
 	y := r.y + r.h + 4
 	if p.ok {
 		drawText(screen, "looks good — "+strconv.Itoa(p.bars)+" bars, "+strconv.Itoa(p.notes)+" notes", uiPadX, y, colGtOK)
@@ -664,18 +528,12 @@ func (e *Editor) drawTextPane(screen *ebiten.Image) {
 	drawText(screen, truncateW(p.status, screenW-2*uiPadX), uiPadX, y, colMiss)
 }
 
-// drawTextRightMono draws mono text ending at x — the line-number gutter.
 func drawTextRightMono(dst *ebiten.Image, s string, x, y float64, col color.RGBA) {
 	drawTextMono(dst, s, x-textWMono(s), y, col)
 }
 
-// textBindings is the control table while the text view is showing.
 func (e *Editor) textBindings() []helpBinding {
-	// In the ordinary F2 view, esc and F2 both read the text back to the
-	// staff. A broken file opened straight into this view has no staff
-	// to return to until the text parses, and esc there walks away from
-	// the piece instead (escapeText) — the row must say which contract
-	// is on screen.
+
 	back := helpBinding{Group: "session", Keys: "F2 or esc", Hint: "F2 back to the notation", Desc: "Read the text back and return to the staff"}
 	if e.text != nil && e.text.fromFile {
 		back.Desc = "F2 reads the repaired text onto the staff; esc leaves the piece while it will not parse"
@@ -687,8 +545,7 @@ func (e *Editor) textBindings() []helpBinding {
 		{Group: "editing", Keys: "click", Desc: "Put the caret where you click"},
 		back,
 		{Group: "session", Keys: "ctrl+S", Hint: "ctrl+S save", Desc: "Parse the text and save the piece"},
-		// F1 alone: ? is a printable character in this view and just types
-		// itself, so advertising it here would be a lie.
+
 		{Group: "session", Keys: "F1", Hint: "F1 help", Desc: "This key-binding list"},
 	}
 }

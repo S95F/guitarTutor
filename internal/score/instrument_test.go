@@ -2,9 +2,6 @@ package score
 
 import "testing"
 
-// TestWindRegistrySane pins the registry's internal consistency: names and
-// programs are unique lookup keys, every range fits MIDI at both the
-// sounding and the written end, and every span is a real range.
 func TestWindRegistrySane(t *testing.T) {
 	names := map[string]bool{}
 	programs := map[int]bool{}
@@ -32,10 +29,6 @@ func TestWindRegistrySane(t *testing.T) {
 	}
 }
 
-// TestSopranoSaxNumbers pins the first wind instrument's numbers to the
-// published facts: a B-flat soprano sax's lowest written note is B♭3
-// (MIDI 58), sounding a major second lower at A♭3 (56), and its standard
-// range tops out at written F♯6.
 func TestSopranoSaxNumbers(t *testing.T) {
 	w := WindByName("soprano sax")
 	if w == nil {
@@ -70,22 +63,17 @@ func TestWindLookups(t *testing.T) {
 	}
 }
 
-// TestWindPitchDerivation: a wind track derives sounding pitch from the
-// instrument's lowest note plus the note's semitone offset, ignoring
-// tuning and capo entirely.
 func TestWindPitchDerivation(t *testing.T) {
 	tr := &Track{Wind: WindByName("soprano sax")}
 	if p := tr.Pitch(Note{String: 1, Fret: 0}); p != 56 {
 		t.Errorf("offset 0 = %d, want 56", p)
 	}
-	// Written D5 (74) on a soprano sax sounds C5 (72): offset 16.
+
 	if p := tr.Pitch(Note{String: 1, Fret: 16}); p != 72 {
 		t.Errorf("offset 16 = %d, want 72 (C5)", p)
 	}
 }
 
-// windScore builds a minimal valid one-bar soprano sax piece for the
-// Validate tests to break one rule at a time.
 func windScore() *Score {
 	s := &Score{
 		Tempos: TempoMap{{Tick: 0, USPerQuarter: USPerQuarter(120)}},
@@ -142,8 +130,6 @@ func TestWindValidate(t *testing.T) {
 		}
 	}
 
-	// The slur bit (shared with TechHammer) and the surviving guitar
-	// techniques are legal on a wind track.
 	s := windScore()
 	s.Tracks[0].Bars[0].Beats[1].Notes[0].Tech = TechSlur | TechSlide | TechBend | TechVibrato
 	if err := s.Validate(); err != nil {
@@ -151,9 +137,6 @@ func TestWindValidate(t *testing.T) {
 	}
 }
 
-// TestWindEvents: the flattened event stream carries sounding pitch and
-// merges wind ties exactly as it does fretted ones — same lane, same
-// offset, contiguous.
 func TestWindEvents(t *testing.T) {
 	s := windScore()
 	tr := s.Tracks[0]

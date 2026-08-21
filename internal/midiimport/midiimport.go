@@ -1,41 +1,3 @@
-// Package midiimport reads Standard MIDI Files into the score model.
-//
-// MIDI is freeform — notes are on/off pairs at arbitrary ticks with no
-// notion of bars, rests, ties, or fingering — so import is a normalization
-// pass: ticks are rescaled from the file's resolution to score.PPQ, note
-// starts and ends are quantized to the straight 1/32 grid (Grid ticks),
-// bars are built from the meter map with rests filled in, notes crossing
-// beat or bar boundaries continue as Tied notes (score.Events merges them
-// back — the round-trip invariant), and every note gets a string and fret:
-// a fretted part through internal/fretting's Inferred fingerings, a wind
-// part by arithmetic on the instrument's single lane.
-//
-// Quantization is straight-grid only in v1: triplet feel is not preserved,
-// and a warning is emitted when quantization moves a note edge by more
-// than half a grid step (which happens when a note collapses to zero
-// length and is stretched back to one grid step).
-//
-// A file track is not assumed to be one instrument. MIDI separates
-// instruments by channel, and a type-0 (single-track) file — the common
-// shape for downloaded MIDI — puts the whole band on one track that way,
-// so each file track is split into one part per channel it carries. See
-// splitChannels for why merging them is not a viable simplification.
-// Channel 10, General MIDI percussion, is dropped rather than split off:
-// its keys select kit pieces, not pitches.
-//
-// A part whose program change names a wind instrument (score.WindByProgram)
-// imports as that instrument: one chromatic lane, one note at a time, so a
-// same-tick chord keeps only its highest note — melody on top, the
-// convention arrangers write by. A part with no program change keeps
-// DefaultProgram and stays guitar: the default is an assumption, not
-// evidence of an instrument.
-//
-// Deviations from the file are never silent — they are returned as
-// human-readable warnings: skipped percussion tracks (channel 10), tracks
-// split across channels, keys below the instrument's range shifted up an
-// octave, dropped unplayable notes, chord notes a monophonic wind cannot
-// sound, truncated overlapping notes, unterminated notes, and meter
-// changes that fall inside a bar.
 package midiimport
 
 import (
@@ -53,60 +15,22 @@ import (
 	"github.com/S95F/musicTutor/internal/score/textfmt"
 )
 
-// Grid is the quantization grid in score ticks: a straight 1/32 note.
 const Grid = score.ThirtySec
 
-// DefaultProgram is the General MIDI program assumed for tracks with no
-// program change: 25, steel-string acoustic guitar, matching the text
-// format's default (docs/TEXTFORMAT.md).
 const DefaultProgram = 25
 
-// MaxTicks caps the score extent the import will accept — about 14
-// hours of 4/4 at 120 BPM. barSpecs allocates one barSpec per bar from
-// tick 0 to the score's end, so a single hostile delta (a few bytes in
-// the file) could otherwise turn the layout into an unbounded
-// allocation loop. Score ticks are always PPQ 960 after rescaling, so
-// the limit is resolution-independent: a 3-hour piece is roughly 21
-// million ticks / 5,400 bars, comfortably inside.
 const MaxTicks = 100_000_000
 
-// maxBars is the belt-and-braces cap on the bar count itself, for meter
-// maps whose tiny bars (a 1/128 meter makes 30-tick bars) would slice
-// even a legal extent into an absurd number of specs.
 const maxBars = 100_000
 
-// smfHeaderMagic starts every Standard MIDI File's MThd chunk.
 var smfHeaderMagic = []byte("MThd")
 
-// Import parses a Standard MIDI File into a Score, returning
-// human-readable warnings for everything the import changed or dropped.
-// One score track is produced per (file track, MIDI channel) pair holding
-// notes. The RoleUser track — the part offered for practice — is the
-// first of them that still sounds a note after fingering (see
-// setUserTrack, which explains why "first" alone is not enough); the rest
-// are RoleBacking. A part whose program change names a wind instrument
-// (score.WindByProgram) becomes that wind's single-lane track; every other
-// part is a standard-tuning guitar track with fingerings inferred by
-// internal/fretting. The result always passes Validate.
 func Import(data []byte) (*score.Score, []string, error) {
-	// The SMPTE check below on the parsed TimeFormat never gets to run
-	// for a real SMPTE file: gomidi's ReadFrom panics first, on an
-	// unchecked MetricTicks assertion in its tempo-time bookkeeping
-	// (calculateAbsTimes). Check the header's raw division word — the
-	// SMPTE formats set its high bit — before handing the bytes to the
-	// library, so a one-bit corruption cannot crash the app. Offset 12
-	// is the division word in a standard 6-byte MThd chunk.
+
 	if len(data) >= 14 && bytes.HasPrefix(data, smfHeaderMagic) && data[12]&0x80 != 0 {
 		return nil, nil, fmt.Errorf("SMPTE time format is not supported")
 	}
-	// gomidi reads a meta/sysex event's declared length and allocates it
-	// (make([]byte, ln)) before it has the bytes — and it does not bound
-	// that length by the track chunk or the file (its own reader comment
-	// says so). A five-byte varlen claiming ~4 GB of event data in a
-	// 200-byte file therefore drives a multi-gigabyte allocation, an
-	// out-of-memory the recover() below cannot catch (a runtime throw, not
-	// a panic). Reject a declared data length larger than the whole file
-	// up front — no real event field can be — before a byte reaches gomidi.
+
 	if err := checkSMFEventLengths(data); err != nil {
 		return nil, nil, err
 	}
@@ -122,27 +46,12 @@ func Import(data []byte) (*score.Score, []string, error) {
 	return im.run(sm)
 }
 
-// checkSMFEventLengths walks a Standard MIDI File's structure just far
-// enough to bound every variable-length event-data field (sysex 0xF0/0xF7
-// and meta 0xFF), rejecting any whose declared length exceeds the whole
-// file — the shape that makes gomidi allocate gigabytes from a tiny file.
-//
-// It is deliberately conservative: the ONLY thing it rejects is a
-// declared length larger than the entire input, which no genuine field
-// can ever be, so a walk that loses sync on a truly malformed file cannot
-// false-reject a valid one — a bogus "length" would have to exceed the
-// file to trip the check. Anything it cannot confidently parse, it stops
-// and accepts, leaving gomidi to report the real error as it does today.
-// Non-SMF bytes (no MThd) are passed straight through.
 func checkSMFEventLengths(data []byte) error {
 	if !bytes.HasPrefix(data, smfHeaderMagic) || len(data) < 14 {
 		return nil
 	}
 	n := len(data)
-	// varlen reads a MIDI variable-length quantity at pos, advancing it.
-	// ok is false at end of input. The value saturates at n+1: this
-	// function only ever compares it against n, so a field whose length
-	// runs past the file is caught even when the true value would overflow.
+
 	varlen := func(pos *int) (v int, ok bool) {
 		for i := 0; ; i++ {
 			if *pos >= n {
@@ -159,19 +68,19 @@ func checkSMFEventLengths(data []byte) error {
 			if b&0x80 == 0 {
 				return v, true
 			}
-			if i >= 4 { // a real SMF varlen is at most four bytes
+			if i >= 4 {
 				return v, true
 			}
 		}
 	}
 
-	pos := 8 + int(be32(data[4:8])) // past MThd: 4 magic + 4 length + body
+	pos := 8 + int(be32(data[4:8]))
 	for pos+8 <= n {
 		typ := data[pos : pos+4]
 		clen := int(be32(data[pos+4 : pos+8]))
 		pos += 8
 		if !bytes.Equal(typ, []byte("MTrk")) {
-			pos += clen // skip a non-track chunk wholesale
+			pos += clen
 			continue
 		}
 		chunkEnd := pos + clen
@@ -180,7 +89,7 @@ func checkSMFEventLengths(data []byte) error {
 		}
 		var status byte
 		for pos < chunkEnd {
-			if _, ok := varlen(&pos); !ok { // delta time
+			if _, ok := varlen(&pos); !ok {
 				return nil
 			}
 			if pos >= chunkEnd {
@@ -191,14 +100,14 @@ func checkSMFEventLengths(data []byte) error {
 				status = b
 				pos++
 			} else if status == 0 {
-				return nil // data byte with no running status: give up
+				return nil
 			}
 			switch {
-			case status == 0xFF: // meta: type byte, then a varlen data block
+			case status == 0xFF:
 				if pos >= chunkEnd {
 					return nil
 				}
-				pos++ // meta type
+				pos++
 				l, ok := varlen(&pos)
 				if !ok {
 					return nil
@@ -207,7 +116,7 @@ func checkSMFEventLengths(data []byte) error {
 					return fmt.Errorf("reading SMF: malformed file (meta event declares %d bytes, larger than the %d-byte file)", l, n)
 				}
 				pos += l
-			case status == 0xF0 || status == 0xF7: // sysex: a varlen data block
+			case status == 0xF0 || status == 0xF7:
 				l, ok := varlen(&pos)
 				if !ok {
 					return nil
@@ -216,14 +125,14 @@ func checkSMFEventLengths(data []byte) error {
 					return fmt.Errorf("reading SMF: malformed file (sysex event declares %d bytes, larger than the %d-byte file)", l, n)
 				}
 				pos += l
-			case status >= 0x80 && status <= 0xEF: // channel voice message
+			case status >= 0x80 && status <= 0xEF:
 				if status < 0xC0 || status >= 0xE0 {
-					pos += 2 // two data bytes
+					pos += 2
 				} else {
-					pos++ // program change / channel pressure: one data byte
+					pos++
 				}
 			default:
-				return nil // system-common/realtime in an SMF track: give up
+				return nil
 			}
 		}
 		pos = chunkEnd
@@ -231,14 +140,10 @@ func checkSMFEventLengths(data []byte) error {
 	return nil
 }
 
-// be32 reads a big-endian uint32 (SMF's chunk-length and header encoding).
 func be32(b []byte) uint32 {
 	return uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
 }
 
-// readSMF parses the file bytes, converting any panic inside the SMF
-// library into an error: gomidi trusts parts of a hostile header that it
-// should not, and a malformed import must fail, never crash.
 func readSMF(data []byte) (sm *smf.SMF, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -252,7 +157,6 @@ func readSMF(data []byte) (sm *smf.SMF, err error) {
 	return sm, nil
 }
 
-// ImportFile reads path and imports it via Import.
 func ImportFile(path string) (*score.Score, []string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -261,67 +165,47 @@ func ImportFile(path string) (*score.Score, []string, error) {
 	return Import(data)
 }
 
-// An importer holds one import's state: the file's tick resolution and the
-// warnings accumulated so far.
 type importer struct {
 	filePPQ int64
 	warns   []string
 }
 
-// warnf records one human-readable warning.
 func (im *importer) warnf(format string, args ...any) {
 	im.warns = append(im.warns, fmt.Sprintf(format, args...))
 }
 
-// scale converts a tick from the file's resolution to score.PPQ, rounding
-// to nearest.
 func (im *importer) scale(t int64) int64 {
 	return (t*score.PPQ + im.filePPQ/2) / im.filePPQ
 }
 
-// quantize snaps a score tick to the nearest Grid multiple.
 func quantize(t int64) int64 { return (t + Grid/2) / Grid * Grid }
 
-// percussionChannel is the wire number of General MIDI channel 10, where
-// a note's key selects a drum-kit piece instead of naming a pitch — so
-// nothing on it can be spelled as a string and fret. internal/gpimport
-// applies the same rule to Guitar Pro tracks.
 const percussionChannel = 9
 
-// A rawNote is one matched note-on/off pair in score ticks.
 type rawNote struct {
 	start, end int64
 	key        int
-	ch         uint8 // MIDI channel the note was authored on
-	str, fret  int   // assigned fingering; str 0 until assigned
+	ch         uint8
+	str, fret  int
 }
 
-// A fileTrack is one SMF track exactly as the file holds it: possibly
-// several instruments, told apart only by channel. A type-0 file has one
-// of these carrying the entire piece.
 type fileTrack struct {
 	index    int
 	name     string
-	programs map[uint8]int // first program change per channel
+	programs map[uint8]int
 	notes    []*rawNote
 }
 
-// A rawTrack is one part the import will build: one file track's notes on
-// one MIDI channel.
 type rawTrack struct {
-	index   int  // file track index
-	channel int  // MIDI channel, 0-based
-	split   bool // the file track carried more than one channel
+	index   int
+	channel int
+	split   bool
 	name    string
-	program int                   // program change on this channel, or -1
-	wind    *score.WindInstrument // the instrument the program names, or nil for a fretted part
+	program int
+	wind    *score.WindInstrument
 	notes   []*rawNote
 }
 
-// desc names a part in warnings. A file track that carried a single
-// channel keeps the plain "track N" wording; a part carved out of a
-// multi-channel track names its channel too, so a warning points at one
-// instrument rather than at the whole merged track.
 func (rt *rawTrack) desc() string {
 	if !rt.split {
 		return fmt.Sprintf("track %d", rt.index)
@@ -329,15 +213,13 @@ func (rt *rawTrack) desc() string {
 	return fmt.Sprintf("track %d channel %d", rt.index, rt.channel+1)
 }
 
-// run drives the import of a parsed SMF.
 func (im *importer) run(sm *smf.SMF) (*score.Score, []string, error) {
 	s := &score.Score{}
 	var raws []*rawTrack
 	for ti, tr := range sm.Tracks {
 		ft := im.readTrack(ti, tr)
 		if ti == 0 && len(ft.notes) == 0 {
-			// SMF-1 convention: a noteless first track is the
-			// conductor track and its name is the piece title.
+
 			s.Title = ft.name
 		}
 		raws = append(raws, im.splitChannels(ft)...)
@@ -348,8 +230,6 @@ func (im *importer) run(sm *smf.SMF) (*score.Score, []string, error) {
 
 	s.Tempos, s.Meters = im.readMaps(sm)
 
-	// Normalize every track's notes, then size the shared bar structure
-	// to the latest note end across all tracks.
 	var end int64
 	kept := 0
 	for _, rt := range raws {
@@ -362,8 +242,7 @@ func (im *importer) run(sm *smf.SMF) (*score.Score, []string, error) {
 		}
 	}
 	if kept == 0 {
-		// Every note was dropped during normalization; the warnings
-		// explain why.
+
 		return nil, im.warns, fmt.Errorf("no playable notes in file")
 	}
 	specs, err := im.barSpecs(s.Meters, end)
@@ -382,21 +261,6 @@ func (im *importer) run(sm *smf.SMF) (*score.Score, []string, error) {
 	return s, im.warns, nil
 }
 
-// setUserTrack marks the practice part, and does it once the tracks are
-// built rather than from the raw part order.
-//
-// Position alone stopped being safe when tracks began splitting per
-// channel. normalize can empty a part completely — every note out of the
-// instrument's range is dropped as unfrettable — and a whole channel can
-// be exactly that: a piccolo, bells, a synth lead two octaves up. Chosen
-// by position, such a channel becomes the part that opens for practice,
-// and the player is handed a blank tab with nothing to play. Choosing the
-// first track that actually sounds costs nothing when the first part is
-// fine, which is the ordinary case.
-//
-// run has already established that at least one note survived
-// normalization, so the loop always finds a track; the trailing
-// assignment is the belt for a future caller that has not.
 func setUserTrack(s *score.Score) {
 	for _, tr := range s.Tracks {
 		if trackHasNotes(tr) {
@@ -409,8 +273,6 @@ func setUserTrack(s *score.Score) {
 	}
 }
 
-// trackHasNotes reports whether a built track sounds anything at all, as
-// opposed to being a run of rests.
 func trackHasNotes(t *score.Track) bool {
 	for _, bar := range t.Bars {
 		for _, beat := range bar.Beats {
@@ -422,18 +284,9 @@ func trackHasNotes(t *score.Track) bool {
 	return false
 }
 
-// readTrack extracts one file track's name, its first program change per
-// channel, and its notes, matching note-ons to note-offs and filtering
-// percussion (channel 10, wire channel 9). Ticks are converted to score
-// resolution; quantization happens later in normalize.
-//
-// Programs are kept per channel, not per track: on a multi-channel track
-// the first program change belongs to whichever channel sent it, and
-// applying it to the whole track would label the guitar part with the
-// bass's instrument.
 func (im *importer) readTrack(ti int, tr smf.Track) *fileTrack {
 	ft := &fileTrack{index: ti, programs: map[uint8]int{}}
-	open := map[[2]uint8][]*rawNote{} // (channel, key) -> unclosed notes, oldest first
+	open := map[[2]uint8][]*rawNote{}
 	perc := 0
 	var abs int64
 	for _, ev := range tr {
@@ -468,9 +321,7 @@ func (im *importer) readTrack(ti int, tr smf.Track) *fileTrack {
 			}
 		case msg.GetMetaTrackName(&text):
 			if ft.name == "" {
-				// SMF text is arbitrary bytes. A name holding a line break
-				// or the "//" comment marker would flow into \title or
-				// \track and make the imported piece refuse to save.
+
 				name, changed := textfmt.CleanLabel(text)
 				if changed {
 					im.warnf("track %d: the track name %q holds text a saved .gtab cannot (a line break or \"//\"); imported as %q", ti, text, name)
@@ -499,22 +350,6 @@ func (im *importer) readTrack(ti int, tr smf.Track) *fileTrack {
 	return ft
 }
 
-// splitChannels divides a file track into one part per MIDI channel,
-// lowest channel first, and returns nothing for a track without notes.
-//
-// A type-0 (single-track) MIDI file — the usual shape for downloaded
-// MIDI — puts every instrument on one track, separated only by channel.
-// Merging them hands the fretting heuristic a bass line, a guitar part
-// and a piano voicing sounding at once; it crams what fits onto six
-// strings, truncates the same-string overlaps and drops the rest, so the
-// practice part is not any of the three instruments. Splitting by channel
-// gives back one selectable part per instrument, which is the shape the
-// rest of the app expects of a score.
-//
-// The split is driven by the channels actually used rather than by the
-// file's format byte: type-1 tracks are nearly always single-channel, so
-// this is a no-op for them, and where one is not, it is carrying several
-// instruments for the same reason and wants the same treatment.
 func (im *importer) splitChannels(ft *fileTrack) []*rawTrack {
 	if len(ft.notes) == 0 {
 		return nil
@@ -538,11 +373,7 @@ func (im *importer) splitChannels(ft *fileTrack) []*rawTrack {
 		rt := &rawTrack{index: ft.index, channel: int(ch), split: multi, name: ft.name, program: -1}
 		if p, ok := ft.programs[ch]; ok {
 			rt.program = p
-			// A program change naming a wind instrument makes the part
-			// that instrument. Classification wants explicit evidence: a
-			// part with no program change keeps the guitar default,
-			// because DefaultProgram is an assumption of ours, not
-			// something the file said.
+
 			rt.wind = score.WindByProgram(p)
 		}
 		if multi {
@@ -558,9 +389,6 @@ func (im *importer) splitChannels(ft *fileTrack) []*rawTrack {
 	return out
 }
 
-// partName labels one channel's part. MIDI names tracks, never channels,
-// so a split track's name is qualified by the channel rather than
-// repeated verbatim on parts that are different instruments.
 func partName(track string, ch uint8) string {
 	if track == "" {
 		return fmt.Sprintf("Channel %d", ch+1)
@@ -568,7 +396,6 @@ func partName(track string, ch uint8) string {
 	return fmt.Sprintf("%s (channel %d)", track, ch+1)
 }
 
-// channelList renders channels as the 1-based numbers a musician sees.
 func channelList(channels []uint8) string {
 	parts := make([]string, len(channels))
 	for i, ch := range channels {
@@ -577,9 +404,6 @@ func channelList(channels []uint8) string {
 	return strings.Join(parts, ", ")
 }
 
-// readMaps collects tempo and time-signature meta events from every track
-// into sorted maps, inserting the SMF defaults (120 BPM, 4/4) when a file
-// omits them at tick 0.
 func (im *importer) readMaps(sm *smf.SMF) (score.TempoMap, score.MeterMap) {
 	var tempos score.TempoMap
 	var meters score.MeterMap
@@ -591,24 +415,14 @@ func (im *importer) readMaps(sm *smf.SMF) (score.TempoMap, score.MeterMap) {
 			var num, den uint8
 			switch {
 			case ev.Message.GetMetaTempo(&bpm):
-				// A zero tempo payload (0 microseconds per quarter)
-				// decodes as an infinite BPM and would produce a
-				// degenerate tempo the score model rejects: skip it
-				// and let the tick-0 default supply 120 BPM.
+
 				if usq := score.USPerQuarter(bpm); usq > 0 {
 					tempos = append(tempos, score.Tempo{Tick: im.scale(abs), USPerQuarter: usq})
 				} else {
 					im.warnf("skipped tempo event at tick %d: non-positive microseconds per quarter", im.scale(abs))
 				}
 			case ev.Message.GetMetaMeter(&num, &den):
-				// gomidi decodes the denominator byte as a power of
-				// two, and a byte of 8 or more overflows uint8 to 0;
-				// the numerator byte is not validated at all. A
-				// zero-valued meter placed past the last note escapes
-				// barSpecs' check (which only inspects meters that
-				// govern bars) and later panics BeatLen with a divide
-				// by zero when the user seeks to the end of the piece
-				// — so reject invalid meters here, with a warning.
+
 				if num >= 1 && den >= 1 {
 					meters = append(meters, score.Meter{Tick: im.scale(abs), Num: int(num), Den: int(den)})
 				} else {
@@ -630,8 +444,6 @@ func (im *importer) readMaps(sm *smf.SMF) (score.TempoMap, score.MeterMap) {
 	return tempos, meters
 }
 
-// dedupe keeps the last of consecutive entries sharing a tick (a later
-// event at the same tick overrides an earlier one).
 func dedupe[T any](in []T, tick func(T) int64) []T {
 	var out []T
 	for i, v := range in {
@@ -643,15 +455,9 @@ func dedupe[T any](in []T, tick func(T) int64) []T {
 	return out
 }
 
-// normalize quantizes a track's notes to the Grid, shifts keys below the
-// part's instrument up an octave, gives every note its string and fret —
-// heuristic fingerings for a fretted part (assignFrets), lane arithmetic
-// for a wind part (assignWind), either of which drops what the instrument
-// cannot sound — and truncates overlapping notes on the same lane.
 func (im *importer) normalize(rt *rawTrack) {
 	moved, shifted := 0, 0
-	// The range floor is the lowest note the part's instrument sounds; the
-	// one-octave rescue below it is the same policy for both families.
+
 	low := lowestKey(score.StandardTuning, 0)
 	if rt.wind != nil {
 		low = rt.wind.LowSounding
@@ -697,8 +503,6 @@ func (im *importer) normalize(rt *rawTrack) {
 	}
 	rt.notes = kept
 
-	// A new attack on a string still ringing cuts the ringing note off:
-	// strings are monophonic, and a wind part's whole lane is.
 	truncated := 0
 	last := map[int]*rawNote{}
 	for _, n := range rt.notes {
@@ -717,12 +521,8 @@ func (im *importer) normalize(rt *rawTrack) {
 	}
 }
 
-// assignFrets gives a fretted part's notes their string and fret via the
-// internal/fretting heuristic, leaving str 0 — dropped — on the notes it
-// reports unplayable.
 func (im *importer) assignFrets(rt *rawTrack) {
-	// Group simultaneous attacks into chords and hand the onset sequence
-	// to the fretting heuristic.
+
 	var onsets [][]*rawNote
 	for _, n := range rt.notes {
 		if len(onsets) > 0 && onsets[len(onsets)-1][0].start == n.start {
@@ -750,21 +550,6 @@ func (im *importer) assignFrets(rt *rawTrack) {
 	}
 }
 
-// assignWind puts a wind part's notes on the instrument's single lane:
-// String 1, Fret counting semitones above the lowest note — arithmetic,
-// not a heuristic, which is why buildTrack does not mark the result
-// Inferred. A key still below the instrument after normalize's octave
-// shift is dropped (str stays 0), mirroring the fretted policy. The
-// ceiling is the WRITTEN pitch: a transposing instrument reads above
-// what it sounds, and a sounding key past 127 - Transpose has no written
-// note name, so the text format could never save the piece — such a note
-// is dropped with a warning rather than imported as something unwritable.
-// Span caps only what the editor offers — altissimo imports as written.
-//
-// The instrument is monophonic, so simultaneous attacks cannot all sound:
-// each same-tick chord keeps its highest note — melody on top, the
-// convention arrangers write by — and the drops are counted into one
-// warning per part rather than reported note by note.
 func (im *importer) assignWind(rt *rawTrack) {
 	w := rt.wind
 	for _, n := range rt.notes {
@@ -781,8 +566,7 @@ func (im *importer) assignWind(rt *rawTrack) {
 		note := w.NoteFor(n.key)
 		n.str, n.fret = note.String, note.Fret
 	}
-	// rt.notes is sorted by (start, key), so within a same-tick chord the
-	// last playable note is the highest: each collision drops the earlier.
+
 	dropped := 0
 	var prev *rawNote
 	for _, n := range rt.notes {
@@ -801,20 +585,13 @@ func (im *importer) assignWind(rt *rawTrack) {
 	}
 }
 
-// A barSpec is one bar of the shared bar structure.
 type barSpec struct {
 	start    int64
 	num, den int
 }
 
-// barSpecs lays out contiguous bars from tick 0 through end under the
-// meter map. A meter change that falls inside a bar takes effect at the
-// next barline, with a warning.
 func (im *importer) barSpecs(meters score.MeterMap, end int64) ([]barSpec, error) {
-	// A negative end means an absurd file delta overflowed int64 in
-	// scale(); both that and a merely enormous end would otherwise drive
-	// the layout loop below into an unbounded (or never-terminating)
-	// allocation.
+
 	if end < 0 || end > MaxTicks {
 		return nil, fmt.Errorf("score too long: extends to tick %d, past the %d-tick limit", end, int64(MaxTicks))
 	}
@@ -840,11 +617,6 @@ func (im *importer) barSpecs(meters score.MeterMap, end int64) ([]barSpec, error
 	return specs, nil
 }
 
-// rebaseMeters rewrites the meter map onto the ticks the bar structure
-// actually used: a change that fell inside a bar (which barSpecs applied
-// at the next barline) moves to that barline, and when two changes land
-// on the same tick the later one wins — so the stored map and the bars
-// always agree.
 func rebaseMeters(meters score.MeterMap, specs []barSpec) score.MeterMap {
 	if len(specs) == 0 {
 		return meters
@@ -874,21 +646,6 @@ func rebaseMeters(meters score.MeterMap, specs []barSpec) score.MeterMap {
 	return dedupe(out, func(m score.Meter) int64 { return m.Tick })
 }
 
-// buildTrack converts one normalized raw track into a score.Track. Within
-// each bar the beat boundaries are the union of the bar's edges and every
-// note onset and end inside it, so each note covers a whole number of
-// beats: the first carries the attack, the rest continue it as Tied
-// notes, and beats with nothing sounding become rests.
-//
-// The walk is linear in notes plus bars rather than their product: note
-// edges are bucketed into their bars up front (one binary search per
-// edge), and the notes sounding at each beat segment are tracked with an
-// advancing cursor plus a carried active set instead of rescanning the
-// whole note list per segment. After normalize's same-string truncation
-// the active set holds at most one note per string. A tied note can
-// sound many bars past its start, which is why the active set is carried
-// across bars instead of being recomputed from a per-bar window of note
-// starts.
 func (im *importer) buildTrack(rt *rawTrack, role score.TrackRole, specs []barSpec) *score.Track {
 	program := rt.program
 	if program < 0 {
@@ -899,19 +656,13 @@ func (im *importer) buildTrack(rt *rawTrack, role score.TrackRole, specs []barSp
 		Program: program,
 		Role:    role,
 	}
-	// One representation per family: a wind track carries its instrument
-	// and no strings (Tuning nil, Capo 0), a fretted track its tuning —
-	// Validate rejects a mix.
+
 	if rt.wind != nil {
 		tr.Wind = rt.wind
 	} else {
 		tr.Tuning = score.StandardTuning
 	}
-	// Bucket every note edge that falls strictly inside a bar; an edge
-	// on a barline adds no boundary because the bar's own edges already
-	// cover it. Bars are contiguous, so the bar owning edge x is the
-	// last one starting before x, and an edge at or past that bar's end
-	// sits on a barline or past the score.
+
 	edges := make([][]int64, len(specs))
 	for _, n := range rt.notes {
 		for _, x := range [2]int64{n.start, n.end} {
@@ -925,10 +676,7 @@ func (im *importer) buildTrack(rt *rawTrack, role score.TrackRole, specs []barSp
 			}
 		}
 	}
-	// rt.notes is sorted by start (normalize keeps it that way) and
-	// segment starts only ever advance, so a single cursor pass
-	// activates each note exactly once; a note leaves the active set
-	// once it no longer sounds at the current segment.
+
 	cursor := 0
 	var active []*rawNote
 	for bi, bs := range specs {
@@ -939,7 +687,7 @@ func (im *importer) buildTrack(rt *rawTrack, role score.TrackRole, specs []barSp
 		for i := 0; i+1 < len(bounds); i++ {
 			segStart, segEnd := bounds[i], bounds[i+1]
 			if segEnd == segStart {
-				continue // duplicate boundary
+				continue
 			}
 			for cursor < len(rt.notes) && rt.notes[cursor].start <= segStart {
 				active = append(active, rt.notes[cursor])
@@ -958,8 +706,7 @@ func (im *importer) buildTrack(rt *rawTrack, role score.TrackRole, specs []barSp
 					String: n.str,
 					Fret:   n.fret,
 					Tied:   n.start < segStart,
-					// Inferred marks heuristic fingerings the UI renders
-					// distinctly; a wind lane is arithmetic, not a guess.
+
 					Inferred: rt.wind == nil,
 				})
 			}
@@ -970,7 +717,6 @@ func (im *importer) buildTrack(rt *rawTrack, role score.TrackRole, specs []barSp
 	return tr
 }
 
-// lowestKey returns the lowest sounding pitch of a tuning with a capo.
 func lowestKey(tuning score.Tuning, capo int) int {
 	low := tuning[0] + capo
 	for _, open := range tuning {
@@ -981,7 +727,6 @@ func lowestKey(tuning score.Tuning, capo int) int {
 	return low
 }
 
-// abs64 returns the absolute value of a tick delta.
 func abs64(v int64) int64 {
 	if v < 0 {
 		return -v

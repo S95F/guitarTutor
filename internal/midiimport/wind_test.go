@@ -11,12 +11,6 @@ import (
 	"github.com/S95F/musicTutor/internal/score/textfmt"
 )
 
-// TestImportWindTrack: a channel whose program change is 64 (soprano sax)
-// imports as a wind track — the wind header with no strings and no capo,
-// every note on the single lane at Fret = key − LowSounding, and none of
-// them Inferred, since the lane is arithmetic rather than a heuristic
-// guess. Key 92 sits above the standard Span (56+32 = 88): altissimo is
-// real and must import as written, not be clamped or dropped.
 func TestImportWindTrack(t *testing.T) {
 	var tr smf.Track
 	tr.Add(0, smf.MetaTrackSequenceName("Sax"))
@@ -70,10 +64,6 @@ func TestImportWindTrack(t *testing.T) {
 	}
 }
 
-// TestImportWindChordKeepsHighest: a same-tick chord cannot sound on a
-// monophonic instrument, so the highest key survives — melody on top, the
-// convention arrangers write by — and the drops are counted into one
-// aggregate warning instead of one warning per note.
 func TestImportWindChordKeepsHighest(t *testing.T) {
 	var tr smf.Track
 	tr.Add(0, midi.ProgramChange(0, 64))
@@ -99,10 +89,6 @@ func TestImportWindChordKeepsHighest(t *testing.T) {
 	}
 }
 
-// TestImportWindOctaveShift: D3 (key 50) sits below the soprano sax's
-// lowest sounding note, A♭3 (56), and is rescued up an octave to D4 (62)
-// exactly as a guitar part's low notes are; E2 (40) is still below the
-// horn after one shift (52 < 56) and is dropped, each with its warning.
 func TestImportWindOctaveShift(t *testing.T) {
 	var tr smf.Track
 	tr.Add(0, midi.ProgramChange(0, 64))
@@ -132,9 +118,6 @@ func TestImportWindOctaveShift(t *testing.T) {
 	}
 }
 
-// windBandTrack is one MIDI track holding a guitar on channel 1 (program
-// 25) and a soprano sax on channel 2 (program 64), the way a type-0 file
-// interleaves a band. Each channel plays two quarter notes.
 func windBandTrack() smf.Track {
 	var tr smf.Track
 	tr.Add(0, smf.MetaTrackSequenceName("Band"))
@@ -151,10 +134,6 @@ func windBandTrack() smf.Track {
 	return tr
 }
 
-// TestImportBandWithWind: a track carrying a guitar channel and a sax
-// channel splits into one part per channel, and each part keeps its own
-// family — the guitar its standard tuning and Inferred fingerings, the sax
-// its wind lane — with the mixed score passing Validate whole.
 func TestImportBandWithWind(t *testing.T) {
 	s, warns, err := Import(buildSMF(t, 960, windBandTrack()))
 	if err != nil {
@@ -170,7 +149,7 @@ func TestImportBandWithWind(t *testing.T) {
 		name    string
 		program int
 		role    score.TrackRole
-		wind    string // wind instrument name, "" for a fretted part
+		wind    string
 		events  [][3]int64
 	}{
 		{"Band (channel 1)", 25, score.RoleUser, "", [][3]int64{{0, 960, 64}, {960, 1920, 62}}},
@@ -209,8 +188,7 @@ func TestImportBandWithWind(t *testing.T) {
 			}
 		}
 	}
-	// The families' Inferred flags must not bleed into each other: every
-	// guitar note is a heuristic guess, no sax note is.
+
 	for bi, bar := range s.Tracks[0].Bars {
 		for _, beat := range bar.Beats {
 			for _, n := range beat.Notes {
@@ -237,15 +215,12 @@ func TestImportBandWithWind(t *testing.T) {
 	}
 }
 
-// TestImportWindWrittenCeiling: a transposing horn reads above what it
-// sounds, and a sounding key whose written pitch would pass MIDI 127 has
-// no note name the text format could ever save — it is dropped, loudly.
 func TestImportWindWrittenCeiling(t *testing.T) {
 	var tr smf.Track
-	tr.Add(0, midi.ProgramChange(0, 67)) // baritone sax: written = sounding + 21
-	tr.Add(0, midi.NoteOn(0, 110, 100))  // written 131
+	tr.Add(0, midi.ProgramChange(0, 67))
+	tr.Add(0, midi.NoteOn(0, 110, 100))
 	tr.Add(960, midi.NoteOff(0, 110))
-	tr.Add(0, midi.NoteOn(0, 60, 100)) // written 81: fine
+	tr.Add(0, midi.NoteOn(0, 60, 100))
 	tr.Add(960, midi.NoteOff(0, 60))
 	s, warns, err := Import(buildSMF(t, 960, tr))
 	if err != nil {
@@ -272,7 +247,7 @@ func TestImportWindWrittenCeiling(t *testing.T) {
 	if !found {
 		t.Errorf("warnings %v never explain the unwritable note", warns)
 	}
-	// The whole point: what the importer keeps, the format can save.
+
 	if _, err := textfmt.Format(s); err != nil {
 		t.Errorf("the imported piece cannot be written back: %v", err)
 	}

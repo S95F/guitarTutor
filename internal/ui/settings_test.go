@@ -1,10 +1,5 @@
 package ui
 
-// The settings screen is exercised entirely through its state methods —
-// no window is ever opened. Everything Draw shows comes from the text
-// projections asserted here (deviceText, calibrationText, soundFontText,
-// splitDeviceWarning), so covering them covers the screen.
-
 import (
 	"context"
 	"errors"
@@ -17,17 +12,12 @@ import (
 	"github.com/hajimehoshi/ebiten/v2"
 )
 
-// ---- fakes ---------------------------------------------------------------
-
-// settingsStubScreen is a do-nothing root for the Shell under test.
 type settingsStubScreen struct{}
 
 func (settingsStubScreen) Update() error              { return nil }
 func (settingsStubScreen) Draw(*ebiten.Image)         {}
 func (settingsStubScreen) Layout(int, int) (int, int) { return screenW, screenH }
 
-// settingsFakePrefs is an in-memory Prefs that counts saves and can be
-// made to fail them.
 type settingsFakePrefs struct {
 	recents   []string
 	created   []string
@@ -54,8 +44,6 @@ func (p *settingsFakePrefs) Devices() (string, string) { return p.capID, p.playI
 func (p *settingsFakePrefs) SetDevices(c, pl string)   { p.capID, p.playID = c, pl }
 func (p *settingsFakePrefs) Save() error               { p.saves++; return p.saveErr }
 
-// settingsPathPrefs adds the optional Path method, so the footer can find
-// the config file without the integrator wiring it explicitly.
 type settingsPathPrefs struct {
 	settingsFakePrefs
 	path string
@@ -68,10 +56,6 @@ type settingsOffset struct {
 	ok     bool
 }
 
-// settingsFakeAudio is a scripted AudioServices. Calibrate reports the
-// scripted progress values, signals reached, then blocks on release until
-// the test lets it finish — which is what makes the idle/running/finished
-// transitions observable without any timing assumptions.
 type settingsFakeAudio struct {
 	capture  []DeviceOption
 	playback []DeviceOption
@@ -117,7 +101,7 @@ func (a *settingsFakeAudio) Calibrate(captureID, playbackID string, progress fun
 		progress(p)
 	}
 	if a.reached != nil {
-		a.reached <- struct{}{} // progress is now published
+		a.reached <- struct{}{}
 	}
 	if a.release != nil {
 		<-a.release
@@ -140,18 +124,12 @@ func (a *settingsFakeAudio) callCount() int {
 	return a.calls
 }
 
-// settingsBlockingAudio is an AudioServices whose calibration blocks until
-// the test releases it or the run's context is cancelled — the two ways a
-// real measurement ends. It offers the cancellable entry point, so it
-// stands in for a backend that hands the device back when asked. Setting
-// refuse makes Calibrate decline at once, which is how the device's own
-// cross-instance guard turns a second screen's request down.
 type settingsBlockingAudio struct {
 	capture  []DeviceOption
 	playback []DeviceOption
 
-	started chan struct{} // one value per entered call
-	release chan struct{} // closed to let a blocked run succeed
+	started chan struct{}
+	release chan struct{}
 
 	frames int
 	conf   float64
@@ -236,10 +214,6 @@ func (a *settingsBlockingAudio) setRefusal(err error) {
 	a.mu.Unlock()
 }
 
-// settingsPlainAudio exposes only the AudioServices methods, hiding the
-// cancellable entry point: a backend that cannot be interrupted. The inner
-// services are held in a field rather than embedded precisely so
-// CalibrateContext is not promoted.
 type settingsPlainAudio struct{ inner *settingsBlockingAudio }
 
 func (a *settingsPlainAudio) BackendName() string { return a.inner.BackendName() }
@@ -256,8 +230,6 @@ func (a *settingsPlainAudio) Calibrate(captureID, playbackID string, progress fu
 	return a.inner.Calibrate(captureID, playbackID, progress)
 }
 
-// settingsDevices is a realistic Windows enumeration: an onboard Realtek
-// codec (the system default on both sides) and a Focusrite interface.
 func settingsDevices() ([]DeviceOption, []DeviceOption) {
 	capture := []DeviceOption{
 		{ID: "cap-focus", Name: "Focusrite USB (Focusrite USB Audio)"},
@@ -270,8 +242,6 @@ func settingsDevices() ([]DeviceOption, []DeviceOption) {
 	return capture, playback
 }
 
-// newSettingsFixture builds a Settings over a Shell with the given audio
-// services (nil is a valid choice) and a fresh in-memory Prefs.
 func newSettingsFixture(t *testing.T, audio AudioServices) (*Settings, *settingsFakePrefs) {
 	t.Helper()
 	p := &settingsFakePrefs{}
@@ -284,13 +254,11 @@ func newSettingsFixture(t *testing.T, audio AudioServices) (*Settings, *settings
 	return NewSettings(sh), p
 }
 
-// newSettingsAudio builds a fake backend over the realistic device lists.
 func newSettingsAudio() *settingsFakeAudio {
 	capture, playback := settingsDevices()
 	return &settingsFakeAudio{capture: capture, playback: playback, rate: 48000}
 }
 
-// settingsWaitPhase polls the snapshot until the calibration reaches want.
 func settingsWaitPhase(t *testing.T, s *Settings, want calPhase) calSnap {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -304,11 +272,6 @@ func settingsWaitPhase(t *testing.T, s *Settings, want calPhase) calSnap {
 	return calSnap{}
 }
 
-// ---- navigation ----------------------------------------------------------
-
-// TestSettingsRowNavigation: with a full set of services there are five
-// rows, Up from the first wraps to the last, and Down from the last wraps
-// to the first.
 func TestSettingsRowNavigation(t *testing.T) {
 	s, _ := newSettingsFixture(t, newSettingsAudio())
 	want := []settingsRow{srCapture, srPlayback, srCalibrate, srSoundFont, srCountIn}
@@ -337,16 +300,13 @@ func TestSettingsRowNavigation(t *testing.T) {
 	if s.cur != len(want)-1 {
 		t.Errorf("up from the first row = %d, want wrap to %d", s.cur, len(want)-1)
 	}
-	// A jump larger than the list still lands in range.
+
 	s.moveCursor(+37)
 	if s.cur < 0 || s.cur >= len(want) {
 		t.Errorf("cursor out of range after a big jump: %d", s.cur)
 	}
 }
 
-// TestSettingsNilAudioDegrades: with no audio services the device and
-// calibration rows are absent, the section explains itself, and every
-// input is inert rather than fatal.
 func TestSettingsNilAudioDegrades(t *testing.T) {
 	s, _ := newSettingsFixture(t, nil)
 	if s.hasDevices() {
@@ -370,7 +330,7 @@ func TestSettingsNilAudioDegrades(t *testing.T) {
 	if s.startCalibration() {
 		t.Error("calibration started with no audio services")
 	}
-	// Drive every row through every input; nothing may panic.
+
 	for i := range s.rows {
 		s.cur = i
 		s.adjust(-1)
@@ -383,9 +343,6 @@ func TestSettingsNilAudioDegrades(t *testing.T) {
 	}
 }
 
-// TestSettingsEmptyDeviceListsDegrade: a backend that enumerates nothing
-// (or fails to) is treated like no backend — an explanation, never an
-// empty picker.
 func TestSettingsEmptyDeviceListsDegrade(t *testing.T) {
 	for _, c := range []struct {
 		name  string
@@ -416,10 +373,6 @@ func TestSettingsEmptyDeviceListsDegrade(t *testing.T) {
 	}
 }
 
-// ---- devices -------------------------------------------------------------
-
-// TestSameAudioInterface pins the same-interface heuristic against real
-// Windows endpoint names.
 func TestSameAudioInterface(t *testing.T) {
 	for _, c := range []struct {
 		name    string
@@ -448,15 +401,10 @@ func TestSameAudioInterface(t *testing.T) {
 	}
 }
 
-// TestSettingsDeviceSelection: cycling a picker wraps, writes the new
-// pair through Prefs, saves, and raises the split-device warning exactly
-// when the two names stop looking like one interface.
 func TestSettingsDeviceSelection(t *testing.T) {
 	audio := newSettingsAudio()
 	s, p := newSettingsFixture(t, audio)
 
-	// No stored preference: both pickers land on the system default,
-	// which is the same interface, so there is nothing to warn about.
 	if s.capIdx != 1 || s.playIdx != 0 {
 		t.Fatalf("initial selection = capture %d, playback %d; want the system defaults (1, 0)", s.capIdx, s.playIdx)
 	}
@@ -467,9 +415,8 @@ func TestSettingsDeviceSelection(t *testing.T) {
 		t.Errorf("opening settings saved %d times, want 0", p.saves)
 	}
 
-	// Move capture to the Focusrite: now the pair is split.
 	s.cur = 0
-	s.adjust(+1) // wraps 1 -> 0
+	s.adjust(+1)
 	if s.capIdx != 0 {
 		t.Fatalf("capture index after right = %d, want wrap to 0", s.capIdx)
 	}
@@ -489,9 +436,8 @@ func TestSettingsDeviceSelection(t *testing.T) {
 		}
 	}
 
-	// Move playback to the Focusrite too: matched again, warning gone.
 	s.cur = 1
-	s.adjust(+1) // 0 -> 1
+	s.adjust(+1)
 	if s.playIdx != 1 {
 		t.Fatalf("playback index = %d, want 1", s.playIdx)
 	}
@@ -502,7 +448,6 @@ func TestSettingsDeviceSelection(t *testing.T) {
 		t.Errorf("warning on a matched Focusrite pair: %q", w)
 	}
 
-	// Left wraps backwards.
 	s.cur = 0
 	s.adjust(-1)
 	if s.capIdx != 1 {
@@ -510,9 +455,6 @@ func TestSettingsDeviceSelection(t *testing.T) {
 	}
 }
 
-// TestSettingsDeviceTextMarksDefaultAndSelection: the picker's rendered
-// value names the device, flags the system default, and marks the pair
-// currently in use.
 func TestSettingsDeviceTextMarksDefaultAndSelection(t *testing.T) {
 	capture, playback := settingsDevices()
 	got := deviceText(capture, 1, devChosen)
@@ -527,16 +469,12 @@ func TestSettingsDeviceTextMarksDefaultAndSelection(t *testing.T) {
 	if got := deviceText(nil, -1, devUnchosen); got == "" {
 		t.Error("deviceText on an empty list must still say something")
 	}
-	// A fallback for an unplugged device IS what a piece will use, so it
-	// keeps the selected marker; the note beside the row carries the
-	// caveat (audit C3).
+
 	if got := deviceText(capture, 1, devFallback); !strings.Contains(got, "selected") {
 		t.Errorf("fallback text = %q, want it to still say what is in use", got)
 	}
 }
 
-// TestSettingsResolveDevice: a stored device that has been unplugged
-// falls back to the system default rather than to nothing.
 func TestSettingsResolveDevice(t *testing.T) {
 	capture, _ := settingsDevices()
 	for _, c := range []struct {
@@ -555,15 +493,13 @@ func TestSettingsResolveDevice(t *testing.T) {
 	if got := resolveDevice(nil, "x"); got != -1 {
 		t.Errorf("resolveDevice on an empty list = %d, want -1", got)
 	}
-	// With no default flagged anywhere, the first entry wins.
+
 	plain := []DeviceOption{{ID: "a"}, {ID: "b"}}
 	if got := resolveDevice(plain, "zzz"); got != 0 {
 		t.Errorf("resolveDevice with no default = %d, want 0", got)
 	}
 }
 
-// TestSettingsStoredPairSelected: a stored pair is what the screen opens
-// on, and its stored offset is the one shown.
 func TestSettingsStoredPairSelected(t *testing.T) {
 	audio := newSettingsAudio()
 	audio.offsets = map[string]settingsOffset{"cap-focus|play-focus": {frames: 2400, ok: true}}
@@ -582,7 +518,6 @@ func TestSettingsStoredPairSelected(t *testing.T) {
 		t.Errorf("calibration text = %q, want 2400 frames and 50.0 ms at 48 kHz", txt)
 	}
 
-	// Changing the pair drops the stale offset and says so.
 	s.cur = 0
 	s.adjust(+1)
 	if s.offOK {
@@ -594,15 +529,9 @@ func TestSettingsStoredPairSelected(t *testing.T) {
 	}
 }
 
-// ---- calibration ---------------------------------------------------------
-
-// TestSettingsCalibrationStateMachine drives idle -> running -> success
-// with a Calibrate that blocks until the test releases it. While it is
-// running the snapshot must show only progress (never a half-written
-// result), and a second start must be refused.
 func TestSettingsCalibrationStateMachine(t *testing.T) {
 	audio := newSettingsAudio()
-	audio.steps = []float64{0, 0.5, 1.5} // the last one is clamped
+	audio.steps = []float64{0, 0.5, 1.5}
 	audio.reached = make(chan struct{})
 	audio.release = make(chan struct{})
 	audio.frames, audio.conf = 1440, 0.87
@@ -614,7 +543,7 @@ func TestSettingsCalibrationStateMachine(t *testing.T) {
 	if !s.startCalibration() {
 		t.Fatal("first startCalibration refused")
 	}
-	<-audio.reached // progress has been published; Calibrate is blocked
+	<-audio.reached
 
 	sn := s.calSnapshot()
 	if sn.Phase != calRunning {
@@ -630,8 +559,6 @@ func TestSettingsCalibrationStateMachine(t *testing.T) {
 		t.Errorf("running text = %q, want it to say it is measuring", txt)
 	}
 
-	// A second start while one is in flight is refused, and does not
-	// reach the backend.
 	if s.startCalibration() {
 		t.Error("a second calibration started while one was running")
 	}
@@ -641,7 +568,7 @@ func TestSettingsCalibrationStateMachine(t *testing.T) {
 	if n := audio.callCount(); n != 1 {
 		t.Errorf("Calibrate called %d times, want 1", n)
 	}
-	// The UI stays responsive: navigation still works mid-run.
+
 	s.moveCursor(+1)
 	s.syncSettings()
 	if s.offOK {
@@ -659,12 +586,12 @@ func TestSettingsCalibrationStateMachine(t *testing.T) {
 			t.Errorf("result text = %q, want it to contain %q", txt, want)
 		}
 	}
-	// Once the loop syncs, the stored offset the backend recorded shows.
+
 	s.syncSettings()
 	if !s.offOK || s.offFrames != 1440 {
 		t.Errorf("stored offset after calibration = %d ok=%v, want 1440, true", s.offFrames, s.offOK)
 	}
-	// And a new run may now start.
+
 	audio.reached, audio.release = nil, nil
 	if !s.startCalibration() {
 		t.Error("a fresh calibration refused after the previous one finished")
@@ -676,8 +603,6 @@ func TestSettingsCalibrationStateMachine(t *testing.T) {
 	}
 }
 
-// TestSettingsCalibrationFailure: an error from the backend is shown, not
-// swallowed, and leaves the screen able to try again.
 func TestSettingsCalibrationFailure(t *testing.T) {
 	audio := newSettingsAudio()
 	audio.reached = make(chan struct{})
@@ -712,8 +637,7 @@ func TestSettingsCalibrationFailure(t *testing.T) {
 	if s.offOK {
 		t.Error("offset published after a failed calibration")
 	}
-	// Once the loop syncs — clearing the refused-second-run notice — the
-	// band under the section carries the backend's advice.
+
 	if !settingsSays(s, "no click detected") {
 		t.Errorf("the backend's advice never reached the screen: %q", settingsNoteLines(s))
 	}
@@ -724,9 +648,6 @@ func TestSettingsCalibrationFailure(t *testing.T) {
 	settingsWaitPhase(t, s, calDone)
 }
 
-// TestSettingsCalibrationConcurrentReads hammers the snapshot from the
-// game loop's side while a run publishes progress from its own goroutine.
-// The race detector is the assertion.
 func TestSettingsCalibrationConcurrentReads(t *testing.T) {
 	audio := newSettingsAudio()
 	for i := 0; i < 200; i++ {
@@ -755,12 +676,6 @@ func TestSettingsCalibrationConcurrentReads(t *testing.T) {
 	}
 }
 
-// TestSettingsCloseCancelsCalibration is the fix for a calibration that
-// outlived the screen that started it: Escape popped the screen while the
-// run kept the capture and playback devices for the rest of its timeout,
-// so a piece opened seconds later collided with a live duplex stream.
-// Close must cancel the run, wait for the goroutine, and leave nothing
-// that can write back into the popped screen.
 func TestSettingsCloseCancelsCalibration(t *testing.T) {
 	audio := newSettingsBlockingAudio()
 	s, _ := newSettingsFixture(t, audio)
@@ -781,8 +696,6 @@ func TestSettingsCloseCancelsCalibration(t *testing.T) {
 	s.Close()
 	elapsed := time.Since(start)
 
-	// Close waited for the goroutine rather than timing out: a backend
-	// that honours the context has already given the devices back.
 	select {
 	case <-run.done:
 	default:
@@ -800,8 +713,7 @@ func TestSettingsCloseCancelsCalibration(t *testing.T) {
 	if sn := s.calSnapshot(); sn.Phase != calIdle {
 		t.Errorf("phase after Close = %v, want idle", sn.Phase)
 	}
-	// The goroutine finished after the screen let go, and wrote nothing
-	// anyone can see.
+
 	if got := run.snapshot(); got.Phase != calRunning || got.Frames != 0 {
 		t.Errorf("an abandoned run published %+v, want nothing", got)
 	}
@@ -809,15 +721,12 @@ func TestSettingsCloseCancelsCalibration(t *testing.T) {
 	if s.offOK {
 		t.Error("an abandoned run's offset reached the screen")
 	}
-	s.Close() // idempotent, and safe with no run in flight
+	s.Close()
 	if _, cancelled, _ := audio.stats(); cancelled != 1 {
 		t.Errorf("a second Close touched the backend again (cancellations = %d)", cancelled)
 	}
 }
 
-// TestSettingsCloseIsBoundedWithoutCancellation: a backend that ignores
-// cancellation must not hold the game loop. Close gives up waiting, but
-// the run is detached all the same, so its late result lands nowhere.
 func TestSettingsCloseIsBoundedWithoutCancellation(t *testing.T) {
 	inner := newSettingsBlockingAudio()
 	s, _ := newSettingsFixture(t, &settingsPlainAudio{inner: inner})
@@ -843,7 +752,6 @@ func TestSettingsCloseIsBoundedWithoutCancellation(t *testing.T) {
 		t.Errorf("phase after Close = %v, want idle", sn.Phase)
 	}
 
-	// The run finishes long after the screen is gone.
 	close(inner.release)
 	select {
 	case <-run.done:
@@ -859,10 +767,6 @@ func TestSettingsCloseIsBoundedWithoutCancellation(t *testing.T) {
 	}
 }
 
-// TestSettingsStaleResultIsNotShownForANewPair: a measurement describes
-// the pair it was taken on. Changing the pair mid-run used to publish the
-// old pair's result against the new one, so the screen claimed a device
-// combination was calibrated when it never had been.
 func TestSettingsStaleResultIsNotShownForANewPair(t *testing.T) {
 	audio := newSettingsAudio()
 	audio.reached = make(chan struct{})
@@ -876,15 +780,11 @@ func TestSettingsStaleResultIsNotShownForANewPair(t *testing.T) {
 	<-audio.reached
 	measuredCap, measuredPlay := s.selectedIDs()
 
-	// The pair changes while the measurement is in flight. The input layer
-	// refuses this mid-run; the state method is driven directly, because
-	// the result must stay bound to its pair however the pair changes.
 	s.cycleCapture(+1)
 	if capID, _ := s.selectedIDs(); capID == measuredCap {
 		t.Fatalf("capture device did not change (still %q)", capID)
 	}
 
-	// Even the running run's progress must not read as this pair's.
 	txt, _ := s.calibrationText(s.calSnapshot())
 	if !strings.Contains(txt, "previous pair") {
 		t.Errorf("text while measuring a superseded pair = %q, want it to say which pair is being measured", txt)
@@ -902,7 +802,6 @@ func TestSettingsStaleResultIsNotShownForANewPair(t *testing.T) {
 		t.Errorf("text for the unmeasured pair = %q, want it to admit there is no measurement", txt)
 	}
 
-	// Back on the pair it was measured for, the stored value is shown.
 	s.cycleCapture(-1)
 	if capID, playID := s.selectedIDs(); capID != measuredCap || playID != measuredPlay {
 		t.Fatalf("selection = (%q, %q), want the measured pair", capID, playID)
@@ -913,9 +812,6 @@ func TestSettingsStaleResultIsNotShownForANewPair(t *testing.T) {
 	}
 }
 
-// TestSettingsRefusedCalibrationSaysSo: a refusal is a message, not a
-// silent no-op — both the one this screen makes and the one the device's
-// owner makes when another screen is already measuring.
 func TestSettingsRefusedCalibrationSaysSo(t *testing.T) {
 	audio := newSettingsBlockingAudio()
 	s, _ := newSettingsFixture(t, audio)
@@ -934,8 +830,6 @@ func TestSettingsRefusedCalibrationSaysSo(t *testing.T) {
 		t.Errorf("Calibrate called %d times, want 1", calls)
 	}
 
-	// A second visit builds a new screen, so the guard that matters lives
-	// with the device. Its refusal comes back as an error and is shown.
 	busy := errors.New("a calibration is already running on this device")
 	audio.setRefusal(busy)
 	s2 := NewSettings(s.sh)
@@ -958,9 +852,6 @@ func TestSettingsRefusedCalibrationSaysSo(t *testing.T) {
 	s.Close()
 }
 
-// TestSettingsInputLockedWhileCalibrating: the device rows and the
-// count-in are the settings a running measurement depends on, so they
-// ignore input until it finishes — visibly, and only until it finishes.
 func TestSettingsInputLockedWhileCalibrating(t *testing.T) {
 	audio := newSettingsBlockingAudio()
 	s, p := newSettingsFixture(t, audio)
@@ -972,7 +863,7 @@ func TestSettingsInputLockedWhileCalibrating(t *testing.T) {
 	<-audio.started
 	savesBefore := p.saves
 
-	s.cur = 0 // capture
+	s.cur = 0
 	s.adjust(+1)
 	if s.capIdx != capBefore {
 		t.Errorf("capture index changed by left/right mid-run: %d, want %d", s.capIdx, capBefore)
@@ -981,12 +872,12 @@ func TestSettingsInputLockedWhileCalibrating(t *testing.T) {
 	if s.capIdx != capBefore {
 		t.Errorf("capture index changed by enter mid-run: %d, want %d", s.capIdx, capBefore)
 	}
-	s.cur = 1 // playback
+	s.cur = 1
 	s.adjust(-1)
 	if s.playIdx != playBefore {
 		t.Errorf("playback index changed mid-run: %d, want %d", s.playIdx, playBefore)
 	}
-	s.cur = len(s.rows) - 1 // count-in
+	s.cur = len(s.rows) - 1
 	s.adjust(+1)
 	s.activate()
 	if s.countIn != countBefore || p.countIn != countBefore {
@@ -998,7 +889,7 @@ func TestSettingsInputLockedWhileCalibrating(t *testing.T) {
 	if !strings.Contains(s.notice, "locked") {
 		t.Errorf("ignored input left no message: %q", s.notice)
 	}
-	// Navigation is never locked: the user can still read the screen.
+
 	s.moveCursor(+1)
 	s.moveCursor(-1)
 
@@ -1019,15 +910,6 @@ func TestSettingsInputLockedWhileCalibrating(t *testing.T) {
 	}
 }
 
-// TestSettingsCalibrateNowCommitsAnUnchosenPair: on first run the pickers
-// show the system defaults with nothing stored, and the one prominent
-// button on the screen is "calibrate now". It used to measure that pair
-// and store the offset under the concrete device IDs while Prefs stayed
-// empty — and the application only opens the live capture path when the
-// STORED capture ID is non-empty, so the mouse user who clicked the
-// obvious button and watched it go green got playback-only practice with
-// no scoring and nothing to explain why. Calibrating a pair is choosing
-// it.
 func TestSettingsCalibrateNowCommitsAnUnchosenPair(t *testing.T) {
 	audio := newSettingsAudio()
 	audio.frames, audio.conf = 6240, 0.95
@@ -1039,8 +921,7 @@ func TestSettingsCalibrateNowCommitsAnUnchosenPair(t *testing.T) {
 	if !s.startCalibration() {
 		t.Fatal("startCalibration refused")
 	}
-	// The pair is committed on the way in, not when the run finishes: a
-	// failed measurement still leaves the user's choice on file.
+
 	if p.capID != "cap-realtek" || p.playID != "play-realtek" {
 		t.Errorf("prefs pair = (%q, %q), want the shown defaults committed", p.capID, p.playID)
 	}
@@ -1061,10 +942,6 @@ func TestSettingsCalibrateNowCommitsAnUnchosenPair(t *testing.T) {
 	}
 }
 
-// TestSettingsCalibrateNowKeepsAnUnpluggedSavedDevice: the fallback shown
-// for a saved-but-unplugged device is NOT committed by calibrating. The
-// saved ID must survive until its interface is plugged back in, so a
-// fallback pair keeps the old store-offset-only behaviour.
 func TestSettingsCalibrateNowKeepsAnUnpluggedSavedDevice(t *testing.T) {
 	for _, c := range []struct {
 		name          string
@@ -1094,12 +971,6 @@ func TestSettingsCalibrateNowKeepsAnUnpluggedSavedDevice(t *testing.T) {
 	}
 }
 
-// TestSettingsCalibrationFailureAdviceIsWrappedIntoTheNoticeBand: the
-// advice in a measurement failure — what to connect, what to check — runs
-// to roughly twice the row's width, so rendering it as the row value cut
-// off exactly the part that says what to do. It goes to the fixed notice
-// band under the section instead, with the latency package's own prefix
-// trimmed, and showing it must not move a single control.
 func TestSettingsCalibrationFailureAdviceIsWrappedIntoTheNoticeBand(t *testing.T) {
 	const advice = "no click arrivals found in the captured signal: check that the loopback" +
 		" (cable, or speaker to mic) is connected, that the right capture device is selected," +
@@ -1128,8 +999,7 @@ func TestSettingsCalibrationFailureAdviceIsWrappedIntoTheNoticeBand(t *testing.T
 			t.Errorf("note line measures %.0fpx, past the %.0fpx band width: %q", textW(l), settingsWrap, l)
 		}
 	}
-	// The longest advice the latency package writes needs every line of
-	// the band; anything the band cannot hold is cut mid-sentence.
+
 	longest := "the round-trip delay looks like it meets or exceeds the click spacing (24000 frames, 500 ms):" +
 		" every click after the first arrived at a consistent delay but the first never did, so each match" +
 		" is probably the previous click aliased one spacing late — increase the click spacing beyond the" +
@@ -1139,12 +1009,6 @@ func TestSettingsCalibrationFailureAdviceIsWrappedIntoTheNoticeBand(t *testing.T
 	}
 }
 
-// TestSettingsCalibrationHintSpeaksToAGuitarist: the old hint ("make the
-// output audible to the input") was engineer phrasing that let the
-// natural setup — guitar plugged in, monitors on — run and fail, because
-// a pickup cannot hear the click train. The hint now says what must
-// physically happen, in a guitarist's words, and fits the fixed band it
-// lives in.
 func TestSettingsCalibrationHintSpeaksToAGuitarist(t *testing.T) {
 	s, _ := newSettingsFixture(t, newSettingsAudio())
 	for _, want := range []string{"point a mic at your speakers", "cable an output back into an input", "pickup"} {
@@ -1160,10 +1024,6 @@ func TestSettingsCalibrationHintSpeaksToAGuitarist(t *testing.T) {
 	}
 }
 
-// TestSettingsFramesTextLeadsWithMilliseconds: the offset leads with the
-// unit a musician can sanity-check — everyone knows what 130 ms of delay
-// feels like — and the frame count follows for anyone comparing against
-// the config file.
 func TestSettingsFramesTextLeadsWithMilliseconds(t *testing.T) {
 	s, _ := newSettingsFixture(t, newSettingsAudio())
 	if got, want := s.framesText(6240), "130.0 ms (6240 frames)"; got != want {
@@ -1171,8 +1031,6 @@ func TestSettingsFramesTextLeadsWithMilliseconds(t *testing.T) {
 	}
 }
 
-// settingsConfidentAudio adds the optional StoredConfidence method: a
-// backend that can say how trustworthy a stored offset is.
 type settingsConfidentAudio struct {
 	*settingsFakeAudio
 	conf     float64
@@ -1186,12 +1044,6 @@ func (a *settingsConfidentAudio) StoredConfidence(captureID, playbackID string) 
 	return a.conf, a.confOK
 }
 
-// TestSettingsWeakStoredCalibrationIsFlagged: the config stores the
-// calibration confidence precisely so the UI can suggest recalibration,
-// but a run that scraped past the measurement floor forever read as a
-// clean "stored ...", indistinguishable from a solid loopback
-// measurement. Below the threshold the row now says the measurement is
-// weak and worth redoing.
 func TestSettingsWeakStoredCalibrationIsFlagged(t *testing.T) {
 	for _, c := range []struct {
 		name   string
@@ -1236,8 +1088,6 @@ func TestSettingsWeakStoredCalibrationIsFlagged(t *testing.T) {
 	}
 }
 
-// TestSettingsBackendWithoutConfidenceNeverFlags: the interface is
-// optional, and a backend that cannot answer must read exactly as before.
 func TestSettingsBackendWithoutConfidenceNeverFlags(t *testing.T) {
 	audio := newSettingsAudio()
 	audio.offsets = map[string]settingsOffset{"cap-realtek|play-realtek": {frames: 6240, ok: true}}
@@ -1251,10 +1101,6 @@ func TestSettingsBackendWithoutConfidenceNeverFlags(t *testing.T) {
 	}
 }
 
-// ---- soundfont -----------------------------------------------------------
-
-// TestSettingsSoundFontWithoutPicker: with no picker wired, the row shows
-// the current value and Enter clears back to the built-in.
 func TestSettingsSoundFontWithoutPicker(t *testing.T) {
 	p := &settingsFakePrefs{soundFont: `C:\sf2\ChateauGrand.sf2`}
 	sh := NewShell(Services{Prefs: p}, settingsStubScreen{})
@@ -1267,22 +1113,19 @@ func TestSettingsSoundFontWithoutPicker(t *testing.T) {
 	if r, _ := s.focused(); r != srSoundFont {
 		t.Fatalf("first row = %v, want the soundfont row", r)
 	}
-	s.activate() // no picker: Enter clears
+	s.activate()
 	if p.soundFont != "" || s.soundFontText() != "built-in pluck" {
 		t.Errorf("after clear: prefs %q, text %q", p.soundFont, s.soundFontText())
 	}
 	if p.saves != 1 {
 		t.Errorf("saves = %d, want 1", p.saves)
 	}
-	s.activate() // already built-in: nothing to do, nothing to save
+	s.activate()
 	if p.saves != 1 {
 		t.Errorf("clearing an already-clear soundfont saved again (saves = %d)", p.saves)
 	}
 }
 
-// TestSettingsSoundFontPicker: the hook is called with the .sf2 filter,
-// and a path chosen later — from another goroutine — is applied on the
-// game loop's next sync, never inside the callback.
 func TestSettingsSoundFontPicker(t *testing.T) {
 	s, p := newSettingsFixture(t, nil)
 	var gotExts []string
@@ -1316,22 +1159,18 @@ func TestSettingsSoundFontPicker(t *testing.T) {
 	if p.saves != 1 {
 		t.Errorf("saves = %d, want 1", p.saves)
 	}
-	// A cancelled pick posts nothing, so a later sync changes nothing.
+
 	s.syncSettings()
 	if p.saves != 1 {
 		t.Errorf("an empty sync saved again (saves = %d)", p.saves)
 	}
-	// Left still clears back to the built-in.
+
 	s.adjust(-1)
 	if p.soundFont != "" {
 		t.Errorf("left did not clear the soundfont: %q", p.soundFont)
 	}
 }
 
-// TestSettingsUpdateDrainsMailbox: Update is wired to syncSettings, so a
-// path chosen while another screen was on top lands on the next frame
-// without any key being pressed. (Update is the only part of the screen
-// that touches ebiten input; with no keys down it is a plain no-op.)
 func TestSettingsUpdateDrainsMailbox(t *testing.T) {
 	s, p := newSettingsFixture(t, nil)
 	var chosen func(string)
@@ -1348,10 +1187,6 @@ func TestSettingsUpdateDrainsMailbox(t *testing.T) {
 	}
 }
 
-// ---- count-in ------------------------------------------------------------
-
-// TestSettingsCountInClamps: the count-in stays inside 0..8 however hard
-// it is pushed, and Enter wraps past the top so every value is reachable.
 func TestSettingsCountInClamps(t *testing.T) {
 	s, p := newSettingsFixture(t, nil)
 	s.cur = len(s.rows) - 1
@@ -1370,13 +1205,13 @@ func TestSettingsCountInClamps(t *testing.T) {
 	if s.countIn != 0 || p.countIn != 0 {
 		t.Errorf("count-in after 20 lefts = %d (prefs %d), want 0", s.countIn, p.countIn)
 	}
-	// No save for a no-op adjustment at the clamp.
+
 	saves := p.saves
 	s.adjust(-1)
 	if p.saves != saves {
 		t.Errorf("adjusting at the clamp saved again (saves = %d, was %d)", p.saves, saves)
 	}
-	// Enter steps up and wraps at the top.
+
 	for i := 1; i <= MaxCountIn; i++ {
 		s.activate()
 		if s.countIn != i {
@@ -1387,7 +1222,7 @@ func TestSettingsCountInClamps(t *testing.T) {
 	if s.countIn != 0 {
 		t.Errorf("enter at %d beats = %d, want a wrap to 0", MaxCountIn, s.countIn)
 	}
-	// An out-of-range stored value is clamped when the screen opens.
+
 	p.countIn = 99
 	sh := NewShell(Services{Prefs: p}, settingsStubScreen{})
 	if got := NewSettings(sh).countIn; got != MaxCountIn {
@@ -1395,11 +1230,6 @@ func TestSettingsCountInClamps(t *testing.T) {
 	}
 }
 
-// ---- persistence ---------------------------------------------------------
-
-// TestSettingsSaveErrorSurfaces: a Prefs whose Save fails shows the error
-// and keeps working — the change is applied in memory and the next
-// successful save clears the message.
 func TestSettingsSaveErrorSurfaces(t *testing.T) {
 	s, p := newSettingsFixture(t, nil)
 	p.saveErr = errors.New("open config.json: access is denied")
@@ -1415,7 +1245,7 @@ func TestSettingsSaveErrorSurfaces(t *testing.T) {
 	if s.countIn != 1 {
 		t.Errorf("count-in = %d, want the change applied in memory despite the failed save", s.countIn)
 	}
-	// Still responsive, and a later success clears the message.
+
 	p.saveErr = nil
 	s.adjust(+1)
 	if s.saveErr != nil {
@@ -1423,8 +1253,6 @@ func TestSettingsSaveErrorSurfaces(t *testing.T) {
 	}
 }
 
-// TestSettingsConfigPath: the footer finds the config location from a
-// Prefs that exposes Path, and SetConfigPath covers the ones that do not.
 func TestSettingsConfigPath(t *testing.T) {
 	s, _ := newSettingsFixture(t, nil)
 	if got := s.configText(); !strings.Contains(got, "unknown") {
@@ -1442,8 +1270,6 @@ func TestSettingsConfigPath(t *testing.T) {
 	}
 }
 
-// TestSettingsSampleRate: the offset is rendered in the backend's own
-// sample rate when it reports one, and at the project default otherwise.
 func TestSettingsSampleRate(t *testing.T) {
 	audio := newSettingsAudio()
 	audio.rate = 44100
@@ -1451,20 +1277,18 @@ func TestSettingsSampleRate(t *testing.T) {
 	if got := s.framesText(4410); !strings.Contains(got, "100.0 ms") {
 		t.Errorf("framesText at 44.1 kHz = %q, want 100.0 ms", got)
 	}
-	audio.rate = 0 // backend does not know: fall back to 48000
+	audio.rate = 0
 	s2, _ := newSettingsFixture(t, audio)
 	if got := s2.framesText(4800); !strings.Contains(got, "100.0 ms") {
 		t.Errorf("framesText at the default rate = %q, want 100.0 ms", got)
 	}
-	s2.SetSampleRate(0) // ignored
+	s2.SetSampleRate(0)
 	s2.SetSampleRate(96000)
 	if got := s2.framesText(9600); !strings.Contains(got, "100.0 ms") {
 		t.Errorf("framesText after SetSampleRate = %q, want 100.0 ms", got)
 	}
 }
 
-// TestSettingsNilPrefs: a Services with no Prefs is degenerate but must
-// not crash the screen.
 func TestSettingsNilPrefs(t *testing.T) {
 	sh := NewShell(Services{}, settingsStubScreen{})
 	s := NewSettings(sh)
@@ -1480,14 +1304,10 @@ func TestSettingsNilPrefs(t *testing.T) {
 	}
 }
 
-// ---- text helpers --------------------------------------------------------
-
-// TestSettingsWrapText: the warning wraps on spaces without dropping or
-// duplicating words, and never exceeds the width.
 func TestSettingsWrapText(t *testing.T) {
 	s, _ := newSettingsFixture(t, newSettingsAudio())
 	s.cur = 0
-	s.adjust(+1) // split the pair so there is a warning to wrap
+	s.adjust(+1)
 	w, ok := s.splitDeviceWarning()
 	if !ok {
 		t.Fatal("expected a split-device warning")
@@ -1498,8 +1318,7 @@ func TestSettingsWrapText(t *testing.T) {
 		t.Fatalf("warning wrapped to %d lines at %v px", len(lines), wrapPx)
 	}
 	for _, l := range lines {
-		// Measured with the face that draws it; a single over-wide word
-		// is the only permitted overflow, and this warning has none.
+
 		if textW(l) > wrapPx {
 			t.Errorf("line measures %.1fpx, past the %v px width: %q", textW(l), wrapPx, l)
 		}
@@ -1512,8 +1331,6 @@ func TestSettingsWrapText(t *testing.T) {
 	}
 }
 
-// TestSettingsDeviceInterfaceName pins the parenthesis parsing the
-// same-interface heuristic depends on, including the nested "(R)".
 func TestSettingsDeviceInterfaceName(t *testing.T) {
 	for _, c := range []struct{ in, want string }{
 		{"Speakers (Realtek(R) Audio)", "Realtek(R) Audio"},
@@ -1528,14 +1345,6 @@ func TestSettingsDeviceInterfaceName(t *testing.T) {
 	}
 }
 
-// ---- layout: nothing paints outside the room it was given ----------------
-//
-// The display list is the whole of the screen's geometry (see items), so
-// these read it the way Draw and the hit test do rather than opening a
-// window.
-
-// settingsNoteLines returns every note line the screen is showing, which
-// is how a test reads what it is telling the user.
 func settingsNoteLines(s *Settings) []string {
 	var out []string
 	for _, it := range s.items() {
@@ -1546,13 +1355,10 @@ func settingsNoteLines(s *Settings) []string {
 	return out
 }
 
-// settingsSays reports whether any note line mentions want.
 func settingsSays(s *Settings, want string) bool {
 	return strings.Contains(strings.Join(settingsNoteLines(s), " "), want)
 }
 
-// settingsRowTops renders where every row sits, as one comparable string:
-// what a test asserts about is usually that something did NOT move.
 func settingsRowTops(s *Settings) string {
 	var b strings.Builder
 	for _, it := range s.items() {
@@ -1563,15 +1369,10 @@ func settingsRowTops(s *Settings) string {
 	return b.String()
 }
 
-// settingsPressAt builds a click in the middle of a rect.
 func settingsPressAt(r rect) pointer {
 	return pointer{x: r.x + r.w/2, y: r.y + r.h/2, down: true, pressed: true}
 }
 
-// TestSettingsRowValueIsBoundedByItsButtons: a row's value used to be
-// drawn unbounded from the value column, so a value wider than the page —
-// here a device whose driver reports a marketing novel of a name — painted
-// straight under the row's own opaque buttons and off the right edge.
 func TestSettingsRowValueIsBoundedByItsButtons(t *testing.T) {
 	audio := newSettingsAudio()
 	audio.capture[1].Name = "Microphone (Aggressively Professional Reference Studio Audio Interface" +
@@ -1588,8 +1389,7 @@ func TestSettingsRowValueIsBoundedByItsButtons(t *testing.T) {
 	if got := textW(it.valueText()); got > it.valueW {
 		t.Errorf("the row paints %.0fpx of value into %.0fpx of room", got, it.valueW)
 	}
-	// Every row, not just this one: the budget stops clear of the row's own
-	// leftmost button, or of the page margin when it has none.
+
 	for _, row := range s.items() {
 		if row.kind != siRow {
 			continue
@@ -1611,11 +1411,6 @@ func TestSettingsRowValueIsBoundedByItsButtons(t *testing.T) {
 	}
 }
 
-// TestSettingsSaveErrorFitsTheFooter: the failure line is a wrapped
-// os.Rename error with two full paths, which used to be drawn unbounded
-// off the right edge of the window. It is cut to the page width, keeping
-// the label and the OS reason at the end — the only part that says what
-// went wrong.
 func TestSettingsSaveErrorFitsTheFooter(t *testing.T) {
 	s, p := newSettingsFixture(t, nil)
 	p.saveErr = errors.New(`appconfig: rename C:\Users\p\AppData\Roaming\musicTutor\config.json.tmp ` +
@@ -1626,7 +1421,7 @@ func TestSettingsSaveErrorFitsTheFooter(t *testing.T) {
 		t.Fatal("the footer announced a failure before anything was saved")
 	}
 	s.cur = len(s.rows) - 1
-	s.adjust(+1) // any change saves, and this save fails
+	s.adjust(+1)
 
 	line, ok := s.saveErrLine()
 	if !ok {
@@ -1644,7 +1439,7 @@ func TestSettingsSaveErrorFitsTheFooter(t *testing.T) {
 	if !strings.HasSuffix(line, "used by another process.") {
 		t.Errorf("footer line = %q, want the OS reason at the end to survive the cut", line)
 	}
-	// A successful save takes the line away again.
+
 	p.saveErr = nil
 	s.adjust(+1)
 	if got, ok := s.saveErrLine(); ok {
@@ -1652,12 +1447,6 @@ func TestSettingsSaveErrorFitsTheFooter(t *testing.T) {
 	}
 }
 
-// TestSettingsRefusedClickLeavesTheControlsWhereTheyWere: posting a notice
-// used to insert an ordinary note between the rows, pushing everything
-// below it down ~40px. So during a calibration, clicking "+" on the
-// count-in (refused, notice appears) and clicking again WITHOUT MOVING put
-// the second click on a different control entirely — in the worst case the
-// SoundFont row's "clear", which discarded the user's SoundFont silently.
 func TestSettingsRefusedClickLeavesTheControlsWhereTheyWere(t *testing.T) {
 	audio := newSettingsBlockingAudio()
 	p := &settingsFakePrefs{soundFont: `C:\sf2\ChateauGrand.sf2`}
@@ -1677,7 +1466,7 @@ func TestSettingsRefusedClickLeavesTheControlsWhereTheyWere(t *testing.T) {
 	plus := settingsRowItem(t, s, srCountIn).buttons[1]
 	click := settingsPressAt(plus.r)
 
-	s.handleMouse(click) // refused: the count-in is locked mid-run
+	s.handleMouse(click)
 	if s.notice == "" {
 		t.Fatal("the refused click was swallowed silently")
 	}
@@ -1691,8 +1480,6 @@ func TestSettingsRefusedClickLeavesTheControlsWhereTheyWere(t *testing.T) {
 		t.Errorf("the button under the cursor moved to %+v from %+v", got.r, plus.r)
 	}
 
-	// The user clicks the same pixel again without moving the mouse. It
-	// must still mean the count-in, and nothing else.
 	s.handleMouse(click)
 	if s.soundFont == "" {
 		t.Error(`the second click reached the SoundFont row's "clear" and discarded the SoundFont`)
@@ -1701,7 +1488,6 @@ func TestSettingsRefusedClickLeavesTheControlsWhereTheyWere(t *testing.T) {
 		t.Errorf("count-in = %d: a locked row accepted the click after all", s.countIn)
 	}
 
-	// A notice far longer than its band still moves nothing.
 	s.notice = strings.Repeat("a refusal nobody would ever write this long ", 20)
 	if got := settingsRowTops(s); got != idle {
 		t.Errorf("an over-long notice moved the rows:\n got %s\nwant %s", got, idle)
@@ -1709,13 +1495,8 @@ func TestSettingsRefusedClickLeavesTheControlsWhereTheyWere(t *testing.T) {
 	close(audio.release)
 }
 
-// TestSettingsButtonLabelsSitInsideTheirButtons: the label used to be
-// drawn at a flat r.y+4 in a 20px button, so a body line's ink (y+2.43 to
-// y+16.10 for a Go Regular 14 ascender/descender) came down through the
-// bottom border — the g of "measuring..." was cut by it — and every label
-// sat about 2px low.
 func TestSettingsButtonLabelsSitInsideTheirButtons(t *testing.T) {
-	// Where a body line's ink actually falls below the y drawText is given.
+
 	const inkTop, inkBottom = 2.43, 16.10
 
 	s, _ := newSettingsFixture(t, newSettingsAudio())
@@ -1741,7 +1522,7 @@ func TestSettingsButtonLabelsSitInsideTheirButtons(t *testing.T) {
 				t.Errorf("%q: ink reaches %.2fpx of a %.0fpx button, through the bottom border",
 					btn.label, bottom-btn.r.y, btn.r.h)
 			}
-			// Taller buttons must still fit the 26px row pitch.
+
 			if prev != nil && prev.r.y+prev.r.h > btn.r.y {
 				t.Errorf("%q (bottom %.0f) touches %q (top %.0f) on the next row",
 					prev.label, prev.r.y+prev.r.h, btn.label, btn.r.y)
@@ -1754,11 +1535,6 @@ func TestSettingsButtonLabelsSitInsideTheirButtons(t *testing.T) {
 	}
 }
 
-// TestSettingsBrowseSaysADialogIsOpen: sfBusy already refused a second
-// dialog, but the button was drawn exactly as when idle and swallowed
-// every click without a word — and the dialog is unowned, so on Windows it
-// can be sitting behind the game window, which is precisely when the user
-// clicks again.
 func TestSettingsBrowseSaysADialogIsOpen(t *testing.T) {
 	s, _ := newSettingsFixture(t, newSettingsAudio())
 	asked := 0
@@ -1789,13 +1565,13 @@ func TestSettingsBrowseSaysADialogIsOpen(t *testing.T) {
 	if got := settingsRowTops(s); got != tops {
 		t.Errorf("saying the dialog is open moved the rows:\n got %s\nwant %s", got, tops)
 	}
-	// Clicking the waiting button stays a no-op.
+
 	s.handleMouse(settingsPressAt(busy.r))
 	if asked != 1 {
 		t.Errorf("a click on the waiting button opened another dialog (%d)", asked)
 	}
 
-	done("") // the user cancelled: the row re-arms
+	done("")
 	s.syncSettings()
 	if got := settingsRowItem(t, s, srSoundFont).buttons[0]; got.disabled || got.label != "browse" {
 		t.Errorf("after the dialog closed the button = %+v, want an enabled \"browse\"", got)
@@ -1805,11 +1581,6 @@ func TestSettingsBrowseSaysADialogIsOpen(t *testing.T) {
 	}
 }
 
-// TestSettingsRowButtonsTakeTheCursor: the device and count-in buttons went
-// through adjustRow and focused their row, but calibrate, browse and clear
-// acted directly — so a click on one of them left the blue highlight and
-// the arrow keys on a different row, and the next Right adjusted something
-// the user was not looking at.
 func TestSettingsRowButtonsTakeTheCursor(t *testing.T) {
 	s, _ := newSettingsFixture(t, newSettingsAudio())
 	s.SetFilePicker(func([]string, func(string)) {})
@@ -1828,8 +1599,7 @@ func TestSettingsRowButtonsTakeTheCursor(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			want := s.rowIndex(c.kind)
-			// Park the cursor somewhere else, the way a user who has just
-			// adjusted another setting leaves it.
+
 			s.cur = (want + 1) % len(s.rows)
 			it := settingsRowItem(t, s, c.kind)
 			if c.btn >= len(it.buttons) {
@@ -1845,13 +1615,6 @@ func TestSettingsRowButtonsTakeTheCursor(t *testing.T) {
 	settingsWaitPhase(t, s, calDone)
 }
 
-// TestSettingsDeviceRowAdmitsNothingIsChosenYet: deviceText appended
-// "<- selected" to whatever resolveDevice landed on, including the
-// system-default fallback used when Prefs has never been written. A
-// first-run user opened Settings from the checklist step "choose your
-// audio interface", read that the device was selected, pressed Escape —
-// and got no live scoring, because the application only opens the capture
-// path when the STORED capture ID is non-empty.
 func TestSettingsDeviceRowAdmitsNothingIsChosenYet(t *testing.T) {
 	s, p := newSettingsFixture(t, newSettingsAudio())
 	if capID, _ := p.Devices(); capID != "" {
@@ -1868,8 +1631,6 @@ func TestSettingsDeviceRowAdmitsNothingIsChosenYet(t *testing.T) {
 		}
 	}
 
-	// Enter commits the device SHOWN rather than stepping past it, so the
-	// row's own promise holds — and only then does it claim the selection.
 	s.cur = s.rowIndex(srCapture)
 	shown := s.capture[s.capIdx].ID
 	s.activate()
@@ -1886,11 +1647,11 @@ func TestSettingsDeviceRowAdmitsNothingIsChosenYet(t *testing.T) {
 	if strings.Contains(it.text, "not chosen") {
 		t.Errorf("after choosing it the capture row still disowns it: %q", it.text)
 	}
-	// The same commit wrote the playback ID, so that row is honest too.
+
 	if got := settingsRowItem(t, s, srPlayback).text; !strings.Contains(got, "<- selected") {
 		t.Errorf("playback row = %q, want the pair's commit reflected", got)
 	}
-	// A second Enter cycles as before, now that there is a choice on file.
+
 	before := s.capIdx
 	s.activate()
 	if s.capIdx == before {
@@ -1898,11 +1659,6 @@ func TestSettingsDeviceRowAdmitsNothingIsChosenYet(t *testing.T) {
 	}
 }
 
-// --- the audio / visual sync trim ---------------------------------------
-
-// settingsTrimPrefs is a Prefs that can store the sync trim, so the row
-// appears. The plain fake deliberately cannot, which is what the "row is
-// absent" test below relies on.
 type settingsTrimPrefs struct {
 	settingsFakePrefs
 	trim int
@@ -1911,8 +1667,6 @@ type settingsTrimPrefs struct {
 func (p *settingsTrimPrefs) SyncTrim() int      { return p.trim }
 func (p *settingsTrimPrefs) SetSyncTrim(ms int) { p.trim = ms }
 
-// settingsWithPrefs builds a Settings over a given Prefs, which is what
-// these tests vary — newSettingsFixture always makes its own.
 func settingsWithPrefs(t *testing.T, p Prefs) *Settings {
 	t.Helper()
 	return NewSettings(NewShell(Services{Prefs: p}, settingsStubScreen{}))
@@ -1970,8 +1724,6 @@ func TestSettingsSyncTrimSeedsFromPrefs(t *testing.T) {
 	}
 }
 
-// TestSettingsSyncTrimRowAbsentWithoutStorage: a control whose value
-// evaporates on exit is worse than no control.
 func TestSettingsSyncTrimRowAbsentWithoutStorage(t *testing.T) {
 	s := settingsWithPrefs(t, &settingsFakePrefs{})
 	if s.rowIndex(srSyncTrim) >= 0 {

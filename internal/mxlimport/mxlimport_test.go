@@ -12,23 +12,19 @@ import (
 	"github.com/S95F/musicTutor/internal/score"
 )
 
-// canonical is the fixture riff's exact flattened event table (see
-// docs/TEXTFORMAT.md and ROADMAP Phase 0): Start/End in PPQ-960 ticks and
-// derived MIDI key, in Events() order. Every fixture container must
-// reproduce it exactly.
 var canonical = []struct {
 	start, end int64
 	key        int
 }{
-	// Bar 1: eight eighth notes.
+
 	{0, 480, 40}, {480, 960, 43}, {960, 1440, 50}, {1440, 1920, 40},
 	{1920, 2400, 43}, {2400, 2880, 50}, {2880, 3360, 43}, {3360, 3840, 40},
-	// Bar 2: quarter, quarter, half.
+
 	{3840, 4800, 47}, {4800, 5760, 45}, {5760, 7680, 47},
-	// Bar 3: E5 power chord, rest, quarter note.
+
 	{7680, 9600, 40}, {7680, 9600, 47}, {7680, 9600, 52},
 	{10560, 11520, 43},
-	// Bar 4: whole-note low E.
+
 	{11520, 15360, 40},
 }
 
@@ -41,9 +37,6 @@ func readFixture(t *testing.T, name string) []byte {
 	return data
 }
 
-// checkCanonical asserts the full cross-format contract: the exact event
-// table, the authored fingering (bar-3 chord on strings 6/5/4 at frets
-// 0/2/2), and the score metadata.
 func checkCanonical(t *testing.T, s *score.Score, warns []string) {
 	t.Helper()
 	if len(warns) != 0 {
@@ -92,8 +85,7 @@ func checkCanonical(t *testing.T, s *score.Score, warns []string) {
 				i, ev.Start, ev.End, ev.Key, want.start, want.end, want.key)
 		}
 	}
-	// The bar-3 chord carries the authored fingering exactly: strings
-	// 6/5/4 at frets 0/2/2 (string 1 = highest-pitched).
+
 	chord := map[int][2]int{40: {6, 0}, 47: {5, 2}, 52: {4, 2}}
 	seen := 0
 	for _, ev := range evs {
@@ -114,7 +106,7 @@ func checkCanonical(t *testing.T, s *score.Score, warns []string) {
 	if seen != 3 {
 		t.Errorf("found %d chord events at tick 7680, want 3", seen)
 	}
-	// Authored fingerings: nothing is Inferred.
+
 	for _, bar := range tr.Bars {
 		for _, beat := range bar.Beats {
 			for _, n := range beat.Notes {
@@ -142,8 +134,6 @@ func TestImportFixtureMXL(t *testing.T) {
 	checkCanonical(t, s, warns)
 }
 
-// TestMXLMatchesMusicXML guards fixture drift: the committed .mxl must
-// embed exactly the committed .musicxml.
 func TestMXLMatchesMusicXML(t *testing.T) {
 	want := readFixture(t, "fixture_riff.musicxml")
 	data := readFixture(t, "fixture_riff.mxl")
@@ -164,8 +154,6 @@ func TestMXLMatchesMusicXML(t *testing.T) {
 	}
 }
 
-// wrap builds a minimal one-part score-partwise document around measure
-// bodies.
 func wrap(measures ...string) []byte {
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?><score-partwise version="4.0">`)
@@ -177,9 +165,6 @@ func wrap(measures ...string) []byte {
 	return []byte(b.String())
 }
 
-// wrapMeasures builds the same minimal document from COMPLETE <measure>
-// elements, for fixtures that need measure attributes (implicit="yes") or
-// barlines.
 func wrapMeasures(measures ...string) []byte {
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?><score-partwise version="4.0">`)
@@ -193,11 +178,10 @@ func wrapMeasures(measures ...string) []byte {
 
 const attrs44div480 = `<attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>`
 
-// note builds a <note> element. str/fret < 0 omits <technical>.
 func note(step string, octave int, dur int, str, fret int, extra string) string {
 	var b strings.Builder
 	b.WriteString(`<note>`)
-	b.WriteString(extra) // <chord/>, <grace/>, <tie/>... (leading children)
+	b.WriteString(extra)
 	b.WriteString(`<pitch><step>` + step + `</step><octave>` + string(rune('0'+octave)) + `</octave></pitch>`)
 	b.WriteString(`<duration>` + itoa(dur) + `</duration><voice>1</voice>`)
 	if str >= 0 {
@@ -226,18 +210,15 @@ func itoa(v int) string {
 	return string(d)
 }
 
-// TestBackupExactCursor is the silent-corruption regression: <backup>
-// must move the time cursor exactly, so voice-1 polyphony written with
-// backup keeps its ticks, and the following measure does not drift.
 func TestBackupExactCursor(t *testing.T) {
 	m1 := attrs44div480 +
-		// Half note E4 on string 1...
+
 		note("E", 4, 960, 1, 0, "") +
-		// ...then back up a half and lay two quarters under it on string 6.
+
 		`<backup><duration>960</duration></backup>` +
 		note("E", 2, 480, 6, 0, "") +
 		note("G", 2, 480, 6, 3, "") +
-		// Skip the empty second half of the measure.
+
 		`<forward><duration>960</duration></forward>`
 	m2 := `<note><pitch><step>E</step><octave>2</octave></pitch><duration>1920</duration><voice>1</voice>` +
 		`<notations><technical><string>6</string><fret>0</fret></technical></notations></note>`
@@ -252,10 +233,10 @@ func TestBackupExactCursor(t *testing.T) {
 		start, end int64
 		key        int
 	}{
-		{0, 960, 40},     // string 6 quarter under the half note
-		{0, 1920, 64},    // string 1 half note
-		{960, 1920, 43},  // string 6 second quarter
-		{3840, 7680, 40}, // measure 2: whole note, no drift
+		{0, 960, 40},
+		{0, 1920, 64},
+		{960, 1920, 43},
+		{3840, 7680, 40},
 	}
 	evs := s.Events()
 	if len(evs) != len(want) {
@@ -269,10 +250,6 @@ func TestBackupExactCursor(t *testing.T) {
 	}
 }
 
-// TestSecondVoiceSkippedWithoutShift: a MuseScore-style two-voice measure
-// (voice 1, backup, voice 2). Voice 2 is skipped with a warning, and —
-// because backup was honored — voice-1 timing in this and the next
-// measure is unshifted.
 func TestSecondVoiceSkippedWithoutShift(t *testing.T) {
 	v2 := `<note><pitch><step>C</step><octave>3</octave></pitch><duration>960</duration><voice>2</voice></note>`
 	m1 := attrs44div480 +
@@ -315,9 +292,6 @@ func TestSecondVoiceSkippedWithoutShift(t *testing.T) {
 	}
 }
 
-// TestDivisionsRescale: divisions=3 makes a duration-1 note a quarter
-// triplet eighth (320 score ticks); everything must rescale to PPQ 960
-// exactly.
 func TestDivisionsRescale(t *testing.T) {
 	m := `<attributes><divisions>3</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>` +
 		note("E", 2, 1, 6, 0, "") +
@@ -348,12 +322,10 @@ func TestDivisionsRescale(t *testing.T) {
 	}
 }
 
-// TestDivisionsRounding: divisions=7 cannot represent every boundary in
-// PPQ-960 ticks; the import must warn that it rounded.
 func TestDivisionsRounding(t *testing.T) {
 	m := `<attributes><divisions>7</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>` +
-		note("E", 2, 7, 6, 0, "") + // exact: one quarter
-		note("G", 2, 3, 6, 3, "") + // 3*960/7 rounds
+		note("E", 2, 7, 6, 0, "") +
+		note("G", 2, 3, 6, 3, "") +
 		note("A", 2, 4, 5, 0, "") +
 		`<forward><duration>14</duration></forward>`
 	s, warns, err := Import(wrap(m))
@@ -373,7 +345,7 @@ func TestDivisionsRounding(t *testing.T) {
 	if len(evs) != 3 {
 		t.Fatalf("got %d events, want 3", len(evs))
 	}
-	// scale(7)=960, scale(10)=round(9600/7)=1371, scale(14)=1920.
+
 	want := []struct{ start, end int64 }{{0, 960}, {960, 1371}, {1371, 1920}}
 	for i, w := range want {
 		if evs[i].Start != w.start || evs[i].End != w.end {
@@ -382,8 +354,6 @@ func TestDivisionsRounding(t *testing.T) {
 	}
 }
 
-// TestTieAcrossBarline: a tie chain across the barline merges into one
-// event, with the continuation stored as a Tied beat note.
 func TestTieAcrossBarline(t *testing.T) {
 	m1 := attrs44div480 +
 		`<note><rest/><duration>960</duration><voice>1</voice></note>` +
@@ -404,7 +374,7 @@ func TestTieAcrossBarline(t *testing.T) {
 	if evs[0].Start != 1920 || evs[0].End != 7680 || evs[0].Key != 40 {
 		t.Errorf("event = (%d,%d,key %d), want (1920,7680,key 40)", evs[0].Start, evs[0].End, evs[0].Key)
 	}
-	// The bar-2 half is a Tied continuation in the stored score.
+
 	tr := s.Tracks[0]
 	foundTied := false
 	for _, beat := range tr.Bars[1].Beats {
@@ -419,7 +389,6 @@ func TestTieAcrossBarline(t *testing.T) {
 	}
 }
 
-// TestTieStopWithoutStart degrades to a fresh attack with a warning.
 func TestTieStopWithoutStart(t *testing.T) {
 	m := attrs44div480 +
 		note("E", 2, 960, 6, 0, "") +
@@ -442,10 +411,6 @@ func TestTieStopWithoutStart(t *testing.T) {
 	}
 }
 
-// TestFrettingFallback strips every <notations> block (and with it all
-// <technical> fingering) from the canonical fixture: the events must
-// still match, with every fingering inferred — and the heuristic finds
-// the canonical chord shape.
 func TestFrettingFallback(t *testing.T) {
 	data := readFixture(t, "fixture_riff.musicxml")
 	stripped := regexp.MustCompile(`(?s)<notations>.*?</notations>`).ReplaceAll(data, nil)
@@ -480,8 +445,6 @@ func TestFrettingFallback(t *testing.T) {
 	}
 }
 
-// TestCapo: <staff-details><capo> shifts derived pitch; the file's written
-// pitch is authored consistently so no mismatch warning fires.
 func TestCapo(t *testing.T) {
 	m := `<attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time>` +
 		`<staff-details><capo>2</capo></staff-details></attributes>` +
@@ -503,8 +466,6 @@ func TestCapo(t *testing.T) {
 	}
 }
 
-// TestUnderfullMeasurePadded: a measure whose content stops early is
-// padded with a rest, with a warning, and still validates.
 func TestUnderfullMeasurePadded(t *testing.T) {
 	m := attrs44div480 + note("E", 2, 480, 6, 0, "")
 	s, warns, err := Import(wrap(m))
@@ -529,8 +490,6 @@ func TestUnderfullMeasurePadded(t *testing.T) {
 	}
 }
 
-// TestGraceNoteSkipped: grace notes are outside the subset — warned,
-// skipped, and the cursor untouched.
 func TestGraceNoteSkipped(t *testing.T) {
 	m := attrs44div480 +
 		`<note><grace/><pitch><step>D</step><octave>3</octave></pitch><voice>1</voice></note>` +
@@ -555,8 +514,6 @@ func TestGraceNoteSkipped(t *testing.T) {
 	}
 }
 
-// TestMetronomeTempo: without <sound tempo>, the metronome marking sets
-// the tempo — converted to quarter BPM through the beat unit.
 func TestMetronomeTempo(t *testing.T) {
 	m := attrs44div480 +
 		`<direction><direction-type><metronome><beat-unit>half</beat-unit><per-minute>60</per-minute></metronome></direction-type></direction>` +
@@ -566,14 +523,12 @@ func TestMetronomeTempo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
-	// half = 60 -> quarter = 120.
+
 	if len(s.Tempos) != 1 || s.Tempos[0].USPerQuarter != score.USPerQuarter(120) {
 		t.Errorf("Tempos = %v, want single 120 quarter-BPM entry", s.Tempos)
 	}
 }
 
-// TestMidPieceTempoChange: a direction later in the piece lands at its
-// cursor position, not the measure start.
 func TestMidPieceTempoChange(t *testing.T) {
 	m := attrs44div480 +
 		note("E", 2, 960, 6, 0, "") +
@@ -614,8 +569,6 @@ func TestImportNoNotes(t *testing.T) {
 	}
 }
 
-// TestZipWithoutContainer: a .mxl missing META-INF/container.xml falls
-// back to the first XML member, with a warning.
 func TestZipWithoutContainer(t *testing.T) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
@@ -647,9 +600,6 @@ func TestZipWithoutContainer(t *testing.T) {
 	}
 }
 
-// TestHostileNoteDurationSkipped: a single absurd <duration> must not
-// blow up the bar layout (one barSpec per bar out to the score's end) —
-// the note is skipped with a warning and the rest imports normally.
 func TestHostileNoteDurationSkipped(t *testing.T) {
 	m := attrs44div480 +
 		note("E", 2, 480, 6, 0, "") +
@@ -673,10 +623,6 @@ func TestHostileNoteDurationSkipped(t *testing.T) {
 	}
 }
 
-// TestHostileForwardPositionSkipped: a hostile <forward> pushes the
-// cursor to an absurd position; the note placed there is skipped with a
-// warning instead of stretching the score extent (or overflowing the
-// rescale).
 func TestHostileForwardPositionSkipped(t *testing.T) {
 	m := attrs44div480 +
 		note("E", 2, 480, 6, 0, "") +
@@ -700,9 +646,6 @@ func TestHostileForwardPositionSkipped(t *testing.T) {
 	}
 }
 
-// TestHostileMeterScoreTooLong: a hostile <beats> value makes even one
-// measure exceed the score-extent limit; the import errors cleanly
-// ("score too long") instead of laying out millions of bars.
 func TestHostileMeterScoreTooLong(t *testing.T) {
 	m := `<attributes><divisions>480</divisions><time><beats>2000000</beats><beat-type>4</beat-type></time></attributes>` +
 		note("E", 2, 1920, 6, 0, "")
@@ -712,9 +655,6 @@ func TestHostileMeterScoreTooLong(t *testing.T) {
 	}
 }
 
-// TestTinyBarsCapped: an extreme meter (1/3840 = one-tick bars) slices
-// a legal extent into an absurd number of bars; the bar-count cap
-// errors instead of allocating without bound.
 func TestTinyBarsCapped(t *testing.T) {
 	m := `<attributes><divisions>480</divisions><time><beats>1</beats><beat-type>3840</beat-type></time></attributes>` +
 		`<forward><duration>100000</duration></forward>` +
@@ -725,9 +665,6 @@ func TestTinyBarsCapped(t *testing.T) {
 	}
 }
 
-// TestZipBombRootfileRejected: a .mxl whose rootfile decompresses far
-// past the cap (a zip bomb) errors quickly with bounded memory instead
-// of inflating the whole payload.
 func TestZipBombRootfileRejected(t *testing.T) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
@@ -743,7 +680,7 @@ func TestZipBombRootfileRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	chunk := make([]byte, 1<<20)
-	for i := 0; i < 65; i++ { // 65 MiB of zeros: tiny compressed, over the 64 MiB cap
+	for i := 0; i < 65; i++ {
 		if _, err := w.Write(chunk); err != nil {
 			t.Fatal(err)
 		}
@@ -757,8 +694,6 @@ func TestZipBombRootfileRejected(t *testing.T) {
 	}
 }
 
-// TestZipBombContainerRejected: META-INF/container.xml has its own,
-// much smaller cap.
 func TestZipBombContainerRejected(t *testing.T) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
@@ -766,7 +701,7 @@ func TestZipBombContainerRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.Write(make([]byte, 2<<20)); err != nil { // 2 MiB, over the 1 MiB cap
+	if _, err := w.Write(make([]byte, 2<<20)); err != nil {
 		t.Fatal(err)
 	}
 	if err := zw.Close(); err != nil {
@@ -778,9 +713,6 @@ func TestZipBombContainerRejected(t *testing.T) {
 	}
 }
 
-// TestAbsurdTempoSkipped: tempos whose USPerQuarter degenerates (huge
-// BPM rounds to 0, tiny BPM overflows) degrade to a warning with the
-// tick-0 120 BPM default — never a hard Validate failure.
 func TestAbsurdTempoSkipped(t *testing.T) {
 	m := attrs44div480 +
 		`<direction><sound tempo="1e300"/></direction>` +
@@ -804,10 +736,6 @@ func TestAbsurdTempoSkipped(t *testing.T) {
 	}
 }
 
-// TestFingeringBeyondMIDIRange: an authored <technical> fingering whose
-// derived pitch exceeds MIDI 127 (string 1 fret 90) falls into the
-// fretting fallback with a warning — the import must not hard-fail
-// Validate over it.
 func TestFingeringBeyondMIDIRange(t *testing.T) {
 	m := attrs44div480 + note("E", 2, 1920, 1, 90, "")
 	s, warns, err := Import(wrap(m))
@@ -841,7 +769,6 @@ func TestFingeringBeyondMIDIRange(t *testing.T) {
 	}
 }
 
-// staffTunings builds n <staff-tuning> lines, every string tuned to E2.
 func staffTunings(n int) string {
 	var b strings.Builder
 	for i := 1; i <= n; i++ {
@@ -850,10 +777,6 @@ func staffTunings(n int) string {
 	return b.String()
 }
 
-// TestImportTuningOverLimitFallsBack: a staff-details tuning declaring
-// more lines than the 25-string limit is rejected wholesale — warned, and
-// the current (default 6-string standard) tuning kept — never truncated
-// into an invented instrument.
 func TestImportTuningOverLimitFallsBack(t *testing.T) {
 	m := `<attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time>` +
 		`<staff-details><staff-lines>26</staff-lines>` + staffTunings(26) + `</staff-details></attributes>` +
@@ -886,12 +809,6 @@ func TestImportTuningOverLimitFallsBack(t *testing.T) {
 	}
 }
 
-// TestImportPathologicalChordCompletes is the end-to-end denial-of-service
-// regression: a 40-line tab staff plus a 15-note unfingered chord used to
-// hand the fretting heuristic a ~5e22-leaf search (effectively an infinite
-// hang). The over-limit tuning is now rejected at the XML boundary and the
-// fretting search is budgeted, so the import must finish in well under a
-// second, with warnings, keeping whatever notes fit.
 func TestImportPathologicalChordCompletes(t *testing.T) {
 	var notes strings.Builder
 	notes.WriteString(note("E", 2, 1920, -1, 0, ""))
@@ -918,7 +835,6 @@ func TestImportPathologicalChordCompletes(t *testing.T) {
 	}
 }
 
-// TestZipWithoutMusic: a ZIP with no MusicXML document errors.
 func TestZipWithoutMusic(t *testing.T) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)

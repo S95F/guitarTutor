@@ -8,9 +8,6 @@ import (
 	"github.com/S95F/musicTutor/internal/score/textfmt"
 )
 
-// wrapWindPart builds a one-part document whose declaration carries a
-// part name and, when program > 0, a 1-based <midi-program> — the two
-// signals wind classification reads.
 func wrapWindPart(name string, program int, measures ...string) []byte {
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?><score-partwise version="4.0">`)
@@ -26,8 +23,6 @@ func wrapWindPart(name string, program int, measures ...string) []byte {
 	return []byte(b.String())
 }
 
-// noWindInferred fails on any Inferred note in the track: a wind lane is
-// arithmetic, not a heuristic, so nothing on it is ever a guess.
 func noWindInferred(t *testing.T, tr *score.Track) {
 	t.Helper()
 	for _, bar := range tr.Bars {
@@ -41,13 +36,6 @@ func noWindInferred(t *testing.T, tr *score.Track) {
 	}
 }
 
-// TestWindPartByProgram: <midi-program>65</midi-program> is soprano sax
-// (MusicXML programs are 1-based, the model's 0-based). The B-flat
-// transposition arrives through <transpose> like any other part — <pitch>
-// is the WRITTEN pitch and the model stores what SOUNDS — so written D5
-// (74) under chromatic -2 lands at concert C5 (72): string 1, fret
-// 72-56=16. No extra wind-specific transposition may apply on top;
-// WindInstrument.Transpose is display-only.
 func TestWindPartByProgram(t *testing.T) {
 	m := `<attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time>` +
 		`<transpose><diatonic>-1</diatonic><chromatic>-2</chromatic></transpose></attributes>` +
@@ -79,9 +67,6 @@ func TestWindPartByProgram(t *testing.T) {
 	noWindInferred(t, tr)
 }
 
-// TestWindPartByName: no <midi-program> at all — files that carry no MIDI
-// block — so the part name is the classifier, and the track takes the
-// instrument's own program rather than the importer's guitar default.
 func TestWindPartByName(t *testing.T) {
 	m := attrs44div480 + note("C", 5, 1920, -1, 0, "")
 	s, warns, err := Import(wrapWindPart("Soprano Sax", 0, m))
@@ -107,10 +92,6 @@ func TestWindPartByName(t *testing.T) {
 	}
 }
 
-// TestWindStaffTuningOverridesClassification: a wind program plus an
-// explicit tab-staff tuning. Someone authored string lines — stronger
-// evidence than a program number — so the part stays fretted, with a
-// warning naming the conflict.
 func TestWindStaffTuningOverridesClassification(t *testing.T) {
 	m := `<attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time>` +
 		`<staff-details><staff-lines>6</staff-lines>` + staffTunings(6) + `</staff-details></attributes>` +
@@ -131,9 +112,6 @@ func TestWindStaffTuningOverridesClassification(t *testing.T) {
 	}
 }
 
-// TestWindChordKeepsHighest: a monophonic instrument cannot voice a
-// <chord>; the highest note is kept — the melody rides on top of a
-// voicing — and the resolution is warned about once.
 func TestWindChordKeepsHighest(t *testing.T) {
 	m := attrs44div480 +
 		note("A", 4, 1920, -1, 0, "") +
@@ -151,10 +129,6 @@ func TestWindChordKeepsHighest(t *testing.T) {
 	}
 }
 
-// TestWindTechnicalIgnored: an authored guitar fingering on a wind part
-// has no strings to land on, so the pitch alone decides the lane position
-// — honoring the authored fret 0 here would move the note — and the
-// deviation is warned about.
 func TestWindTechnicalIgnored(t *testing.T) {
 	m := attrs44div480 + note("E", 4, 1920, 1, 0, "")
 	s, warns, err := Import(wrapWindPart("Soprano Sax", 0, m))
@@ -170,17 +144,11 @@ func TestWindTechnicalIgnored(t *testing.T) {
 	}
 }
 
-// TestWindOutOfRangeDropped: MusicXML pitch (written plus <transpose>) is
-// authoritative, and octave-rewriting an out-of-range note would silently
-// change the music — so it is dropped and named. Below, the floor is the
-// instrument's lowest note; above, MIDI 127 is the only ceiling
-// (altissimo imports fine, so nothing between LowSounding+Span and 127 is
-// rejected).
 func TestWindOutOfRangeDropped(t *testing.T) {
 	m := attrs44div480 +
-		note("G", 3, 480, -1, 0, "") + // 55: a semitone under the soprano sax's low A-flat (56)
-		note("A", 9, 480, -1, 0, "") + // 129: past MIDI's ceiling
-		note("C", 4, 960, -1, 0, "") // 60: in range; keeps the part alive
+		note("G", 3, 480, -1, 0, "") +
+		note("A", 9, 480, -1, 0, "") +
+		note("C", 4, 960, -1, 0, "")
 	s, warns, err := Import(wrapWindPart("Soprano Sax", 0, m))
 	if err != nil {
 		t.Fatalf("Import: %v", err)
@@ -198,16 +166,13 @@ func TestWindOutOfRangeDropped(t *testing.T) {
 	}
 }
 
-// TestWindNameNeverOverridesADeclaredProgram: a part labelled "Flute"
-// whose file explicitly declares a guitar program is a guitar — the
-// name fallback exists only for files that carry no MIDI block at all.
 func TestWindNameNeverOverridesADeclaredProgram(t *testing.T) {
 	m := `<attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>` +
 		note("E", 4, 960, -1, 0, "") +
 		note("C", 5, 960, -1, 0, `<chord/>`) +
 		note("G", 4, 960, -1, 0, "") +
 		note("G", 4, 960, -1, 0, "")
-	s, _, err := Import(wrapWindPart("Flute", 26, m)) // 1-based 26 = the guitar default
+	s, _, err := Import(wrapWindPart("Flute", 26, m))
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
@@ -220,13 +185,8 @@ func TestWindNameNeverOverridesADeclaredProgram(t *testing.T) {
 	}
 }
 
-// TestWindChordKeepsHighestPlayable: range first, chords second — a chord
-// whose top note is below the horn falls back to its highest playable
-// note instead of losing the whole chord to the unplayable one.
 func TestWindChordKeepsHighestPlayable(t *testing.T) {
-	// Soprano sax, no transpose block: written = sounding. G3 (55) is
-	// below the horn's Ab3 (56); D5 (74) is fine. The chord D5+G3 must
-	// keep D5.
+
 	m := `<attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>` +
 		note("D", 5, 1920, -1, 0, "") +
 		note("G", 3, 1920, -1, 0, `<chord/>`)
@@ -257,9 +217,6 @@ func TestWindChordKeepsHighestPlayable(t *testing.T) {
 	}
 }
 
-// slurNote builds an unfingered <note> whose trailing <notations> block —
-// where real exporters put it — carries raw slur elements. extra is
-// note()'s leading children (<chord/>, <grace/>, <tie/>...).
 func slurNote(step string, octave, dur int, extra, slurs string) string {
 	return `<note>` + extra +
 		`<pitch><step>` + step + `</step><octave>` + string(rune('0'+octave)) + `</octave></pitch>` +
@@ -267,8 +224,6 @@ func slurNote(step string, octave, dur int, extra, slurs string) string {
 		`<notations>` + slurs + `</notations></note>`
 }
 
-// eventTechs flattens the events' techniques, in event order, for
-// comparing which notes a slur covered.
 func eventTechs(t *testing.T, s *score.Score, want []score.Technique) {
 	t.Helper()
 	evs := s.Events()
@@ -282,9 +237,6 @@ func eventTechs(t *testing.T, s *score.Score, want []score.Technique) {
 	}
 }
 
-// TestWindSlurPhrase: a slur over n1..n3 is one tongue stroke. TechSlur
-// marks a note slurred INTO, so n2 and n3 carry it and n1 — which takes
-// the attack — does not; the stop note is the arc's last covered note.
 func TestWindSlurPhrase(t *testing.T) {
 	m := attrs44div480 +
 		slurNote("C", 5, 480, "", `<slur type="start"/>`) +
@@ -303,9 +255,6 @@ func TestWindSlurPhrase(t *testing.T) {
 	eventTechs(t, s, []score.Technique{0, score.TechSlur, score.TechSlur})
 }
 
-// TestWindSeparateSlurs: an arc's stop closes it AFTER the stop note is
-// covered, so the note following one slur starts the next phrase with a
-// fresh attack.
 func TestWindSeparateSlurs(t *testing.T) {
 	m := attrs44div480 +
 		slurNote("C", 5, 480, "", `<slur type="start"/>`) +
@@ -322,10 +271,6 @@ func TestWindSeparateSlurs(t *testing.T) {
 	eventTechs(t, s, []score.Technique{0, score.TechSlur, 0, score.TechSlur})
 }
 
-// TestWindOverlappingNumberedSlurs: arc 1 over n1..n3 and arc 2 over
-// n2..n4 overlap, kept apart by their number attributes. A note is covered
-// when ANY arc was open before it started, so n2..n4 slur and n5 — after
-// both arcs closed — attacks fresh.
 func TestWindOverlappingNumberedSlurs(t *testing.T) {
 	m := attrs44div480 +
 		slurNote("C", 5, 480, "", `<slur type="start" number="1"/>`) +
@@ -343,12 +288,6 @@ func TestWindOverlappingNumberedSlurs(t *testing.T) {
 	eventTechs(t, s, []score.Technique{0, score.TechSlur, score.TechSlur, score.TechSlur, 0})
 }
 
-// TestWindSlurAcrossCollapsedChords: slur coverage belongs to the ONSET,
-// not to one chord head, so it composes with the wind chord collapse in
-// either direction. The first chord's head STARTS the arc — the chord is
-// the arc's first note, so its surviving top note keeps its attack — and
-// the second chord's head (not its surviving top note) carries the stop,
-// yet the top note still slurs.
 func TestWindSlurAcrossCollapsedChords(t *testing.T) {
 	m := attrs44div480 +
 		slurNote("D", 5, 960, "", `<slur type="start"/>`) +
@@ -369,9 +308,6 @@ func TestWindSlurAcrossCollapsedChords(t *testing.T) {
 	eventTechs(t, s, []score.Technique{0, score.TechSlur})
 }
 
-// TestWindSlurAcrossTieKeepsTie: ties and slurs are separate — a tied
-// continuation merges in score.Events regardless, and a note both tied
-// and slur-covered stays one merged event carrying TechSlur.
 func TestWindSlurAcrossTieKeepsTie(t *testing.T) {
 	m := attrs44div480 +
 		slurNote("C", 5, 480, "", `<slur type="start"/>`) +
@@ -392,10 +328,6 @@ func TestWindSlurAcrossTieKeepsTie(t *testing.T) {
 	eventTechs(t, s, []score.Technique{0, score.TechSlur, score.TechSlur})
 }
 
-// TestWindSlurOnGraceNoteIgnored: grace notes are outside the import
-// subset, so an arc touching one is an arc missing an endpoint — the
-// main note keeps its attack (the state never saw the start), the
-// dangling stop closes nothing, and later notes are unaffected.
 func TestWindSlurOnGraceNoteIgnored(t *testing.T) {
 	m := attrs44div480 +
 		slurNote("D", 5, 0, "<grace/>", `<slur type="start"/>`) +
@@ -411,9 +343,6 @@ func TestWindSlurOnGraceNoteIgnored(t *testing.T) {
 	eventTechs(t, s, []score.Technique{0, 0})
 }
 
-// TestFrettedSlursUntouched: mapping a fretted part's slurs to hammer-ons
-// and pull-offs is a separate decision, not taken by the importer — the
-// arcs must not leak TechHammer onto a guitar line.
 func TestFrettedSlursUntouched(t *testing.T) {
 	m := `<measure number="1">` + attrs44div480 +
 		slurNote("E", 4, 480, "", `<slur type="start"/>`) +
@@ -430,10 +359,6 @@ func TestFrettedSlursUntouched(t *testing.T) {
 	eventTechs(t, s, []score.Technique{0, 0, 0})
 }
 
-// TestWindSlurRoundTripsThroughTextFormat: the imported slurs survive
-// Format and Parse through internal/score/textfmt — the wind alphabet
-// spells TechSlur as the letter l on the covered notes' tokens — which
-// proves the whole chain: parse, collapse, track build, writer, parser.
 func TestWindSlurRoundTripsThroughTextFormat(t *testing.T) {
 	m := attrs44div480 +
 		slurNote("C", 5, 480, "", `<slur type="start"/>`) +
@@ -447,10 +372,7 @@ func TestWindSlurRoundTripsThroughTextFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Format: %v", err)
 	}
-	// Written pitch on a B-flat soprano is sounding+2: C5 (72) writes as
-	// D5 and takes no letter; the covered D5 and E5 write as E5 and F#5
-	// with the slur letter on their tokens (the writer elides a repeated
-	// duration, so the quarter-note E5 carries its letter bare).
+
 	for _, tok := range []string{"E5l", "F#5.2l"} {
 		if !strings.Contains(string(text), tok) {
 			t.Errorf("formatted text lacks %q:\n%s", tok, text)

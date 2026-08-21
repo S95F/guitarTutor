@@ -18,7 +18,7 @@ func TestRingBasicReadWrite(t *testing.T) {
 			t.Errorf("dst[%d] = %v, want %v", i, dst[i], want)
 		}
 	}
-	// Stream index continues across writes.
+
 	g.write([]float32{4, 5})
 	n, start = g.read(dst)
 	if n != 2 || start != 3 {
@@ -27,7 +27,7 @@ func TestRingBasicReadWrite(t *testing.T) {
 }
 
 func TestRingWrap(t *testing.T) {
-	g := newRing(4) // capacity 4
+	g := newRing(4)
 	for round := 0; round < 10; round++ {
 		g.write([]float32{float32(round), float32(round) + 0.5})
 		dst := make([]float32, 4)
@@ -41,7 +41,7 @@ func TestRingWrap(t *testing.T) {
 func TestRingOverflowDropsNewest(t *testing.T) {
 	g := newRing(4)
 	g.write([]float32{1, 2, 3, 4})
-	g.write([]float32{5, 6}) // full: the new samples are dropped
+	g.write([]float32{5, 6})
 	if d := g.Dropped(); d != 2 {
 		t.Fatalf("Dropped = %d, want 2", d)
 	}
@@ -55,7 +55,7 @@ func TestRingOverflowDropsNewest(t *testing.T) {
 			t.Errorf("dst[%d] = %v, want %v", i, dst[i], want)
 		}
 	}
-	// Space freed by the read accepts new data again.
+
 	g.write([]float32{7})
 	if n, start = g.read(dst); n != 1 || start != 4 || dst[0] != 7 {
 		t.Fatalf("post-drop write: read = (%d, %d, %v)", n, start, dst[0])
@@ -71,7 +71,7 @@ func TestRingConcurrentStream(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		defer close(producerDone)
-		buf := make([]float32, 512) // divides total exactly
+		buf := make([]float32, 512)
 		v := float32(0)
 		for sent := 0; sent < total; sent += len(buf) {
 			for i := range buf {
@@ -82,17 +82,8 @@ func TestRingConcurrentStream(t *testing.T) {
 		}
 	}()
 
-	// The consumer verifies every sample it sees is strictly increasing
-	// (values are sequential at the producer, so any tear, duplication,
-	// or reorder shows as a non-increase) and accounts for every value
-	// it does NOT see: skipped values are legal only as overflow drops,
-	// which the ring counts. A skip can surface anywhere, including
-	// inside a single read — the producer estimates free space against
-	// a possibly stale read cursor, so an overflowing write may drop
-	// without leaving the ring exactly full, unaligning drop boundaries
-	// from read boundaries.
 	dst := make([]float32, 1024)
-	next := float32(0) // the value expected were nothing dropped
+	next := float32(0)
 	var missing, readCount int64
 	for {
 		n, _ := g.read(dst)
@@ -121,9 +112,8 @@ func TestRingConcurrentStream(t *testing.T) {
 	}
 donereading:
 	wg.Wait()
-	missing += total - int64(next) // values after the last one seen
-	// Every produced sample was either delivered in order or counted as
-	// dropped — none duplicated, none torn.
+	missing += total - int64(next)
+
 	if got := readCount + g.Dropped(); got != total {
 		t.Errorf("read %d + dropped %d = %d, want %d", readCount, g.Dropped(), got, int64(total))
 	}
@@ -132,27 +122,19 @@ donereading:
 	}
 }
 
-// TestRingDropPosSurvivesLaterWrites is the regression test for audit D5:
-// the position of a loss is published by the producer at the instant of
-// overflow, so a consumer that notices the drop an iteration late — after
-// its own reads freed space and the write cursor moved on — still splices
-// the gap where the loss actually happened, not wherever the cursor has
-// reached by then.
 func TestRingDropPosSurvivesLaterWrites(t *testing.T) {
 	g := newRing(4)
 	g.write([]float32{1, 2, 3, 4})
-	g.write([]float32{5, 6}) // ring full at position 4: both samples drop
+	g.write([]float32{5, 6})
 	if got := g.Dropped(); got != 2 {
 		t.Fatalf("Dropped = %d, want 2", got)
 	}
 
-	// The consumer reads (freeing space) BEFORE it checks for the drop —
-	// the late-notice interleaving.
 	dst := make([]float32, 2)
 	if n, _ := g.read(dst); n != 2 {
 		t.Fatalf("read %d, want 2", n)
 	}
-	g.write([]float32{7, 8}) // post-gap capture: the cursor advances to 6
+	g.write([]float32{7, 8})
 
 	if got := g.dropPos(); got != 4 {
 		t.Errorf("dropPos = %d, want 4 — the fill point of the loss, not the advanced cursor", got)

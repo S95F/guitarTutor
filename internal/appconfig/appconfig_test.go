@@ -60,7 +60,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	want := c
-	want.Version = CurrentVersion // Save stamps a zero Version
+	want.Version = CurrentVersion
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("round trip:\n got %+v\nwant %+v", got, want)
 	}
@@ -85,18 +85,16 @@ func TestSaveLoadRoundTripShellFields(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	want := c
-	want.Version = CurrentVersion // Save stamps a zero Version
+	want.Version = CurrentVersion
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("round trip:\n got %+v\nwant %+v", got, want)
 	}
-	// Recency order survives the file, which is the whole point of the list.
+
 	if len(got.Recents) != 2 || got.Recents[0] != filepath.Join(browse, "first.gp") {
 		t.Errorf("Recents = %v, want most-recent-first", got.Recents)
 	}
 }
 
-// v1Config is a config file exactly as the previous schema wrote one:
-// devices, calibration and a SoundFont, and nothing this version added.
 const v1Config = `{
   "version": 1,
   "captureDeviceID": "wasapi-{cap-guid}",
@@ -111,8 +109,6 @@ const v1Config = `{
 }
 `
 
-// writeConfigFile drops raw bytes at the configured config path, standing
-// in for a file written by another build.
 func writeConfigFile(t *testing.T, dir, contents string) string {
 	t.Helper()
 	path := filepath.Join(dir, "config.json")
@@ -131,7 +127,7 @@ func TestLoadMigratesPreviousSchemaVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load of a version 1 file: %v", err)
 	}
-	// Every field the old build knew survives, unchanged in meaning.
+
 	want := Config{
 		Version:          CurrentVersion,
 		CaptureDeviceID:  "wasapi-{cap-guid}",
@@ -145,7 +141,7 @@ func TestLoadMigratesPreviousSchemaVersion(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("migrated config:\n got %+v\nwant %+v", got, want)
 	}
-	// Which is to say the new fields took their documented defaults.
+
 	if got.Recents != nil || got.CountInBeats != 0 || got.LastBrowseDir != "" ||
 		got.WindowWidth != 0 || got.WindowHeight != 0 {
 		t.Errorf("new fields not defaulted: %+v", got)
@@ -154,8 +150,6 @@ func TestLoadMigratesPreviousSchemaVersion(t *testing.T) {
 		t.Errorf("OffsetFor after migration = %d, %v, want 517, true", off, ok)
 	}
 
-	// Saving the migrated config stamps the new version and keeps the
-	// carried-over fields, so the upgrade is durable.
 	got.AddRecent(filepath.Join(dir, "new.gp"))
 	if err := got.Save(); err != nil {
 		t.Fatalf("Save after migration: %v", err)
@@ -212,11 +206,6 @@ func TestLoadRepairsRecentsFromDisk(t *testing.T) {
 	}
 }
 
-// TestLoadClampsHandEditedCountIn: the count-in is repaired into its
-// supported range like every other hand-editable number. It used to load
-// raw, so a hand-written 999 showed as 8 in settings (the row clamps its
-// display) while the engine was built with 999 click beats — two minutes
-// of metronome before every play, with the screen claiming otherwise.
 func TestLoadClampsHandEditedCountIn(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv(EnvConfigDir, dir)
@@ -268,8 +257,7 @@ func TestSaveRefusesToDowngradeNewerFile(t *testing.T) {
 	if !errors.Is(err, ErrNewerVersion) {
 		t.Errorf("Save error = %v, want one wrapping ErrNewerVersion", err)
 	}
-	// The newer build's settings are still there, byte for byte, and the
-	// refusal left no temp file behind.
+
 	data, readErr := os.ReadFile(path)
 	if readErr != nil {
 		t.Fatalf("ReadFile: %v", readErr)
@@ -324,8 +312,7 @@ func TestLoadCorruptedFile(t *testing.T) {
 	if err == nil {
 		t.Error("Load on corrupted file: nil error, want non-nil")
 	}
-	// Callers warn and continue with defaults, so the config itself must
-	// be the usable zero value.
+
 	if !reflect.DeepEqual(c, Config{}) {
 		t.Errorf("Load = %+v, want zero Config", c)
 	}
@@ -390,7 +377,6 @@ func TestOffsetHelpers(t *testing.T) {
 		})
 	}
 
-	// Recalibration replaces the stored pair.
 	c.SetOffset("cap", "play", 501, 0.95)
 	if off, _ := c.OffsetFor("cap", "play"); off != 501 {
 		t.Errorf("after recalibration OffsetFor = %d, want 501", off)
@@ -400,8 +386,6 @@ func TestOffsetHelpers(t *testing.T) {
 	}
 }
 
-// --- the written-pieces list and the managed folder ----------------------
-
 func TestAddCreatedMovesToTheFrontAndCaps(t *testing.T) {
 	var c Config
 	for i := 0; i < MaxCreated+5; i++ {
@@ -410,11 +394,11 @@ func TestAddCreatedMovesToTheFrontAndCaps(t *testing.T) {
 	if len(c.Created) != MaxCreated {
 		t.Fatalf("got %d written pieces, want the %d cap", len(c.Created), MaxCreated)
 	}
-	// Most recent first.
+
 	if !strings.HasSuffix(c.Created[0], fmt.Sprintf("p%02d.gtab", MaxCreated+4)) {
 		t.Errorf("the front of the list is %q, want the last one written", c.Created[0])
 	}
-	// Re-writing a piece moves it to the front rather than duplicating it.
+
 	again := c.Created[3]
 	c.AddCreated(again)
 	if c.Created[0] != again {
@@ -441,7 +425,7 @@ func TestForgetCreated(t *testing.T) {
 	if c.Created != nil {
 		t.Errorf("a drained list is %v, want nil so it stays out of the JSON", c.Created)
 	}
-	c.ForgetCreated("never-there.gtab") // must not panic
+	c.ForgetCreated("never-there.gtab")
 }
 
 func TestCreatedSurvivesASaveAndLoad(t *testing.T) {
@@ -469,9 +453,7 @@ func TestCreatedSurvivesASaveAndLoad(t *testing.T) {
 }
 
 func TestOlderConfigMigratesForward(t *testing.T) {
-	// A version-2 file — no sync trim, no written pieces — has to load
-	// with those fields at their documented defaults rather than being
-	// refused.
+
 	dir := t.TempDir()
 	t.Setenv(EnvConfigDir, dir)
 	old := `{"version":2,"recents":["a.gp"],"countInBeats":4}`
@@ -513,15 +495,12 @@ func TestPiecesDirIsUnderTheConfigDir(t *testing.T) {
 	if fi, err := os.Stat(made); err != nil || !fi.IsDir() {
 		t.Errorf("EnsurePiecesDir did not make a directory: %v", err)
 	}
-	// Idempotent: a second call on an existing folder is fine.
+
 	if _, err := EnsurePiecesDir(); err != nil {
 		t.Errorf("EnsurePiecesDir on an existing folder: %v", err)
 	}
 }
 
-// TestMigrateOldDirAdoptsGuitartutor: the rename must not reset anyone.
-// The old directory holds the config and the pieces library; when no new
-// directory exists yet, the whole thing is renamed into place in one move.
 func TestMigrateOldDirAdoptsGuitartutor(t *testing.T) {
 	base := t.TempDir()
 	old := filepath.Join(base, oldDirName)
@@ -549,10 +528,6 @@ func TestMigrateOldDirAdoptsGuitartutor(t *testing.T) {
 	}
 }
 
-// TestMigrateOldDirNeverOverwrites: once a musictutor directory exists —
-// even an empty one — a leftover guitartutor directory is evidence, not a
-// donor. Renaming over live settings would be worse than the reset the
-// migration exists to prevent.
 func TestMigrateOldDirNeverOverwrites(t *testing.T) {
 	base := t.TempDir()
 	for _, dir := range []string{dirName, oldDirName} {
@@ -574,16 +549,11 @@ func TestMigrateOldDirNeverOverwrites(t *testing.T) {
 	}
 }
 
-// TestRehomePathsFollowsTheMigration: once the directory rename has
-// happened (old gone, new standing), stored paths into the old directory
-// — recents, written pieces, the browse dir, the SoundFont — follow it,
-// so the start screen the migration preserved is not emptied by its own
-// dangling entries. While the old directory still exists, nothing moves.
 func TestRehomePathsFollowsTheMigration(t *testing.T) {
 	base := t.TempDir()
 	t.Setenv(EnvConfigDir, "")
-	t.Setenv("XDG_CONFIG_HOME", base) // Linux/macOS UserConfigDir
-	t.Setenv("AppData", base)         // Windows UserConfigDir
+	t.Setenv("XDG_CONFIG_HOME", base)
+	t.Setenv("AppData", base)
 	if err := os.MkdirAll(filepath.Join(base, dirName), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -611,8 +581,6 @@ func TestRehomePathsFollowsTheMigration(t *testing.T) {
 		t.Errorf("browse dir = %q, want %q", c.LastBrowseDir, wantDir)
 	}
 
-	// With the old directory still standing, its paths are still valid
-	// and must not be rewritten.
 	if err := os.MkdirAll(filepath.Join(base, oldDirName), 0o755); err != nil {
 		t.Fatal(err)
 	}

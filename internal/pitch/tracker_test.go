@@ -5,8 +5,6 @@ import (
 	"testing"
 )
 
-// runPipeline drives detector + tracker over x and returns all closed
-// notes, including those closed by the final Flush.
 func runPipeline(t *testing.T, x []float32) []Note {
 	t.Helper()
 	cfg := DefaultConfig(testSR)
@@ -23,10 +21,8 @@ func runPipeline(t *testing.T, x []float32) []Note {
 	return append(notes, tr.Flush()...)
 }
 
-// TestTrackerDetunedSine: a sine +20 cents sharp of A3 tracks as one note
-// on key 57 whose Cents lands within ±5 of +20.
 func TestTrackerDetunedSine(t *testing.T) {
-	const key = 57 // A3
+	const key = 57
 	freq := keyToFreq(key) * math.Pow(2, 20.0/1200)
 	notes := runPipeline(t, sine(freq, 0.4, 0.5))
 	if len(notes) != 1 {
@@ -44,11 +40,6 @@ func TestTrackerDetunedSine(t *testing.T) {
 	}
 }
 
-// TestTrackerBendIsOneNote pins the documented bend semantics: a sine
-// sweeping 196 Hz (G3) to 220 Hz (A3) over 0.5 s — a full-tone bend that
-// reaches the next key and beyond — stays ONE note whose cents trajectory
-// rose. Only an onset or a discontinuous jump splits; a monotonic drift
-// never does.
 func TestTrackerBendIsOneNote(t *testing.T) {
 	cfg := DefaultConfig(testSR)
 	d := NewDetector(cfg)
@@ -63,7 +54,7 @@ func TestTrackerBendIsOneNote(t *testing.T) {
 			end = len(x)
 		}
 		notes = append(notes, tr.Feed(d.Process(x[off:end]))...)
-		// Sample the live cents trajectory the way wait mode would.
+
 		if cur, ok := tr.Current(); ok {
 			risingCents = append(risingCents, cur.Cents)
 		}
@@ -74,15 +65,14 @@ func TestTrackerBendIsOneNote(t *testing.T) {
 		t.Fatalf("got %d notes, want 1 (a bend must not split): %+v", len(notes), notes)
 	}
 	n := notes[0]
-	if n.Key != 55 { // G3, where the bend started
+	if n.Key != 55 {
 		t.Errorf("Key = %d, want 55 (the starting key)", n.Key)
 	}
-	// The 196→220 sweep spans 200 cents; the median deviation sits near
-	// the middle of the trajectory.
+
 	if n.Cents < 40 || n.Cents > 160 {
 		t.Errorf("Cents = %+.2f, want mid-trajectory (40..160) for a 0..200 cent bend", n.Cents)
 	}
-	// The live trajectory rose.
+
 	if len(risingCents) < 4 {
 		t.Fatalf("only %d Current() samples", len(risingCents))
 	}
@@ -93,17 +83,6 @@ func TestTrackerBendIsOneNote(t *testing.T) {
 	}
 }
 
-// TestTrackerReportsTrajectory is the slide regression. A legato slide is
-// one continuously sounded note that keeps its ORIGIN key (the case above
-// pins that, deliberately), so Note.Cents — a median over the whole note —
-// is the only pitch figure a caller used to get, and it reports neither
-// where the note started nor where it arrived. A scorer therefore could not
-// recognize a slide DESTINATION, which the score writes at the destination
-// pitch, and every slide in a piece was an expectation that could not be
-// matched however well it was played.
-//
-// The same 196→220 Hz sweep must report a trajectory that starts at the
-// opening key, reaches a full tone above it, and SETTLES there.
 func TestTrackerReportsTrajectory(t *testing.T) {
 	notes := runPipeline(t, chirp(196, 220, 0.4, 0.5))
 	if len(notes) != 1 {
@@ -113,15 +92,14 @@ func TestTrackerReportsTrajectory(t *testing.T) {
 	if n.Key != 55 {
 		t.Fatalf("Key = %d, want 55 (G3, where the sweep started)", n.Key)
 	}
-	// The sweep spans 0..+200 cents off the opening key.
+
 	if n.MinCents > 40 {
 		t.Errorf("MinCents = %+.1f, want near 0 (the note opened on its key)", n.MinCents)
 	}
 	if n.MaxCents < 160 {
 		t.Errorf("MaxCents = %+.1f, want near +200 (the sweep's destination)", n.MaxCents)
 	}
-	// EndCents is what tells a slide that ARRIVED from one still moving:
-	// the final hops sit at the destination, not mid-journey like Cents.
+
 	if n.EndCents < 160 {
 		t.Errorf("EndCents = %+.1f, want near +200 (where the note settled); Cents is %+.1f", n.EndCents, n.Cents)
 	}
@@ -130,11 +108,8 @@ func TestTrackerReportsTrajectory(t *testing.T) {
 	}
 }
 
-// TestTrackerSteadyNoteHasFlatTrajectory: the trajectory fields must not
-// invent movement. A note played straight reports its own key at every
-// rung, so nothing downstream can mistake it for a slide.
 func TestTrackerSteadyNoteHasFlatTrajectory(t *testing.T) {
-	const key = 57 // A3
+	const key = 57
 	notes := runPipeline(t, sine(keyToFreq(key), 0.4, 0.5))
 	if len(notes) != 1 {
 		t.Fatalf("got %d notes, want 1: %+v", len(notes), notes)
@@ -150,23 +125,18 @@ func TestTrackerSteadyNoteHasFlatTrajectory(t *testing.T) {
 	}
 }
 
-// TestTrackerRepickSplitsNotes: two Karplus-Strong plucks of the SAME key
-// back to back must yield TWO notes — the second attack's onset splits
-// them even though the pitch never changes.
 func TestTrackerRepickSplitsNotes(t *testing.T) {
-	const key = 45 // A2
+	const key = 45
 	v := ksVoice()
 	x := silence(0.2)
 	v.NoteOn(key, 0.8)
 	x = ksRender(v, 0.3, x)
 	v.NoteOff(key)
-	x = ksRender(v, 0.15, x) // ring down, still audible
+	x = ksRender(v, 0.15, x)
 	repick := int64(len(x))
-	v.NoteOn(key, 0.8) // re-pick
+	v.NoteOn(key, 0.8)
 	x = ksRender(v, 0.3, x)
 
-	// The ring-down stays above the noise floor, so the only thing that
-	// can split the notes is the second attack's onset — verify it fired.
 	d := NewDetector(DefaultConfig(testSR))
 	sawOnset := false
 	for _, f := range feedAll(d, x, 480) {
@@ -192,14 +162,6 @@ func TestTrackerRepickSplitsNotes(t *testing.T) {
 	}
 }
 
-// TestTrackerKeyChangeSurvivesUnvoicedFlicker is the regression test for
-// the hysteresis dead-end: an unvoiced hop used to reset the key-change
-// (jump) candidacy while every voiced hop reset the unvoiced-run counter,
-// so a re-fretted note flickering around the voicing threshold — voiced
-// hops on the NEW key alternating with unvoiced dropouts — left the OLD
-// note open forever and the new key was never recognized. An unvoiced hop
-// carries no contradicting pitch evidence, so it must not cancel the
-// jump; the new key has to win.
 func TestTrackerKeyChangeSurvivesUnvoicedFlicker(t *testing.T) {
 	cfg := DefaultConfig(testSR)
 	tr := NewTracker(cfg)
@@ -216,17 +178,15 @@ func TestTrackerKeyChangeSurvivesUnvoicedFlicker(t *testing.T) {
 		closed = append(closed, tr.Feed([]Frame{f})...)
 	}
 
-	const oldKey, newKey = 57, 64 // A3 -> E4
-	// Sustain the old key long enough to open it and fill the median
-	// filter.
+	const oldKey, newKey = 57, 64
+
 	for i := 0; i < 10; i++ {
 		feed(next(keyToFreq(oldKey), 0.95))
 	}
 	if cur, ok := tr.Current(); !ok || cur.Key != oldKey {
 		t.Fatalf("Current = %+v, %v; want open note on key %d", cur, ok, oldKey)
 	}
-	// Re-fret to the new key, but weakly: every voiced hop on the new
-	// key is followed by an unvoiced dropout.
+
 	for i := 0; i < 12; i++ {
 		feed(next(keyToFreq(newKey), 0.9))
 		feed(next(0, 0))
@@ -244,8 +204,6 @@ func TestTrackerKeyChangeSurvivesUnvoicedFlicker(t *testing.T) {
 	}
 }
 
-// TestTrackerClosesOnSilence: a note followed by silence closes on the
-// unvoiced run without needing Flush, stamped inside the sounding region.
 func TestTrackerClosesOnSilence(t *testing.T) {
 	x := append(sine(220, 0.4, 0.3), silence(0.3)...)
 	cfg := DefaultConfig(testSR)
@@ -265,8 +223,6 @@ func TestTrackerClosesOnSilence(t *testing.T) {
 	}
 }
 
-// TestTrackerCurrentAndFlush: Current exposes the open note with End 0
-// while it sounds; Flush closes it and Current goes empty.
 func TestTrackerCurrentAndFlush(t *testing.T) {
 	cfg := DefaultConfig(testSR)
 	d := NewDetector(cfg)

@@ -1,16 +1,5 @@
 package edit
 
-// Everything that changes the shape of the piece rather than the notes in
-// it: bars, the meter and tempo maps, and the tracks themselves.
-//
-// The maps are the fiddly part. internal/score stores tempo and meter
-// changes at TICKS, and inserting a bar moves every tick after it — so a
-// change written "at bar 5" would slide onto bar 4 the moment a bar was
-// added in front of it. Every structural operation here therefore works in
-// BARS: the maps are expanded to one value per bar, the bars are changed,
-// and the maps are rebuilt by compressing the per-bar values back into
-// change points. Nothing has to reason about which ticks moved.
-
 import (
 	"fmt"
 	"strings"
@@ -19,12 +8,8 @@ import (
 	"github.com/S95F/musicTutor/internal/score/textfmt"
 )
 
-// BarCount is how many bars the piece has. Every track has the same
-// number — that is the shared grid.
 func (d *Doc) BarCount() int { return len(d.sc.Tracks[0].Bars) }
 
-// AppendBar adds an empty bar to the end of the piece, in the meter the
-// last bar is in, and moves the cursor into it.
 func (d *Doc) AppendBar() error {
 	err := d.mutate(func() error {
 		return d.rebuildWith(d.insertBarAt(d.BarCount()))
@@ -37,8 +22,6 @@ func (d *Doc) AppendBar() error {
 	return nil
 }
 
-// InsertBar puts an empty bar in front of the cursor's bar, across every
-// track.
 func (d *Doc) InsertBar() error {
 	at := d.cur.Bar
 	return d.mutate(func() error {
@@ -46,9 +29,6 @@ func (d *Doc) InsertBar() error {
 	})
 }
 
-// DeleteBar removes the cursor's bar from every track. The last bar of a
-// piece is refused: an editor with nowhere to put the cursor is not a
-// state worth being able to reach.
 func (d *Doc) DeleteBar() error {
 	if d.BarCount() <= 1 {
 		return fmt.Errorf("a piece needs at least one bar")
@@ -64,14 +44,9 @@ func (d *Doc) DeleteBar() error {
 	})
 }
 
-// insertBarAt adds an empty bar at index at in every track and returns the
-// per-bar tempos for the piece that results. The new bar takes the meter
-// and tempo of the bar it displaces — or of the bar before it, when
-// appending past the end, where there is nothing to displace. Caller is
-// inside mutate and passes the result to rebuildWith.
 func (d *Doc) insertBarAt(at int) []int64 {
 	tempos := d.tempoPerBar()
-	// The bar whose meter and tempo the new one copies.
+
 	ref := at
 	if ref >= len(tempos) {
 		ref = len(tempos) - 1
@@ -87,9 +62,7 @@ func (d *Doc) insertBarAt(at int) []int64 {
 		if src >= len(tr.Bars) {
 			src = len(tr.Bars) - 1
 		}
-		// Inserted empty; rebuildWith's refit pass lays the rests, and a
-		// meter no rests can fill (a model-valid 1/5, say) is reported
-		// there — and rolled back — rather than panicking here.
+
 		bar := &score.Bar{Num: tr.Bars[src].Num, Den: tr.Bars[src].Den}
 		tr.Bars = append(tr.Bars, nil)
 		copy(tr.Bars[at+1:], tr.Bars[at:])
@@ -98,11 +71,6 @@ func (d *Doc) insertBarAt(at int) []int64 {
 	return tempos
 }
 
-// SetMeter changes the time signature from the cursor's bar up to (but not
-// including) the next bar that already changes it, across every track —
-// which is what a time-signature change means on paper. Bars that would
-// become too short for the notes already in them are reported, and nothing
-// changes.
 func (d *Doc) SetMeter(num, den int) error {
 	if num < 1 || num > 64 {
 		return fmt.Errorf("a time signature's top number has to be 1-64, not %d", num)
@@ -114,8 +82,7 @@ func (d *Doc) SetMeter(num, den int) error {
 	}
 	at := d.cur.Bar
 	return d.mutate(func() error {
-		// Read the tempos out before the bars change lengths: per-bar
-		// tempos are looked up by tick, and the ticks are about to move.
+
 		tempos := d.tempoPerBar()
 		ref := d.sc.Tracks[0].Bars[at]
 		oldNum, oldDen := ref.Num, ref.Den
@@ -134,8 +101,6 @@ func (d *Doc) SetMeter(num, den int) error {
 	})
 }
 
-// SetTempo changes the tempo from the cursor's bar up to the next bar that
-// already changes it.
 func (d *Doc) SetTempo(bpm float64) error {
 	if !(bpm >= 1 && bpm <= 1000) {
 		return fmt.Errorf("a tempo has to be between 1 and 1000 BPM, not %g", bpm)
@@ -152,7 +117,6 @@ func (d *Doc) SetTempo(bpm float64) error {
 	})
 }
 
-// TempoAtCursor is the tempo in force where the cursor is, in BPM.
 func (d *Doc) TempoAtCursor() float64 {
 	us := d.sc.Tempos.At(d.Bar().Start)
 	if us <= 0 {
@@ -161,9 +125,6 @@ func (d *Doc) TempoAtCursor() float64 {
 	return 60e6 / float64(us)
 }
 
-// --- the piece and its tracks ----------------------------------------
-
-// SetTitle names the piece.
 func (d *Doc) SetTitle(title string) error {
 	if hasLineBreak(title) {
 		return fmt.Errorf("a title has to be one line")
@@ -177,8 +138,6 @@ func (d *Doc) SetTitle(title string) error {
 	})
 }
 
-// SetTrackName names the track being edited. Only the first track may be
-// nameless — every later one needs a name to be written down at all.
 func (d *Doc) SetTrackName(name string) error {
 	if hasLineBreak(name) {
 		return fmt.Errorf("a track name has to be one line")
@@ -192,11 +151,9 @@ func (d *Doc) SetTrackName(name string) error {
 	})
 }
 
-// SetCapo moves the capo on the track being edited.
 func (d *Doc) SetCapo(fret int) error {
 	if w := d.Track().Wind; w != nil {
-		// score.Validate refuses a capo on a wind track, so accepting one
-		// here would leave a piece that can never be saved.
+
 		return fmt.Errorf("a %s has no capo", w.Name)
 	}
 	if fret < 0 || fret > textfmt.MaxFret {
@@ -205,14 +162,11 @@ func (d *Doc) SetCapo(fret int) error {
 	return d.mutate(func() error {
 		tr := d.Track()
 		tr.Capo = fret
-		// A refusal needs no restore: mutate discards the whole mutated
-		// score on error.
+
 		return checkPitches(tr)
 	})
 }
 
-// SetProgram sets the track's General MIDI program hint, which is what a
-// SoundFont voice picks its instrument from.
 func (d *Doc) SetProgram(program int) error {
 	if program < 0 || program > 127 {
 		return fmt.Errorf("a General MIDI program is 0-127, not %d", program)
@@ -223,7 +177,6 @@ func (d *Doc) SetProgram(program int) error {
 	})
 }
 
-// SetRole marks the track as the part being practised or as accompaniment.
 func (d *Doc) SetRole(role score.TrackRole) error {
 	return d.mutate(func() error {
 		d.Track().Role = role
@@ -231,15 +184,9 @@ func (d *Doc) SetRole(role score.TrackRole) error {
 	})
 }
 
-// SetTuning re-tunes the track being edited. Tuning is given
-// highest-string-first, the way the model stores it. A tuning that would
-// put an existing note out of MIDI range, or take away a string a note is
-// written on, is refused — the notes are the user's work and a re-tune is
-// not a licence to lose them.
 func (d *Doc) SetTuning(tuning score.Tuning) error {
 	if w := d.Track().Wind; w != nil {
-		// score.Validate refuses a tuning on a wind track, so accepting one
-		// here would leave a piece that can never be saved.
+
 		return fmt.Errorf("a %s has no strings to tune", w.Name)
 	}
 	if len(tuning) == 0 {
@@ -253,15 +200,11 @@ func (d *Doc) SetTuning(tuning score.Tuning) error {
 	return d.mutate(func() error {
 		tr := d.Track()
 		tr.Tuning = append(score.Tuning(nil), tuning...)
-		// A refusal needs no restore: mutate discards the whole mutated
-		// score on error.
+
 		return checkPitches(tr)
 	})
 }
 
-// AddTrack appends a track of empty bars on the same grid and moves the
-// cursor to it: a standard-tuned guitar when wind is nil, that wind
-// instrument otherwise.
 func (d *Doc) AddTrack(name string, wind *score.WindInstrument) error {
 	if hasLineBreak(name) {
 		return fmt.Errorf("a track name has to be one line")
@@ -279,8 +222,7 @@ func (d *Doc) AddTrack(name string, wind *score.WindInstrument) error {
 		}
 		for bi, ref := range d.sc.Tracks[0].Bars {
 			bar := tr.AppendBar(ref.Num, ref.Den)
-			// A meter no rests can fill (a model-valid 1/5, say) refuses
-			// the whole track.
+
 			if err := refit(bar, -1); err != nil {
 				return fmt.Errorf("bar %d of the new track: %w", bi+1, err)
 			}
@@ -299,7 +241,6 @@ func (d *Doc) AddTrack(name string, wind *score.WindInstrument) error {
 	return nil
 }
 
-// DeleteTrack removes the track being edited. The last one is refused.
 func (d *Doc) DeleteTrack() error {
 	if len(d.sc.Tracks) <= 1 {
 		return fmt.Errorf("a piece needs at least one track")
@@ -314,11 +255,6 @@ func (d *Doc) DeleteTrack() error {
 	})
 }
 
-// --- map rebuilding --------------------------------------------------
-
-// tempoPerBar expands the tempo map to one value per bar: the tempo in
-// force at that bar. This is the form structural edits work in, because a
-// bar index survives an insertion in front of it and a tick does not.
 func (d *Doc) tempoPerBar() []int64 {
 	bars := d.sc.Tracks[0].Bars
 	out := make([]int64, len(bars))
@@ -328,10 +264,6 @@ func (d *Doc) tempoPerBar() []int64 {
 	return out
 }
 
-// rebuildWith puts the ticks back across every track and compresses the
-// per-bar tempos and the bars' own meters into the two maps, then refits
-// every bar whose meter changed. Bars that no longer fit their meter are
-// reported, and the operation around this rolls the piece back.
 func (d *Doc) rebuildWith(tempos []int64) error {
 	for _, tr := range d.sc.Tracks {
 		retick(tr)
@@ -368,9 +300,6 @@ func (d *Doc) rebuildWith(tempos []int64) error {
 	return nil
 }
 
-// checkPitches reports the first note of a track that its current
-// instrument cannot sound: outside the tuning's strings on a fretted
-// track, off the one lane or below the horn on a wind track.
 func checkPitches(tr *score.Track) error {
 	for bi, bar := range tr.Bars {
 		for _, bt := range bar.Beats {
@@ -399,9 +328,6 @@ func checkPitches(tr *score.Track) error {
 	return nil
 }
 
-// hasLineBreak reports whether text would break a one-line directive.
 func hasLineBreak(s string) bool { return strings.ContainsAny(s, "\r\n") }
 
-// hasComment reports whether text holds "//", which would start a comment
-// in the file and silently truncate the directive that carries it.
 func hasComment(s string) bool { return strings.Contains(s, "//") }

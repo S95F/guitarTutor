@@ -11,10 +11,6 @@ import (
 	"time"
 )
 
-// fakeFS drives a resolver without touching the disk: a set of file paths,
-// a set of directory paths, a fake environment, and a fake executable
-// directory. Paths are compared after filepath.Clean so the tests can be
-// written with the platform's own separator.
 type fakeFS struct {
 	files map[string]bool
 	dirs  map[string]bool
@@ -86,8 +82,6 @@ func (i fakeInfo) ModTime() time.Time { return time.Time{} }
 func (i fakeInfo) IsDir() bool        { return i.dir }
 func (i fakeInfo) Sys() any           { return nil }
 
-// Compile-time proof that fakeInfo is a usable fs.FileInfo, so the fake
-// cannot drift from what os.Stat returns.
 var _ fs.FileInfo = fakeInfo{}
 
 func TestRuntimeLibNamePerGOOS(t *testing.T) {
@@ -168,7 +162,6 @@ func TestResolvePrecedenceOptionsBeatsEnvBeatsExeDir(t *testing.T) {
 	f.env[EnvRuntime] = "/env/libonnxruntime.so"
 	f.env[EnvModel] = "/env/model.onnx"
 
-	// Environment wins over the executable directory.
 	got, err := f.resolver().resolve(Options{})
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -177,7 +170,6 @@ func TestResolvePrecedenceOptionsBeatsEnvBeatsExeDir(t *testing.T) {
 		t.Errorf("env did not win: %+v", got)
 	}
 
-	// Explicit options win over the environment.
 	got, err = f.resolver().resolve(Options{
 		RuntimePath: "/explicit/libonnxruntime.so",
 		ModelPath:   "/explicit/model.onnx",
@@ -191,8 +183,7 @@ func TestResolvePrecedenceOptionsBeatsEnvBeatsExeDir(t *testing.T) {
 }
 
 func TestResolveAcceptsDirectories(t *testing.T) {
-	// Pointing at an unpacked ONNX Runtime release, and at a directory of
-	// models, both work.
+
 	f := newFakeFS("windows", `C:\app`)
 	f.addFile(`C:\dl\onnxruntime-win-x64-1.20.1`, "lib", "onnxruntime.dll")
 	f.addFile(`C:\dl\models`, DefaultModelName)
@@ -230,9 +221,7 @@ func TestRuntimeMissingErrorIsActionable(t *testing.T) {
 	if !errors.Is(err, ErrRuntimeNotFound) {
 		t.Fatalf("err = %v, want ErrRuntimeNotFound", err)
 	}
-	// It must name every path it tried, what to download, and the escape
-	// hatch. A missing DLL that only says "not found" is the failure this
-	// package is most likely to be judged on.
+
 	assertMentions(t, err,
 		filepath.Join(`C:\app`, "onnxruntime.dll"),
 		filepath.Join(`C:\app`, "onnxruntime", "lib", "onnxruntime.dll"),
@@ -244,7 +233,7 @@ func TestRuntimeMissingErrorIsActionable(t *testing.T) {
 
 func TestModelMissingErrorIsActionable(t *testing.T) {
 	f := newFakeFS("linux", "/opt/gt")
-	f.addFile("/opt/gt", "libonnxruntime.so") // runtime present, model not
+	f.addFile("/opt/gt", "libonnxruntime.so")
 
 	_, err := f.resolver().resolve(Options{})
 	if !errors.Is(err, ErrModelNotFound) {
@@ -287,7 +276,6 @@ func TestUnreadableExecutableDirectoryIsReported(t *testing.T) {
 	}
 	assertMentions(t, err, "no /proc/self/exe", EnvRuntime)
 
-	// Same for the model, once the runtime has been pinned by hand.
 	f.addFile("/pinned/libonnxruntime.so")
 	_, err = f.resolver().resolve(Options{RuntimePath: "/pinned/libonnxruntime.so"})
 	if !errors.Is(err, ErrModelNotFound) {
@@ -297,8 +285,7 @@ func TestUnreadableExecutableDirectoryIsReported(t *testing.T) {
 }
 
 func TestOSResolverIsWiredToTheRealEnvironment(t *testing.T) {
-	// The production resolver is otherwise never exercised: prove its
-	// three hooks point at the real os package rather than nil.
+
 	r := osResolver()
 	if r.goos != runtime.GOOS {
 		t.Errorf("goos = %q, want %q", r.goos, runtime.GOOS)
@@ -329,7 +316,7 @@ func TestResolveSampleRates(t *testing.T) {
 		rate      int
 		wantRatio int
 	}{
-		{0, 3}, // default 48 kHz
+		{0, 3},
 		{16000, 1},
 		{32000, 2},
 		{48000, 3},
@@ -352,13 +339,10 @@ func TestResolveSampleRates(t *testing.T) {
 		}
 	}
 
-	// 44.1 kHz is the one a user will actually hit, so the message has to
-	// name the rates that do work.
 	_, err := f.resolver().resolve(Options{SampleRate: 44100})
 	assertMentions(t, err, "44100", "16000", "48000")
 }
 
-// assertMentions fails unless every needle appears in the error text.
 func assertMentions(t *testing.T, err error, needles ...string) {
 	t.Helper()
 	if err == nil {

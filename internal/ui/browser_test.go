@@ -1,11 +1,5 @@
 package ui
 
-// Browser tests. Ebitengine cannot open a window here, so every test
-// drives the Browser's plain state methods — move, activate, handleKey,
-// click, handleDrop, launchOpenDialog — with doubles standing in for the
-// preferences, the importer, and the OS file dialog. Nothing in this
-// file renders.
-
 import (
 	"errors"
 	"fmt"
@@ -19,16 +13,11 @@ import (
 	"github.com/hajimehoshi/ebiten/v2"
 )
 
-// --- doubles -------------------------------------------------------------
-
-// browserStubScreen is a Screen that is never run: the fake opener hands
-// it back so OpenPiece has something to push.
 type browserStubScreen struct{}
 
 func (browserStubScreen) Update() error      { return nil }
 func (browserStubScreen) Draw(*ebiten.Image) {}
 
-// browserFakeOpener returns a canned result for every Open.
 type browserFakeOpener struct {
 	warns  []string
 	err    error
@@ -46,9 +35,6 @@ func (o *browserFakeOpener) Open(path string) (Screen, []string, error) {
 
 func (o *browserFakeOpener) CloseCurrent() { o.closed++ }
 
-// browserFakePrefs is an in-memory Prefs. It deliberately does not
-// implement browserRecentRemover, so the session-only forget path is
-// what the tests exercise by default; browserRemovingPrefs adds it.
 type browserFakePrefs struct {
 	recents  []string
 	created  []string
@@ -86,8 +72,6 @@ func (p *browserFakePrefs) Devices() (string, string) { return "", "" }
 func (p *browserFakePrefs) SetDevices(string, string) {}
 func (p *browserFakePrefs) Save() error               { p.saves++; return nil }
 
-// browserRemovingPrefs is a Prefs that can also forget a recent
-// permanently — the optional extension the browser probes for.
 type browserRemovingPrefs struct{ browserFakePrefs }
 
 func (p *browserRemovingPrefs) RemoveRecent(path string) {
@@ -100,9 +84,6 @@ func (p *browserRemovingPrefs) RemoveRecent(path string) {
 	p.recents = out
 }
 
-// browserDropFS mimics the shape of the fs.FS ebiten.DroppedFiles
-// returns on desktop: the root lists the dropped items by base name, and
-// opening one yields an *os.File that reports the real path from Name().
 type browserDropFS struct{ paths []string }
 
 func (d browserDropFS) Open(name string) (fs.File, error) {
@@ -132,8 +113,6 @@ func (d browserDropFS) ReadDir(name string) ([]fs.DirEntry, error) {
 	return out, nil
 }
 
-// browserNameOnlyEntry is a listed dropped item that cannot be opened:
-// the platform knows its name and nothing else.
 type browserNameOnlyEntry struct{ name string }
 
 func (e browserNameOnlyEntry) Name() string               { return e.name }
@@ -141,16 +120,11 @@ func (e browserNameOnlyEntry) IsDir() bool                { return false }
 func (e browserNameOnlyEntry) Type() fs.FileMode          { return 0 }
 func (e browserNameOnlyEntry) Info() (fs.FileInfo, error) { return nil, fs.ErrPermission }
 
-// browserPartialDropFS is a drop the platform could only partly resolve.
-// It reproduces what the desktop implementation does when it fails to
-// stat one of the dropped items: the listing comes back the right length
-// but with nil fs.DirEntry values at and after the failure, alongside an
-// error. bad names are listed but refuse to open.
 type browserPartialDropFS struct {
-	paths    []string // real files, recoverable
-	bad      []string // listed, but Open fails
-	nilHoles int      // nil entries the platform left behind
-	err      error    // ReadDir's error alongside the partial listing
+	paths    []string
+	bad      []string
+	nilHoles int
+	err      error
 }
 
 func (d browserPartialDropFS) Open(name string) (fs.File, error) {
@@ -183,11 +157,6 @@ func (d browserPartialDropFS) ReadDir(name string) ([]fs.DirEntry, error) {
 	return out, d.err
 }
 
-// --- fixtures ------------------------------------------------------------
-
-// browserTree writes an empty file at each relative path under root,
-// creating parent directories as needed. A path ending in "/" makes a
-// directory.
 func browserTree(t *testing.T, root string, paths ...string) {
 	t.Helper()
 	for _, p := range paths {
@@ -207,18 +176,12 @@ func browserTree(t *testing.T, root string, paths ...string) {
 	}
 }
 
-// browserFixture builds a Browser over a shell with the given doubles.
-// The recents list — the screen's one list — comes from pr.
 func browserFixture(t *testing.T, pr Prefs, op Opener) *Browser {
 	t.Helper()
 	sh := NewShell(Services{Opener: op, Prefs: pr}, nil)
 	return NewBrowser(sh)
 }
 
-// browserStatFixture builds a Browser whose recents probe is the given
-// hook, installed before the first load so the probes NewBrowser would
-// have made are counted too — which is why this repeats its steps
-// instead of calling it.
 func browserStatFixture(t *testing.T, pr Prefs, op Opener,
 	stat func(string) (fs.FileInfo, error)) *Browser {
 	t.Helper()
@@ -228,8 +191,6 @@ func browserStatFixture(t *testing.T, pr Prefs, op Opener,
 	return b
 }
 
-// browserPressed returns a handleKeys predicate for an exact set of keys
-// held down on the same frame.
 func browserPressed(keys ...ebiten.Key) func(ebiten.Key) bool {
 	down := map[ebiten.Key]bool{}
 	for _, k := range keys {
@@ -238,7 +199,6 @@ func browserPressed(keys ...ebiten.Key) func(ebiten.Key) bool {
 	return func(k ebiten.Key) bool { return down[k] }
 }
 
-// browserNames lists the entries' names, for compact assertions.
 func browserNames(es []browserEntry) []string {
 	out := make([]string, len(es))
 	for i, e := range es {
@@ -259,8 +219,6 @@ func browserEqual(a, b []string) bool {
 	return true
 }
 
-// browserRecentsFixture builds a Browser whose recents are n real files
-// under a fresh temp root, returning the paths in list order.
 func browserRecentsFixture(t *testing.T, op Opener, n int) (*Browser, []string) {
 	t.Helper()
 	root := t.TempDir()
@@ -273,10 +231,6 @@ func browserRecentsFixture(t *testing.T, op Opener, n int) (*Browser, []string) 
 	return browserFixture(t, &browserFakePrefs{recents: paths}, op), paths
 }
 
-// --- tests ---------------------------------------------------------------
-
-// TestBrowserSupportedExtensions pins the accepted set and its
-// case-insensitivity.
 func TestBrowserSupportedExtensions(t *testing.T) {
 	for _, n := range []string{"a.gtab", "a.mid", "a.midi", "a.smf", "a.gp",
 		"a.musicxml", "a.mxl", "a.xml", "A.GP", "A.MusicXML"} {
@@ -291,9 +245,6 @@ func TestBrowserSupportedExtensions(t *testing.T) {
 	}
 }
 
-// TestBrowserClampTop covers the viewport arithmetic on its own: a list
-// shorter than the viewport never scrolls, and the offset moves by the
-// minimum needed to keep the selection visible.
 func TestBrowserClampTop(t *testing.T) {
 	for _, c := range []struct {
 		name              string
@@ -314,8 +265,6 @@ func TestBrowserClampTop(t *testing.T) {
 	}
 }
 
-// TestBrowserSelectionClampsAndScrolls: Up/Down stop at both ends of the
-// list and drag the viewport with them.
 func TestBrowserSelectionClampsAndScrolls(t *testing.T) {
 	b, _ := browserRecentsFixture(t, &browserFakeOpener{}, 40)
 
@@ -339,7 +288,6 @@ func TestBrowserSelectionClampsAndScrolls(t *testing.T) {
 		t.Errorf("selection %d outside viewport [%d,%d)", b.sel, b.top, b.top+b.rowsPerPane())
 	}
 
-	// The wheel scrolls the viewport without moving the selection.
 	sel := b.sel
 	b.scrollBy(-1000)
 	if b.top != 0 {
@@ -354,12 +302,8 @@ func TestBrowserSelectionClampsAndScrolls(t *testing.T) {
 	}
 }
 
-// TestBrowserSelectionStaysInBounds: the selection clamps at both ends
-// of an empty pane, and Enter never indexes past the end of a list —
-// even if the selection somehow outlived a shrink.
 func TestBrowserSelectionStaysInBounds(t *testing.T) {
-	// An EMPTY pane is the case that has no row to land on at all, and
-	// moving in it must not walk the cursor off either end.
+
 	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
 	if b.listLen() != 0 {
 		t.Fatalf("the fixture has %d rows, want an empty pane", b.listLen())
@@ -374,17 +318,14 @@ func TestBrowserSelectionStaysInBounds(t *testing.T) {
 	if b.sel != 0 || b.top != 0 {
 		t.Errorf("down in an empty pane left sel=%d top=%d, want 0/0", b.sel, b.top)
 	}
-	b.activate() // must not index past the slice
+	b.activate()
 
-	// A selection past the recents — standing in for any frame where the
-	// list shrank before setSel re-clamped — activates to nothing rather
-	// than indexing past the slice.
 	root := t.TempDir()
 	browserTree(t, root, "here.gp")
 	op := &browserFakeOpener{}
 	b = browserFixture(t, &browserFakePrefs{recents: []string{filepath.Join(root, "here.gp")}}, op)
 	b.sel = 5
-	b.activate() // must not panic
+	b.activate()
 	if len(op.opened) != 0 {
 		t.Errorf("an out-of-range selection opened %v", op.opened)
 	}
@@ -393,9 +334,6 @@ func TestBrowserSelectionStaysInBounds(t *testing.T) {
 	}
 }
 
-// TestBrowserMissingRecentFlaggedAndForgotten: a recent whose file has
-// gone is marked, refuses to open with an explanation, and Delete drops
-// it from the list.
 func TestBrowserMissingRecentFlaggedAndForgotten(t *testing.T) {
 	root := t.TempDir()
 	browserTree(t, root, "here.gp")
@@ -432,8 +370,7 @@ func TestBrowserMissingRecentFlaggedAndForgotten(t *testing.T) {
 	if len(b.panes[paneRecent]) != 1 || b.panes[paneRecent][0].path != here {
 		t.Fatalf("after forgetting, recents = %v", browserNames(b.panes[paneRecent]))
 	}
-	// The Prefs double cannot remove, so the entry is suppressed for the
-	// session and stays suppressed across a reload.
+
 	b.reloadRecents()
 	if len(b.panes[paneRecent]) != 1 {
 		t.Errorf("a forgotten recent came back: %v", browserNames(b.panes[paneRecent]))
@@ -443,8 +380,6 @@ func TestBrowserMissingRecentFlaggedAndForgotten(t *testing.T) {
 	}
 }
 
-// TestBrowserForgetPersistsWhenPrefsCanRemove: with a Prefs that
-// implements removal, forgetting is written through and saved.
 func TestBrowserForgetPersistsWhenPrefsCanRemove(t *testing.T) {
 	root := t.TempDir()
 	browserTree(t, root, "a.gp", "b.gp")
@@ -463,9 +398,6 @@ func TestBrowserForgetPersistsWhenPrefsCanRemove(t *testing.T) {
 	}
 }
 
-// TestBrowserOpenErrorIsCapturedNotPropagated is the survivability
-// requirement: a malformed piece leaves an inline message and the screen
-// keeps running.
 func TestBrowserOpenErrorIsCapturedNotPropagated(t *testing.T) {
 	root := t.TempDir()
 	browserTree(t, root, "broken.gp")
@@ -485,15 +417,12 @@ func TestBrowserOpenErrorIsCapturedNotPropagated(t *testing.T) {
 	if len(b.warns) != 1 {
 		t.Errorf("warnings = %v, want the importer's one warning", b.warns)
 	}
-	// The screen is still alive and the failure did not become a quit.
+
 	if err := b.handleKey(ebiten.KeyDown); err != nil {
 		t.Errorf("handleKey after a failed open = %v, want nil", err)
 	}
 }
 
-// TestBrowserOpenSuccess: a good piece chosen in the file dialog reaches
-// the opener, is recorded as recent, and any warnings are kept for
-// display.
 func TestBrowserOpenSuccess(t *testing.T) {
 	root := t.TempDir()
 	browserTree(t, root, "good.gp")
@@ -527,10 +456,6 @@ func TestBrowserOpenSuccess(t *testing.T) {
 	}
 }
 
-// TestBrowserWarningsRememberTheirPiece: importer warnings can sit in
-// the status band for minutes while the user practises and comes back,
-// so they carry the name of the piece they came from — and the name goes
-// away with them, never outliving the warnings it explains.
 func TestBrowserWarningsRememberTheirPiece(t *testing.T) {
 	root := t.TempDir()
 	browserTree(t, root, "good.gp", "clean.gp")
@@ -544,8 +469,6 @@ func TestBrowserWarningsRememberTheirPiece(t *testing.T) {
 		t.Errorf("warnsFrom = %q, want the piece the warnings came from", b.warnsFrom)
 	}
 
-	// A later open with nothing to warn about clears the heading with the
-	// warnings, and ShowError replaces the whole status.
 	op.warns = nil
 	b.openPath(clean)
 	if b.warnsFrom != "" || len(b.warns) != 0 {
@@ -572,17 +495,12 @@ func TestBrowserWarningsHeadingIsHonestAboutFailure(t *testing.T) {
 		t.Errorf("after a clean open the heading is %q", got)
 	}
 
-	// An importer can warn AND fail; the heading must not claim the
-	// piece opened.
 	op.err = fmt.Errorf("truncated file")
 	b.openPath(good)
 	if got := b.warnsHeading(); got != "warnings from good.gp:" {
 		t.Errorf("after a failed open the heading is %q, want it not to claim the piece opened", got)
 	}
 
-	// The verdict is recorded at open time, not inferred from the error
-	// line: launching the open dialog clears errMsg but keeps the
-	// warnings, and the heading must keep telling the truth.
 	b.SetOpenDialog(func(string) {})
 	b.launchOpenDialog("")
 	if got := b.warnsHeading(); got != "warnings from good.gp:" {
@@ -590,8 +508,6 @@ func TestBrowserWarningsHeadingIsHonestAboutFailure(t *testing.T) {
 	}
 }
 
-// TestBrowserOpenWithoutOpener: a shell with no importer says so rather
-// than dereferencing nil.
 func TestBrowserOpenWithoutOpener(t *testing.T) {
 	root := t.TempDir()
 	browserTree(t, root, "song.gp")
@@ -605,9 +521,6 @@ func TestBrowserOpenWithoutOpener(t *testing.T) {
 	}
 }
 
-// TestBrowserEscapeQuits: Escape and Q finish the screen, which at the
-// root of the stack exits the application. Nothing else returns an
-// error.
 func TestBrowserEscapeQuits(t *testing.T) {
 	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
 
@@ -625,8 +538,6 @@ func TestBrowserEscapeQuits(t *testing.T) {
 	}
 }
 
-// TestBrowserSettingsHook: S is inert and unadvertised until the
-// application installs an opener for the settings screen.
 func TestBrowserSettingsHook(t *testing.T) {
 	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
 
@@ -650,11 +561,6 @@ func TestBrowserSettingsHook(t *testing.T) {
 	}
 }
 
-// TestBrowserBindingsDocumentWorkingKeys: H toggles the getting-started
-// strip and Home/End jump the selection, so the control table must list
-// them — a strip whose button says "hide (H)" while H is documented
-// nowhere is a trap. The settings hint carries the key's own capital,
-// matching the practice view and the S on the button itself.
 func TestBrowserBindingsDocumentWorkingKeys(t *testing.T) {
 	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
 	rows := map[string]helpBinding{}
@@ -676,8 +582,6 @@ func TestBrowserBindingsDocumentWorkingKeys(t *testing.T) {
 	}
 }
 
-// TestBrowserHitTestAndClick: hovering maps to a recents row, a first
-// click selects, and a click on the already-selected row opens.
 func TestBrowserHitTestAndClick(t *testing.T) {
 	op := &browserFakeOpener{}
 	b, paths := browserRecentsFixture(t, op, 3)
@@ -686,16 +590,14 @@ func TestBrowserHitTestAndClick(t *testing.T) {
 	pane := l.panes[0]
 	rowY := func(row int) float64 { return pane.y + brwPaneHeadH + float64(row)*brwRowH + 4 }
 
-	// Above the panes is nothing.
 	if _, _, _, onPane := b.paneHit(l, pane.x+10, 20); onPane {
 		t.Error("the header hit-tested as a pane")
 	}
-	// A pane's heading is on the pane but not on a row: clicking it moves
-	// the focus without changing what is selected.
+
 	if _, _, onRow, onPane := b.paneHit(l, pane.x+10, pane.y+4); onRow || !onPane {
 		t.Errorf("the pane heading hit-tested onRow=%v onPane=%v; want false, true", onRow, onPane)
 	}
-	// Past the last entry is on the pane but not on a row.
+
 	if _, _, onRow, _ := b.paneHit(l, pane.x+10, rowY(b.listLen())); onRow {
 		t.Error("empty space below the rows hit-tested as a row")
 	}
@@ -705,7 +607,6 @@ func TestBrowserHitTestAndClick(t *testing.T) {
 		t.Fatalf("paneHit = pane %d row %d, %v; want the recent pane's row 2", p, i, ok)
 	}
 
-	// First click selects, it does not open.
 	b.click(i)
 	if b.sel != 2 {
 		t.Fatalf("after the first click: sel=%d, want 2", b.sel)
@@ -713,20 +614,13 @@ func TestBrowserHitTestAndClick(t *testing.T) {
 	if len(op.opened) != 0 {
 		t.Fatalf("the first click opened %v", op.opened)
 	}
-	// Clicking the selected row opens it — which is also what the second
-	// click of a double click lands on.
+
 	b.click(i)
 	if len(op.opened) != 1 || op.opened[0] != paths[2] {
 		t.Errorf("clicking the selected row opened %v, want [%q]", op.opened, paths[2])
 	}
 }
 
-// TestBrowserClickAcrossPanesSelectsBeforeOpening: a press on an
-// unfocused pane moves the focus there and picks the row under the
-// cursor — and must not ALSO open it. focusPane restores that pane's
-// parked selection (0 for a pane never visited), so a first click on its
-// first row used to count as the second click of a double-click and open
-// the piece outright, against the documented "click it again to open it".
 func TestBrowserClickAcrossPanesSelectsBeforeOpening(t *testing.T) {
 	dir := t.TempDir()
 	browserTree(t, dir, "a.gp", "x.gtab")
@@ -750,16 +644,13 @@ func TestBrowserClickAcrossPanesSelectsBeforeOpening(t *testing.T) {
 	if len(op.opened) != 0 {
 		t.Fatalf("one click on an unfocused pane opened %v; the first click may only select", op.opened)
 	}
-	// The pane now has the focus, so the same press again is the promised
-	// second click and opens the row.
+
 	b.handleMouse(press)
 	if len(op.opened) != 1 || op.opened[0] != pr.created[0] {
 		t.Errorf("clicking the row again opened %v, want [%q]", op.opened, pr.created[0])
 	}
 }
 
-// TestBrowserWheelSteps: fractional trackpad deltas accumulate instead
-// of being thrown away.
 func TestBrowserWheelSteps(t *testing.T) {
 	acc := 0.0
 	total := 0
@@ -777,8 +668,6 @@ func TestBrowserWheelSteps(t *testing.T) {
 	}
 }
 
-// TestBrowserKeyRepeat: every key acts on the press, and only the
-// navigation keys repeat while held.
 func TestBrowserKeyRepeat(t *testing.T) {
 	if !browserKeyFires(false, 1) || !browserKeyFires(true, 1) {
 		t.Error("a key press did not fire on frame 1")
@@ -805,9 +694,6 @@ func TestBrowserKeyRepeat(t *testing.T) {
 	}
 }
 
-// TestBrowserDroppedPathsRecoversRealPaths: the dropped-files fs.FS only
-// names its entries, and the browser recovers the full path behind each
-// one.
 func TestBrowserDroppedPathsRecoversRealPaths(t *testing.T) {
 	root := t.TempDir()
 	browserTree(t, root, "albums/", "song.gp")
@@ -829,9 +715,6 @@ func TestBrowserDroppedPathsRecoversRealPaths(t *testing.T) {
 	}
 }
 
-// TestBrowserHandleDrop: dropping a piece opens it, dropping a folder
-// launches the OS file dialog rooted there, dropping something
-// unsupported explains itself.
 func TestBrowserHandleDrop(t *testing.T) {
 	root := t.TempDir()
 	browserTree(t, root, "albums/inner.gp", "song.gp", "notes.txt")
@@ -847,8 +730,6 @@ func TestBrowserHandleDrop(t *testing.T) {
 		t.Fatalf("dropping a piece: opener saw %v", op.opened)
 	}
 
-	// A dropped folder is "here is where my tabs live": the dialog opens
-	// rooted there, and is marked in flight.
 	var dialogDirs []string
 	b.SetOpenDialog(func(startDir string) { dialogDirs = append(dialogDirs, startDir) })
 	b.handleDrop(browserDropFS{paths: []string{albums}})
@@ -868,7 +749,6 @@ func TestBrowserHandleDrop(t *testing.T) {
 		t.Errorf("an unsupported drop reached the opener: %v", op.opened)
 	}
 
-	// A drop of nothing recoverable reports itself and launches nothing.
 	b.handleDrop(browserDropFS{paths: []string{filepath.Join(root, "vanished.gp")}})
 	if b.errMsg == "" {
 		t.Error("an unrecoverable drop reported nothing")
@@ -878,10 +758,6 @@ func TestBrowserHandleDrop(t *testing.T) {
 	}
 }
 
-// TestBrowserMultiPieceDropReportsTheRest: only the first supported
-// piece of a drop opens, and what happened to the others must be said —
-// they used to be discarded in silence, leaving the user counting
-// windows that never appeared.
 func TestBrowserMultiPieceDropReportsTheRest(t *testing.T) {
 	root := t.TempDir()
 	browserTree(t, root, "one.gp", "two.gp", "three.gtab", "notes.txt")
@@ -903,14 +779,12 @@ func TestBrowserMultiPieceDropReportsTheRest(t *testing.T) {
 		t.Errorf("errMsg = %q, want the two ignored pieces counted", b.errMsg)
 	}
 
-	// One leftover piece is reported in the singular.
 	op.opened = nil
 	b.handleDrop(browserDropFS{paths: []string{one, two}})
 	if !strings.Contains(b.errMsg, "1 more dropped piece was ignored") {
 		t.Errorf("errMsg = %q, want the one ignored piece in it", b.errMsg)
 	}
 
-	// A single-piece drop has nothing to add and stays quiet.
 	op.opened = nil
 	b.handleDrop(browserDropFS{paths: []string{one}})
 	if b.errMsg != "" {
@@ -918,18 +792,12 @@ func TestBrowserMultiPieceDropReportsTheRest(t *testing.T) {
 	}
 }
 
-// TestBrowserEmptyRecentPaneTeachesDragAndDrop: outside the ?-overlay,
-// the empty recent pane is the one place a new user looks first, so it
-// is where drag-and-drop gets written down.
 func TestBrowserEmptyRecentPaneTeachesDragAndDrop(t *testing.T) {
 	if !strings.Contains(paneEmpty[paneRecent], "drop a file") {
 		t.Errorf("the empty recent pane says %q, want drag-and-drop taught in it", paneEmpty[paneRecent])
 	}
 }
 
-// TestBrowserStartsOnTheLastPiecesFolder: with a usable recent, the file
-// dialog starts where that piece lives rather than at home — a recent
-// whose file has gone missing is skipped over.
 func TestBrowserStartsOnTheLastPiecesFolder(t *testing.T) {
 	root := t.TempDir()
 	browserTree(t, root, "songs/last.gp")
@@ -941,9 +809,6 @@ func TestBrowserStartsOnTheLastPiecesFolder(t *testing.T) {
 	}
 }
 
-// TestBrowserFirstRunShowsTheHint: a first run has no pieces in any
-// pane, so the getting-started strip is what carries the screen — and
-// the file dialog still has somewhere sensible to open.
 func TestBrowserFirstRunShowsTheHint(t *testing.T) {
 	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
 	if !b.hintOpen {
@@ -963,9 +828,6 @@ func TestBrowserFirstRunShowsTheHint(t *testing.T) {
 	}
 }
 
-// TestNewBrowserShell: the convenience constructor leaves a shell one
-// frame deep whose root becomes the browser as soon as the first Update
-// applies the deferred replace — before anything is drawn.
 func TestNewBrowserShell(t *testing.T) {
 	svc := Services{Opener: &browserFakeOpener{}, Prefs: &browserFakePrefs{}}
 	sh, b := NewBrowserShell(svc)
@@ -978,8 +840,7 @@ func TestNewBrowserShell(t *testing.T) {
 	if b.sh != sh {
 		t.Error("the browser is not attached to the shell it was built with")
 	}
-	// The placeholder is inert, so the first frame's Update is safe and
-	// swaps it for the browser.
+
 	if err := sh.Update(); err != nil {
 		t.Fatalf("first Update: %v", err)
 	}
@@ -988,15 +849,13 @@ func TestNewBrowserShell(t *testing.T) {
 	}
 }
 
-// TestBrowserNilPrefs: a shell without preferences still puts up a
-// working start screen.
 func TestBrowserNilPrefs(t *testing.T) {
 	sh := NewShell(Services{Opener: &browserFakeOpener{}}, nil)
 	b := NewBrowser(sh)
 	if len(b.panes[paneRecent]) != 0 {
 		t.Errorf("recents = %v with no Prefs", browserNames(b.panes[paneRecent]))
 	}
-	b.forgetRecent() // must not panic
+	b.forgetRecent()
 	b.reloadRecents()
 	if b.hintLine() == "" {
 		t.Error("empty hint line")
@@ -1006,9 +865,6 @@ func TestBrowserNilPrefs(t *testing.T) {
 	}
 }
 
-// TestBrowserTextShortening pins the two truncation helpers: names keep
-// their front, paths keep their tail, and neither ever renders wider
-// than the space it was given — measured with the same face that draws.
 func TestBrowserTextShortening(t *testing.T) {
 	const long = "a fairly long piece name that cannot fit"
 	if got := truncateW(long, 120); textW(got) > 120 {
@@ -1036,13 +892,6 @@ func TestBrowserTextShortening(t *testing.T) {
 	}
 }
 
-// TestBrowserOneActionPerFrame is the B1 regression. Enter only queues
-// the practice screen's push, which the Shell applies at the end of the
-// frame; an Escape processed behind it on the same frame made the Shell
-// pop this screen and apply that push in one pass — building a practice
-// screen it then discarded without CloseCurrent, leaking the audio
-// stream it had started, and swallowing the quit. Input must stop at the
-// first action that changes the screen stack.
 func TestBrowserOneActionPerFrame(t *testing.T) {
 	root := t.TempDir()
 	browserTree(t, root, "song.gp")
@@ -1060,7 +909,7 @@ func TestBrowserOneActionPerFrame(t *testing.T) {
 	if n := len(b.sh.pending); n != 1 {
 		t.Fatalf("shell holds %d queued stack edits, want just the push", n)
 	}
-	// End of frame: the screen that was built is the one that is shown.
+
 	for _, fn := range b.sh.pending {
 		fn()
 	}
@@ -1072,7 +921,6 @@ func TestBrowserOneActionPerFrame(t *testing.T) {
 		t.Errorf("CloseCurrent ran %d times for a screen that was never popped", op.closed)
 	}
 
-	// A second piece cannot be opened on the same frame either.
 	op.opened = nil
 	b.setSel(0)
 	if err := b.handleKeys(browserPressed(ebiten.KeyEnter, ebiten.KeyNumpadEnter)); err != nil {
@@ -1082,7 +930,6 @@ func TestBrowserOneActionPerFrame(t *testing.T) {
 		t.Errorf("two open keys on one frame opened %v, want one piece", op.opened)
 	}
 
-	// Escape on its own still leaves the screen, and an idle frame is quiet.
 	if err := b.handleKeys(browserPressed(ebiten.KeyEscape)); err != errQuit {
 		t.Errorf("Escape alone = %v, want errQuit", err)
 	}
@@ -1091,16 +938,11 @@ func TestBrowserOneActionPerFrame(t *testing.T) {
 	}
 }
 
-// TestBrowserRecentsProbeEachPathOnce is the B2 regression: reloadRecents
-// runs on the game loop after every open and every Delete, and a recent
-// on an unreachable share takes seconds to stat. Each path is probed
-// once, when it first appears, and its status is carried forward.
 func TestBrowserRecentsProbeEachPathOnce(t *testing.T) {
 	root := t.TempDir()
 	browserTree(t, root, "here.gp")
 	here := filepath.Join(root, "here.gp")
-	// Stands in for a path on a disconnected network share: every probe
-	// of it would block the frame for seconds.
+
 	unreachable := filepath.Join(root, "share", "far.gp")
 
 	probes := map[string]int{}
@@ -1124,7 +966,6 @@ func TestBrowserRecentsProbeEachPathOnce(t *testing.T) {
 		t.Error("a present recent is flagged missing")
 	}
 
-	// Frames, opens and Deletes all rebuild the list; none may re-probe.
 	for i := 0; i < 10; i++ {
 		b.reloadRecents()
 	}
@@ -1142,7 +983,6 @@ func TestBrowserRecentsProbeEachPathOnce(t *testing.T) {
 		t.Errorf("Delete re-probed the unreachable recent (%d probes)", probes[unreachable])
 	}
 
-	// A genuinely new recent is probed, once.
 	browserTree(t, root, "fresh.gp")
 	fresh := filepath.Join(root, "fresh.gp")
 	pr.AddRecent(fresh)
@@ -1156,11 +996,6 @@ func TestBrowserRecentsProbeEachPathOnce(t *testing.T) {
 	}
 }
 
-// TestBrowserReopeningAForgottenRecentShowsItAgain is the B3 regression:
-// Delete hides a recent for the session, but opening that exact file
-// again — through the OS dialog now — puts it back in the
-// configuration's recents, and the list must agree with what was saved
-// instead of hiding it until the next restart.
 func TestBrowserReopeningAForgottenRecentShowsItAgain(t *testing.T) {
 	root := t.TempDir()
 	browserTree(t, root, "song.gp")
@@ -1175,7 +1010,6 @@ func TestBrowserReopeningAForgottenRecentShowsItAgain(t *testing.T) {
 		t.Fatalf("after Delete, recents = %v, want none", browserNames(b.panes[paneRecent]))
 	}
 
-	// The user finds the same file again in the dialog.
 	b.SetOpenDialog(func(string) {})
 	b.launchOpenDialog("")
 	b.OfferDialogResult(song, "")
@@ -1194,24 +1028,19 @@ func TestBrowserReopeningAForgottenRecentShowsItAgain(t *testing.T) {
 	if b.panes[paneRecent][0].missing {
 		t.Error("a piece that just opened is flagged missing")
 	}
-	// And it stays visible across the reloads later frames trigger.
+
 	b.reloadRecents()
 	if len(b.panes[paneRecent]) != 1 {
 		t.Errorf("the re-opened recent vanished again: %v", browserNames(b.panes[paneRecent]))
 	}
 }
 
-// TestBrowserDropSkipsUnreadableEntries is the B4 regression: the
-// platform hands back a partial listing with nil holes and an error when
-// it cannot stat one of the dropped items. Reading the nils panics, and
-// bailing out on the error threw away the items that were fine.
 func TestBrowserDropSkipsUnreadableEntries(t *testing.T) {
 	root := t.TempDir()
 	browserTree(t, root, "song.gp", "albums/")
 	song := filepath.Join(root, "song.gp")
 	albums := filepath.Join(root, "albums")
 
-	// The helper survives a listing that is nothing but holes.
 	paths, skipped := browserDroppedPaths(browserPartialDropFS{
 		nilHoles: 3, err: errors.New("cannot stat dropped item 1"),
 	})
@@ -1236,8 +1065,6 @@ func TestBrowserDropSkipsUnreadableEntries(t *testing.T) {
 		t.Errorf("errMsg = %q, want the two skipped items in it", b.errMsg)
 	}
 
-	// The same for a listed item that refuses to open, and for a folder —
-	// which now launches the dialog rooted there.
 	op.opened = nil
 	b.errMsg = ""
 	var dialogDirs []string
@@ -1251,8 +1078,6 @@ func TestBrowserDropSkipsUnreadableEntries(t *testing.T) {
 	}
 }
 
-// TestBrowserDropAlwaysReportsOutcome: handleDrop promises to say so
-// when a drop yields nothing usable, and used to return in silence.
 func TestBrowserDropAlwaysReportsOutcome(t *testing.T) {
 	root := t.TempDir()
 	op := &browserFakeOpener{}
@@ -1283,10 +1108,6 @@ func TestBrowserDropAlwaysReportsOutcome(t *testing.T) {
 	}
 }
 
-// TestBrowserDialogRoundTrip covers the mailbox between the screen and
-// the dialog goroutine: launch marks the dialog in flight and hands over
-// a starting directory; a chosen path is opened, a cancel does nothing,
-// and a failure is reported inline — each re-arming the dialog.
 func TestBrowserDialogRoundTrip(t *testing.T) {
 	root := t.TempDir()
 	browserTree(t, root, "picked.gtab")
@@ -1296,7 +1117,6 @@ func TestBrowserDialogRoundTrip(t *testing.T) {
 	var dirs []string
 	b.SetOpenDialog(func(startDir string) { dirs = append(dirs, startDir) })
 
-	// A chosen file comes back and is opened.
 	b.launchOpenDialog("")
 	if !b.dialogBusy {
 		t.Fatal("launching did not mark the dialog busy")
@@ -1313,8 +1133,6 @@ func TestBrowserDialogRoundTrip(t *testing.T) {
 		t.Error("the dialog stayed busy after its result was drained")
 	}
 
-	// A cancel opens nothing and reports nothing: not choosing a file is
-	// not an error.
 	b.launchOpenDialog("")
 	b.OfferDialogResult("", "")
 	b.drainDialog()
@@ -1328,7 +1146,6 @@ func TestBrowserDialogRoundTrip(t *testing.T) {
 		t.Errorf("a cancel set errMsg %q", b.errMsg)
 	}
 
-	// A dialog failure is shown inline rather than swallowed.
 	b.launchOpenDialog("")
 	b.OfferDialogResult("", "boom")
 	b.drainDialog()
@@ -1340,9 +1157,6 @@ func TestBrowserDialogRoundTrip(t *testing.T) {
 	}
 }
 
-// TestBrowserDialogBusyGuard: while a dialog is in flight another launch
-// is ignored — two Explorer windows fighting over one mailbox helps
-// nobody — and once the result arrives the dialog can launch again.
 func TestBrowserDialogBusyGuard(t *testing.T) {
 	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
 	calls := 0
@@ -1361,8 +1175,6 @@ func TestBrowserDialogBusyGuard(t *testing.T) {
 	}
 }
 
-// TestBrowserDialogUnavailable: a build with no dialog wired says so
-// instead of silently doing nothing.
 func TestBrowserDialogUnavailable(t *testing.T) {
 	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
 	b.launchOpenDialog("")
@@ -1371,8 +1183,6 @@ func TestBrowserDialogUnavailable(t *testing.T) {
 	}
 }
 
-// TestBrowserOKeyLaunchesDialog: O is the keyboard's way to the open
-// card's button.
 func TestBrowserOKeyLaunchesDialog(t *testing.T) {
 	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
 	calls := 0
@@ -1385,13 +1195,6 @@ func TestBrowserOKeyLaunchesDialog(t *testing.T) {
 	}
 }
 
-// TestBrowserStatusStackClearsFooter pins the arithmetic behind the
-// reserved status band (verification follow-up): the worst-case stack —
-// an error line, the heading naming the piece the warnings came from,
-// the listed warnings, and the overflow line — must end above the footer
-// hint, or the two draw on top of each other and both become unreadable.
-// The panes stop above the band whether or not there is anything in it,
-// so they cannot reach it either.
 func TestBrowserStatusStackClearsFooter(t *testing.T) {
 	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
 	for _, hint := range []bool{true, false} {
@@ -1414,17 +1217,11 @@ func TestBrowserStatusStackClearsFooter(t *testing.T) {
 	}
 }
 
-// TestBrowserStaleDialogResultDiscarded (verification follow-up): a
-// dialog left floating while the user opened a different piece by other
-// means must not auto-open its old choice the moment the start screen is
-// next shown — that pick answered a question nobody is asking any more.
 func TestBrowserStaleDialogResultDiscarded(t *testing.T) {
 	op := &browserFakeOpener{}
 	b := browserFixture(t, &browserFakePrefs{}, op)
 	b.SetOpenDialog(func(string) {})
 
-	// A dialog goes up; before it answers, the user opens a piece some
-	// other way (a drop, a recent).
 	b.launchOpenDialog("")
 	dropped := filepath.Join(t.TempDir(), "dropped.gtab")
 	if err := os.WriteFile(dropped, []byte("x"), 0o644); err != nil {
@@ -1435,7 +1232,6 @@ func TestBrowserStaleDialogResultDiscarded(t *testing.T) {
 		t.Fatalf("opened %d pieces, want the dropped one only", len(op.opened))
 	}
 
-	// The floating dialog finally answers. Its choice is stale.
 	b.OfferDialogResult(`C:\old\choice.gp`, "")
 	b.drainDialog()
 	if len(op.opened) != 1 {
@@ -1448,7 +1244,6 @@ func TestBrowserStaleDialogResultDiscarded(t *testing.T) {
 		t.Errorf("the discard should say what it ignored, got %q", b.errMsg)
 	}
 
-	// A fresh round trip afterwards works normally.
 	b.launchOpenDialog("")
 	fresh := filepath.Join(t.TempDir(), "fresh.gtab")
 	if err := os.WriteFile(fresh, []byte("x"), 0o644); err != nil {
@@ -1460,8 +1255,6 @@ func TestBrowserStaleDialogResultDiscarded(t *testing.T) {
 		t.Errorf("a fresh dialog result did not open: %v", op.opened)
 	}
 }
-
-// --- writing a piece from the start screen -------------------------------
 
 func TestBrowserNewPieceKeyAndButton(t *testing.T) {
 	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
@@ -1481,8 +1274,7 @@ func TestBrowserNewPieceKeyAndButton(t *testing.T) {
 }
 
 func TestBrowserNewPieceIsInertWithoutAnEditor(t *testing.T) {
-	// A build that wired no editor must not crash on the key; it just does
-	// nothing, and the footer does not advertise it.
+
 	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
 	if err := b.handleKey(ebiten.KeyN); err != nil {
 		t.Fatalf("N = %v, want nil", err)
@@ -1510,8 +1302,7 @@ func TestBrowserEditSelectedPiece(t *testing.T) {
 	if len(edited) != 1 || edited[0] != pr.recents[0] {
 		t.Fatalf("E edited %v, want [%s]", edited, pr.recents[0])
 	}
-	// An imported format is offered too: the editor opens it and makes the
-	// user save it as .gtab, which is a better answer than refusing here.
+
 	b.setSel(1)
 	b.handleKey(ebiten.KeyE)
 	if len(edited) != 2 || edited[1] != pr.recents[1] {
@@ -1520,8 +1311,7 @@ func TestBrowserEditSelectedPiece(t *testing.T) {
 }
 
 func TestBrowserEditIsOffWithoutASelection(t *testing.T) {
-	// The onboarding checklist has no pieces on it, so there is nothing to
-	// edit and the binding says so rather than doing nothing quietly.
+
 	b := browserFixture(t, &browserFakePrefs{}, &browserFakeOpener{})
 	b.SetEditPiece(func(string) { t.Error("E edited something on the checklist") })
 	if _, ok := b.editableSelection(); ok {
@@ -1540,8 +1330,6 @@ func TestBrowserEditIsOffForAMissingFile(t *testing.T) {
 	b.handleKey(ebiten.KeyE)
 }
 
-// actionRect finds one of the action row's buttons by id, so a test can
-// click it without repeating the layout arithmetic.
 func (b *Browser) actionRect(t *testing.T, id string) rect {
 	t.Helper()
 	l := b.layout()
@@ -1554,11 +1342,6 @@ func (b *Browser) actionRect(t *testing.T, id string) rect {
 	return rect{}
 }
 
-// --- the library pane ----------------------------------------------------
-
-// stubLibrary is a Library over a fixed list, so the pane can be driven
-// without a folder. A nil list is a build that manages an empty library,
-// which is a different thing from managing none at all.
 type stubLibrary struct {
 	dir    string
 	pieces []PieceInfo
@@ -1570,9 +1353,6 @@ func (l stubLibrary) Scan() ([]PieceInfo, error) {
 	return l.pieces, l.err
 }
 
-// waitForLibrary drives the scan through its mailbox: rescanLibrary posts
-// from a goroutine and drainLibrary applies it on the game loop, so a test
-// has to let the one finish before it asks the other.
 func waitForLibrary(t *testing.T, b *Browser) {
 	t.Helper()
 	for i := 0; i < 200; i++ {
@@ -1597,15 +1377,14 @@ func TestBrowserLibraryPaneDescribesPieces(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("the library pane has %d rows, want 2", len(rows))
 	}
-	// A piece with a title is listed BY that title: the library is the
-	// pane that knows what the music is.
+
 	if rows[0].name != "Warmup in A" {
 		t.Errorf("row 0 is named %q, want the piece's title", rows[0].name)
 	}
 	if rows[0].sub != "4/4 · 92 BPM · 8 bars" {
 		t.Errorf("row 0's description is %q", rows[0].sub)
 	}
-	// One with no title falls back to the file name rather than a blank.
+
 	if rows[1].name != "b" {
 		t.Errorf("an untitled piece is named %q, want its file name", rows[1].name)
 	}
@@ -1622,7 +1401,7 @@ func TestBrowserLibraryPaneAbsentWithoutTheService(t *testing.T) {
 	if got := len(b.paneOrder()); got != 2 {
 		t.Errorf("got %d panes, want 2 without a library", got)
 	}
-	// And the focus cannot be moved onto a pane that is not there.
+
 	b.focusPane(paneLibrary)
 	if b.focus == paneLibrary {
 		t.Error("the focus moved to a library pane that does not exist")
@@ -1704,8 +1483,6 @@ func TestBrowserLibraryPieceThatWillNotParse(t *testing.T) {
 	b.focusPane(paneLibrary)
 	b.setSel(0)
 
-	// Opening it reports the problem rather than handing a broken file to
-	// the importer.
 	b.activate()
 	if len(op.opened) != 0 {
 		t.Errorf("a piece that will not parse was opened: %v", op.opened)
@@ -1713,7 +1490,7 @@ func TestBrowserLibraryPieceThatWillNotParse(t *testing.T) {
 	if !strings.Contains(b.errMsg, "bar underfull") {
 		t.Errorf("the status says %q, want the parse problem", b.errMsg)
 	}
-	// But editing it IS offered: the text view is where it gets fixed.
+
 	var edited []string
 	b.SetEditPiece(func(p string) { edited = append(edited, p) })
 	if _, ok := b.editableSelection(); !ok {
@@ -1725,11 +1502,6 @@ func TestBrowserLibraryPieceThatWillNotParse(t *testing.T) {
 	}
 }
 
-// TestBrowserEnterOnABrokenLibraryPieceOpensTheEditor: with an editor
-// wired, Enter (and the second click of a double-click) on a piece that
-// will not parse goes where the E key goes instead of dead-ending in a
-// message about the E key — and the parse error stays in the status so
-// the reason for landing in the editor is on screen on the way back.
 func TestBrowserEnterOnABrokenLibraryPieceOpensTheEditor(t *testing.T) {
 	op := &browserFakeOpener{}
 	lib := stubLibrary{pieces: []PieceInfo{
@@ -1785,7 +1557,7 @@ func TestBrowserWheelScrollsThePaneUnderTheCursor(t *testing.T) {
 	}
 	b := browserFixture(t, &browserFakePrefs{recents: recents, created: created}, &browserFakeOpener{})
 	l := b.layout()
-	// The cursor over the WRITTEN pane, while the keyboard is on RECENT.
+
 	over := l.panes[1]
 	for i := 0; i < 4; i++ {
 		b.handleMouse(pointer{x: over.x + 10, y: over.y + brwPaneHeadH + 4, wheel: -1})
@@ -1801,8 +1573,6 @@ func TestBrowserWheelScrollsThePaneUnderTheCursor(t *testing.T) {
 	}
 }
 
-// browserLibFixture builds a browser with a library service and no
-// recents, which is what most library tests want.
 func browserLibFixture(t *testing.T, lib Library) *Browser {
 	t.Helper()
 	return browserLibFixtureWith(t, lib, &browserFakeOpener{})

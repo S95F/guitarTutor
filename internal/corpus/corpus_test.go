@@ -12,9 +12,7 @@ func TestDirLayout(t *testing.T) {
 	if got != want {
 		t.Errorf("Dir = %q, want %q", got, want)
 	}
-	// Nested categories are spelled with forward slashes; Dir must yield
-	// the platform's own separators (filepath.Join, never string concat),
-	// so wind/tones resolves on Windows too.
+
 	got = Dir("../..", WindTones)
 	want = filepath.Join("../..", "testdata", "real", "wind", "tones")
 	if got != want {
@@ -22,9 +20,6 @@ func TestDirLayout(t *testing.T) {
 	}
 }
 
-// TestFilesNestedCategory: a category with a path separator lists exactly
-// like a flat one — the wind corpus is reached through the same two calls
-// every guitar test uses.
 func TestFilesNestedCategory(t *testing.T) {
 	root := t.TempDir()
 	dir := Dir(root, WindTones)
@@ -67,7 +62,7 @@ func TestFilesFiltersByExtension(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("got %d files, want 2: %v", len(got), got)
 	}
-	// Extension matching is case-insensitive, and directories are skipped.
+
 	var names []string
 	for _, p := range got {
 		names = append(names, filepath.Base(p))
@@ -91,9 +86,6 @@ func TestFilesMissingCorpus(t *testing.T) {
 	}
 }
 
-// TestRequireSkipsWithoutCorpus documents the contract that matters most:
-// a clone without the corpus must report skips, never failures. It runs
-// Require in a subtest and asserts that subtest skipped.
 func TestRequireSkipsWithoutCorpus(t *testing.T) {
 	root := t.TempDir()
 	var skipped bool

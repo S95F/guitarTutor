@@ -1,16 +1,3 @@
-// Command uishot renders one musicTutor screen to a PNG.
-//
-// It exists so the layout can be looked at without a screen capture:
-// Ebitengine needs a real graphics context, so the window does open, but
-// what is saved is the game's own framebuffer rather than a region of the
-// desktop. Nothing that happens to be in front of the window can end up
-// in the image.
-//
-//	go run ./tools/uishot -screen practice -o practice.png
-//
-// screens: glyphs, start, start-bare, settings, editor, editor-new,
-// editor-pick, editor-text, editor-help, practice, practice-live, help,
-// tuner
 package main
 
 import (
@@ -37,13 +24,9 @@ import (
 const (
 	shotW = 1280
 	shotH = 720
-	// warmup frames let the screen settle before the image is taken:
-	// pulses and hover states are driven by a frame counter.
+
 	warmup = 12
-	// And real time to let the tooltip dwell elapse (see
-	// internal/ui/tooltip.go). The dwell is measured in SECONDS, not in
-	// frames, so a window rendering faster than the display can run out
-	// its warmup frames long before a third of a second has passed.
+
 	settle = 700 * time.Millisecond
 )
 
@@ -78,15 +61,13 @@ func main() {
 	fmt.Println("wrote", *out)
 }
 
-// build makes the screen to render.
 func build(which, piece string) (ui.Screen, error) {
 	switch which {
 	case "start", "start-bare", "settings":
 		prefs := &memPrefs{}
 		lib := shotLibrary{}
 		if which == "start" {
-			// Real files in a temp folder, so the shot shows what the
-			// screen looks like in use rather than a column of "missing".
+
 			dir, err := shotPieceFiles()
 			if err != nil {
 				return nil, err
@@ -125,7 +106,7 @@ func build(which, piece string) (ui.Screen, error) {
 		return ed, nil
 
 	case "editor-pick":
-		// A new piece as it actually opens: the instrument question first.
+
 		ed := ui.NewEditorChoosing(nil)
 		ed.SetSaveDialog(func(string) {})
 		ed.SetPractice(func(string) {})
@@ -142,8 +123,7 @@ func build(which, piece string) (ui.Screen, error) {
 		}
 		ed.SetSaveDialog(func(string) {})
 		ed.SetPractice(func(string) {})
-		// A cursor a couple of beats in, so the caret and the lit cell are
-		// somewhere the eye can find them.
+
 		ed.Doc().GoTo(edit.Cursor{Bar: 0, Beat: 2, Str: 5})
 		switch which {
 		case "editor-text":
@@ -164,8 +144,7 @@ func build(which, piece string) (ui.Screen, error) {
 	app.SetReloader(func() {})
 	app.SetInitialMetronome(true)
 	app.SetCountIn(4)
-	// A loop over bars 2-4, and the playhead a bar in, so the timeline
-	// and the loop handles have something to show.
+
 	eng.SetLoop(s.Tracks[0].Bars[1].Start, s.Tracks[0].Bars[3].Start)
 	eng.SeekTick(s.Tracks[0].Bars[1].Start + 480)
 
@@ -193,8 +172,6 @@ func build(which, piece string) (ui.Screen, error) {
 	return nil, fmt.Errorf("unknown screen %q", which)
 }
 
-// sampleResults invents a pass over the first bar so the tab shows the
-// three verdict colours and the accuracy block has numbers in it.
 func sampleResults(s *score.Score) []practice.NoteResult {
 	var out []practice.NoteResult
 	verdicts := []practice.Verdict{practice.VerdictHit, practice.VerdictHit, practice.VerdictClose, practice.VerdictMiss}
@@ -213,7 +190,6 @@ func sampleResults(s *score.Score) []practice.NoteResult {
 	return out
 }
 
-// shot drives a screen for a few frames and saves its framebuffer.
 type shot struct {
 	inner ui.Screen
 	buf   *ebiten.Image
@@ -231,8 +207,7 @@ func (s *shot) Update() error {
 		}
 		return ebiten.Termination
 	}
-	// The screen's own Update may report that it is finished; for a
-	// screenshot that is not interesting, so it is ignored.
+
 	_ = s.inner.Update()
 	return nil
 }
@@ -254,8 +229,6 @@ func (s *shot) Draw(screen *ebiten.Image) {
 
 func (s *shot) Layout(int, int) (int, int) { return shotW, shotH }
 
-// save writes the offscreen buffer as a PNG. ReadPixels is read from the
-// buffer, never from the screen image, which Ebitengine does not allow.
 func save(img *ebiten.Image, path string) error {
 	pix := make([]byte, 4*shotW*shotH)
 	img.ReadPixels(pix)
@@ -267,8 +240,6 @@ func save(img *ebiten.Image, path string) error {
 	defer f.Close()
 	return png.Encode(f, rgba)
 }
-
-// --- stand-ins for the services a real run would supply ------------------
 
 type memPrefs struct {
 	sf       string
@@ -316,7 +287,6 @@ func (fakeAudio) Calibrate(string, string, func(float64)) (int, float64, error) 
 	return 0, 0, fmt.Errorf("not in a screenshot")
 }
 
-// shotLibrary stands in for the pieces folder in a screenshot.
 type shotLibrary struct {
 	dir    string
 	pieces []ui.PieceInfo
@@ -325,8 +295,6 @@ type shotLibrary struct {
 func (l shotLibrary) Dir() string                   { return l.dir }
 func (l shotLibrary) Scan() ([]ui.PieceInfo, error) { return l.pieces, nil }
 
-// shotPieceFiles writes the files the start-screen shot lists, so the
-// entries are real rather than flagged missing.
 func shotPieceFiles() (string, error) {
 	dir := filepath.Join(os.TempDir(), "musictutor-shot", "pieces")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -343,12 +311,6 @@ func shotPieceFiles() (string, error) {
 	return dir, nil
 }
 
-// shotPieces is a plausible library: a few written pieces, described the
-// way the real scanner describes them, and one that will not parse. The
-// subtitles are what cmd/musictutor's describePiece would say and the
-// problem line is what its textfmt.ProblemLine would render for the parser's
-// own message — a screenshot of words the app never produces is a
-// screenshot of a different app.
 func shotPieces(dir string) []ui.PieceInfo {
 	return []ui.PieceInfo{
 		{Path: filepath.Join(dir, "warmup.gtab"), Name: "warmup", Title: "Warmup in A",

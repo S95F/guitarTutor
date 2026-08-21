@@ -5,8 +5,6 @@ import (
 	"testing"
 )
 
-// renderFrames drives v for frames samples in engine-sized chunks and
-// returns the two channels (zeroed before mixing, as the engine would).
 func renderFrames(v Voice, frames, chunk int) (left, right []float32) {
 	left = make([]float32, frames)
 	right = make([]float32, frames)
@@ -20,7 +18,6 @@ func renderFrames(v Voice, frames, chunk int) (left, right []float32) {
 	return left, right
 }
 
-// monoSum folds a stereo pair to mono by summing channels.
 func monoSum(left, right []float32) []float32 {
 	m := make([]float32, len(left))
 	for i := range left {
@@ -29,7 +26,6 @@ func monoSum(left, right []float32) []float32 {
 	return m
 }
 
-// energy returns the sum of squares of x.
 func energy(x []float32) float64 {
 	var e float64
 	for _, s := range x {
@@ -38,7 +34,6 @@ func energy(x []float32) float64 {
 	return e
 }
 
-// peak returns the largest absolute sample in x.
 func peak(x []float32) float64 {
 	var p float64
 	for _, s := range x {
@@ -49,11 +44,6 @@ func peak(x []float32) float64 {
 	return p
 }
 
-// estimateFundamental estimates the fundamental of x in Hz by normalized
-// autocorrelation over lags spanning 30-1500 Hz. Every multiple of the true
-// period correlates equally well, so the global maximum alone is
-// octave-ambiguous: it takes the smallest local-maximum lag within 5% of
-// the global maximum, then refines it by parabolic interpolation.
 func estimateFundamental(t *testing.T, x []float32, sampleRate int) float64 {
 	t.Helper()
 	const window = 8192
@@ -87,8 +77,7 @@ func estimateFundamental(t *testing.T, x []float32, sampleRate int) float64 {
 		if r[lag] < 0.95*rmax || r[lag] < r[lag-1] || r[lag] < r[lag+1] {
 			continue
 		}
-		// Parabolic interpolation over the peak and its neighbors gives
-		// sub-sample lag resolution.
+
 		denom := r[lag-1] - 2*r[lag] + r[lag+1]
 		delta := 0.0
 		if denom != 0 {
@@ -100,17 +89,10 @@ func estimateFundamental(t *testing.T, x []float32, sampleRate int) float64 {
 	return 0
 }
 
-// centsBetween returns the musical interval from a to b in cents.
 func centsBetween(a, b float64) float64 {
 	return 1200 * math.Log2(b/a)
 }
 
-// bestDelayFreq returns the pitch nearest f (in cents) that an integer
-// delay line can produce. The Karplus-Strong loop resonates at
-// sampleRate/(n - 0.5) for integer n, so this is the best tuning any
-// correctly tuned voice can achieve for f; at high keys it can sit well
-// over 10 cents from f, which is why the high-key tests compare against it
-// rather than against f directly.
 func bestDelayFreq(sampleRate int, f float64) float64 {
 	center := int(math.Round(float64(sampleRate)/f + 0.5))
 	bestF, bestErr := 0.0, math.Inf(1)
@@ -131,21 +113,15 @@ func TestPluckFundamental(t *testing.T) {
 	tests := []struct {
 		name string
 		key  int
-		want float64 // Hz
-		// cents > 0 asserts in cents against the best achievable
-		// delay-line pitch for want (integer-length quantization makes an
-		// absolute-Hz bound meaningless at high keys); cents == 0 asserts
-		// want ±1 Hz.
+		want float64
+
 		cents float64
 	}{
 		{"low E open", 40, 82.4069, 0},
 		{"A open", 45, 110.0, 0},
 		{"D open", 50, 146.832, 0},
 		{"below range clamps to C1", 0, 32.7032, 0},
-		// High keys are the regression guard for the loop-delay sign: the
-		// averaging filter shortens the loop to n - 0.5 samples, and
-		// tuning for n + 0.5 instead played ~24 cents sharp at key 76 and
-		// ~59 cents sharp at key 86 (48 kHz).
+
 		{"high E 12th fret", 76, 659.2551, 5},
 		{"high E 22nd fret", 86, 1174.659, 5},
 	}
@@ -155,10 +131,7 @@ func TestPluckFundamental(t *testing.T) {
 			v.NoteOn(tt.key, 0.8)
 			left, right := renderFrames(v, sr, 512)
 			mono := monoSum(left, right)
-			// Estimate on a late window: the excitation is a broadband
-			// noise burst, so early samples are dominated by the noisy
-			// attack; half a second in, only the periodic string
-			// resonance remains.
+
 			got := estimateFundamental(t, mono[sr/2:], sr)
 			if tt.cents > 0 {
 				best := bestDelayFreq(sr, tt.want)
@@ -180,8 +153,6 @@ func TestPluckDecayMonotonic(t *testing.T) {
 	left, right := renderFrames(v, sr, 512)
 	mono := monoSum(left, right)
 
-	// 200 ms windows: several periods of even the lowest key, so window
-	// phase barely ripples the energy, while the loop decay dominates.
 	const win = sr / 5
 	prev := math.Inf(1)
 	for off := 0; off+win <= len(mono); off += win {
@@ -200,7 +171,6 @@ func TestPluckNoteOffFastensDecay(t *testing.T) {
 	const sr = 48000
 	const win = sr / 10
 
-	// Same seed, same note: the two renders are identical until NoteOff.
 	held := NewPluck(sr, 25)
 	held.NoteOn(40, 0.8)
 	hl, hr := renderFrames(held, 2*sr/5, 512)
@@ -213,8 +183,6 @@ func TestPluckNoteOffFastensDecay(t *testing.T) {
 	rl2, rr2 := renderFrames(released, sr/5, 512)
 	rm := append(monoSum(rl, rr), monoSum(rl2, rr2)...)
 
-	// Compare energy ratios across the same two windows after the 0.2 s
-	// mark: the released note must decay faster than the held one.
 	heldRatio := energy(hm[3*win:4*win]) / energy(hm[2*win:3*win])
 	relRatio := energy(rm[3*win:4*win]) / energy(rm[2*win:3*win])
 	if relRatio >= heldRatio {
@@ -227,18 +195,15 @@ func TestPluckAllNotesOffSilences(t *testing.T) {
 	v := NewPluck(sr, 25)
 	v.NoteOn(40, 0.8)
 	v.NoteOn(45, 0.8)
-	renderFrames(v, sr/10, 512) // ring for 100 ms
+	renderFrames(v, sr/10, 512)
 	v.AllNotesOff()
 	left, right := renderFrames(v, sr/10, 512)
 
-	// Click-free: the cut is a short ramp, not an instant zero, so the
-	// first couple of milliseconds still carry signal.
 	if peak(left[:120]) == 0 && peak(right[:120]) == 0 {
 		t.Error("output hard-zeroed immediately after AllNotesOff; want a ramp")
 	}
 
-	// Silent below -60 dBFS within 50 ms.
-	const floor = 0.001 // -60 dBFS
+	const floor = 0.001
 	if p := peak(left[sr/20:]); p > floor {
 		t.Errorf("left peak %g after 50 ms, want <= %g", p, floor)
 	}
@@ -250,7 +215,7 @@ func TestPluckAllNotesOffSilences(t *testing.T) {
 func TestPluckChordPeakSafe(t *testing.T) {
 	const sr = 48000
 	v := NewPluck(sr, 25)
-	// All six open strings at full velocity: the worst realistic case.
+
 	for _, key := range []int{40, 45, 50, 55, 59, 64} {
 		v.NoteOn(key, 1.0)
 	}
@@ -262,7 +227,6 @@ func TestPluckChordPeakSafe(t *testing.T) {
 		t.Errorf("right peak %g, want < 1.0", p)
 	}
 
-	// Per-note stereo placement: the channels must differ audibly.
 	var diff float64
 	for i := range left {
 		if d := math.Abs(float64(left[i] - right[i])); d > diff {
@@ -285,7 +249,7 @@ func TestPluckRenderDoesNotAllocate(t *testing.T) {
 	}); allocs != 0 {
 		t.Errorf("Render allocates %v times per call, want 0", allocs)
 	}
-	// The control calls share the realtime path with Render.
+
 	if allocs := testing.AllocsPerRun(100, func() {
 		v.NoteOn(52, 0.7)
 		v.NoteOff(52)
@@ -302,7 +266,7 @@ func TestPluckPolyphonyStealsOldest(t *testing.T) {
 	for i := 0; i < pluckPolyphony; i++ {
 		v.NoteOn(40+i, 0.8)
 	}
-	v.NoteOn(90, 0.8) // pool full: must steal the oldest (key 40)
+	v.NoteOn(90, 0.8)
 
 	active := 0
 	sawOldest, sawNewest := false, false

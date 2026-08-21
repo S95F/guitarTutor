@@ -2,11 +2,6 @@ package ui
 
 import "testing"
 
-// The animator's contract: it eases toward what it is told, it arrives,
-// it fires a flash on the press rather than needing to be told about the
-// click separately, and it forgets controls that stop being drawn.
-
-// step60 runs n frames at 60 Hz and returns the final values.
 func step60(a *animator, id string, hovered, down bool, n int) animValues {
 	var av animValues
 	for i := 0; i < n; i++ {
@@ -27,12 +22,9 @@ func TestAnimatorHoverRisesAndFalls(t *testing.T) {
 }
 
 func TestAnimatorPressIsFasterThanHover(t *testing.T) {
-	// A control that lags the finger feels broken; one that lags the
-	// cursor feels smooth. They are eased at different rates on purpose.
+
 	var a animator
-	// From a settled, un-hovered control — a fresh one born under the
-	// cursor is deliberately already hovered, which would compare
-	// nothing.
+
 	step60(&a, "b", false, false, 2)
 	av := step60(&a, "b", true, true, 3)
 	if av.press <= av.hover {
@@ -42,7 +34,7 @@ func TestAnimatorPressIsFasterThanHover(t *testing.T) {
 
 func TestAnimatorFlashesOnThePressEdge(t *testing.T) {
 	var a animator
-	// Hovering alone is not an activation.
+
 	if av := step60(&a, "b", true, false, 5); av.flash != 0 {
 		t.Errorf("hovering flashed (%.3f)", av.flash)
 	}
@@ -51,7 +43,7 @@ func TestAnimatorFlashesOnThePressEdge(t *testing.T) {
 	if av.flash < 0.9 {
 		t.Fatalf("the press did not flash (%.3f)", av.flash)
 	}
-	// Holding does not re-fire it, and it decays on its own.
+
 	held := step60(&a, "b", true, true, 6)
 	if held.flash >= av.flash {
 		t.Errorf("holding re-fired the flash (%.3f then %.3f)", av.flash, held.flash)
@@ -62,8 +54,7 @@ func TestAnimatorFlashesOnThePressEdge(t *testing.T) {
 }
 
 func TestAnimatorPressOutsideTheControlDoesNothing(t *testing.T) {
-	// The button being down somewhere else on the screen is not a press
-	// of this control.
+
 	var a animator
 	av := step60(&a, "b", false, true, 5)
 	if av.press != 0 || av.flash != 0 {
@@ -72,8 +63,7 @@ func TestAnimatorPressOutsideTheControlDoesNothing(t *testing.T) {
 }
 
 func TestAnimatorStartsUnderTheCursorAtFullHover(t *testing.T) {
-	// A control that appears already under the pointer must not ease in
-	// from nothing, which would read as it having just moved there.
+
 	var a animator
 	a.tick()
 	if av := a.step("fresh", true, false, 1.0/60); av.hover < 0.9 {
@@ -101,8 +91,7 @@ func TestAnimatorForgetsControlsThatStopBeingDrawn(t *testing.T) {
 }
 
 func TestEaseArrivesAndDoesNotOvershoot(t *testing.T) {
-	// A dropped frame — or a window suspended for a minute — hands the
-	// easing a huge dt. It has to arrive, not fly past.
+
 	if got := ease(0, 1, 16, 10); got != 1 {
 		t.Errorf("ease over a 10 second frame = %v, want it clamped to 1", got)
 	}
@@ -126,9 +115,7 @@ func TestLerpColAndWithAlpha(t *testing.T) {
 	if mid.R <= a.R || mid.R >= b.R {
 		t.Errorf("lerpCol at 0.5 gave R=%d, outside (%d, %d)", mid.R, a.R, b.R)
 	}
-	// Alpha is premultiplied, so every channel scales with it — a colour
-	// that only dimmed its alpha would draw as a bright wash (the fault
-	// colLoop in ui.go carries a comment about).
+
 	half := withAlpha(colNote, 0.5)
 	if half.A == 0 {
 		t.Error("withAlpha(0.5) is fully transparent")
@@ -141,10 +128,6 @@ func TestLerpColAndWithAlpha(t *testing.T) {
 	}
 }
 
-// TestAnimatedControlsStayWhereTheyAreHitTested: the lift and sink move
-// what is DRAWN, and the hit testing reads the un-animated rectangle. The
-// movement therefore has to stay far under a control's height, or the
-// bottom of a hovered button stops being clickable.
 func TestAnimatedControlsStayWhereTheyAreHitTested(t *testing.T) {
 	if total := animLift + animSink; total > chipH/4 {
 		t.Errorf("a control moves %v pixels, a quarter of the %v it is tall; the hit region would no longer line up",

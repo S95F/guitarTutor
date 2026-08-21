@@ -1,28 +1,19 @@
 package ui
 
-// Mouse and timeline tests. Ebitengine cannot open a window in a unit
-// test, so none of these touch it: handleMouse takes a pointer value and
-// every rectangle comes from layout(), which is exactly what the game
-// loop feeds it.
-
 import (
 	"testing"
 
 	"github.com/S95F/musicTutor/internal/score"
 )
 
-// pressAt builds a pointer pressing the middle of r this frame.
 func pressAt(r rect) pointer {
 	return pointer{x: r.x + r.w/2, y: r.y + r.h/2, down: true, pressed: true}
 }
 
-// heldAt builds a pointer held (but not newly pressed) at a position,
-// which is what the frames after the first of a drag look like.
 func heldAt(x, y float64) pointer {
 	return pointer{x: x, y: y, down: true}
 }
 
-// chipRect finds a transport chip by its label.
 func chipRect(t *testing.T, a *App, label string) rect {
 	t.Helper()
 	l := a.layout()
@@ -52,8 +43,6 @@ func TestRectContainsIsHalfOpen(t *testing.T) {
 	}
 }
 
-// TestPointerHitStopsAtFirstMatch: overlapping hotspots resolve in slice
-// order, so a control appended after the surface it covers wins.
 func TestPointerHitStopsAtFirstMatch(t *testing.T) {
 	first, second := 0, 0
 	spots := []hotspot{
@@ -69,9 +58,6 @@ func TestPointerHitStopsAtFirstMatch(t *testing.T) {
 	}
 }
 
-// TestActionlessHotspotSwallowsTheClick is the disabled-control rule: a
-// chip that cannot be used still owns its rectangle, so the press does
-// not fall through to whatever is drawn behind it.
 func TestActionlessHotspotSwallowsTheClick(t *testing.T) {
 	p := pointer{x: 5, y: 5, down: true, pressed: true}
 	if !p.hit([]hotspot{{r: rect{0, 0, 10, 10}}}) {
@@ -82,9 +68,6 @@ func TestActionlessHotspotSwallowsTheClick(t *testing.T) {
 	}
 }
 
-// TestTimelineMapsTicksToPixelsAndBack: the strip's two conversions are
-// inverses, which is what makes clicking where the playhead is drawn a
-// no-op rather than a small jump.
 func TestTimelineMapsTicksToPixelsAndBack(t *testing.T) {
 	a := newApp(t, 8)
 	tl := a.layout().timeline
@@ -102,8 +85,6 @@ func TestTimelineMapsTicksToPixelsAndBack(t *testing.T) {
 	}
 }
 
-// TestClickOnTimelineSeeks is the whole point of the strip: it is a
-// scrubber, not a picture.
 func TestClickOnTimelineSeeks(t *testing.T) {
 	a := newApp(t, 8)
 	tl := a.layout().timeline
@@ -117,10 +98,6 @@ func TestClickOnTimelineSeeks(t *testing.T) {
 	}
 }
 
-// TestDragKeepsThePointerItGrabbed: once a gesture owns the mouse it
-// keeps it until the button comes up. Without this, sliding off the
-// timeline mid-scrub would hand the pointer to whatever it slid onto —
-// here a chip, which would toggle instead.
 func TestDragKeepsThePointerItGrabbed(t *testing.T) {
 	a := newApp(t, 8)
 	tl := a.layout().timeline
@@ -136,20 +113,16 @@ func TestDragKeepsThePointerItGrabbed(t *testing.T) {
 		t.Error("the drag ended early")
 	}
 
-	// Releasing gives the pointer back.
 	a.handleMouse(pointer{x: click.x, y: click.y}, false)
 	if a.drag != dragNone {
 		t.Error("releasing the button should end the drag")
 	}
 }
 
-// TestDragOnTabSeeks: the tab itself is draggable, which is the fine
-// control the timeline cannot give on a long piece.
 func TestDragOnTabSeeks(t *testing.T) {
 	a := newApp(t, 8)
 	tab := a.layout().tab
-	// A press to the right of the playhead seeks forward by the ticks
-	// that distance represents.
+
 	x := screenW*playheadX + 200
 	a.handleMouse(pointer{x: x, y: tab.y + tab.h/2, down: true, pressed: true}, false)
 	want := int64(200 / a.pxPerTick())
@@ -158,8 +131,6 @@ func TestDragOnTabSeeks(t *testing.T) {
 	}
 }
 
-// TestTabDragIsInertInTheTuner: the tuner replaces the tab, so a click
-// where the tab would have been must not seek an invisible score.
 func TestTabDragIsInertInTheTuner(t *testing.T) {
 	a := newApp(t, 8)
 	a.tunerView = true
@@ -170,8 +141,6 @@ func TestTabDragIsInertInTheTuner(t *testing.T) {
 	}
 }
 
-// TestDragLoopEdgeSnapsToBeat: a dragged loop end lands somewhere
-// musical unless the user asks for tick-exact placement with shift.
 func TestDragLoopEdgeSnapsToBeat(t *testing.T) {
 	a := newApp(t, 8)
 	a.eng.SetLoop(0, 3840)
@@ -184,22 +153,18 @@ func TestDragLoopEdgeSnapsToBeat(t *testing.T) {
 	if a.drag != dragLoopB {
 		t.Fatalf("pressing the loop end started %v, want dragLoopB", a.drag)
 	}
-	// 8160 ticks: between bar 3 (7680) and bar 4 (11520), nearer bar 3.
+
 	a.handleMouse(heldAt(a.xAtTick(8160), l.tab.y+10), false)
 	if _, end, _ := a.eng.Loop(); end != 7680 {
 		t.Errorf("loop end snapped to %d, want the bar line at 7680", end)
 	}
 
-	// Shift releases the snap.
 	a.handleMouse(heldAt(a.xAtTick(8160), l.tab.y+10), true)
 	if _, end, _ := a.eng.Loop(); end != 8160 {
 		t.Errorf("with shift held the loop end is %d, want the exact tick 8160", end)
 	}
 }
 
-// TestLoopEdgeStopsAtItsPartner: dragging one end past the other would
-// make an empty region, which the engine reads as "no loop" — the loop
-// would silently vanish mid-gesture.
 func TestLoopEdgeStopsAtItsPartner(t *testing.T) {
 	a := newApp(t, 8)
 	a.eng.SetLoop(0, 3840)
@@ -220,9 +185,6 @@ func TestLoopEdgeStopsAtItsPartner(t *testing.T) {
 	}
 }
 
-// TestLoopEdgesAreTestedBeforeTheSurfacesTheySitOn: the grab handle is
-// drawn over the tab and the timeline, so a press on it must grab rather
-// than seek to the tick underneath.
 func TestLoopEdgesAreTestedBeforeTheSurfacesTheySitOn(t *testing.T) {
 	a := newApp(t, 8)
 	a.eng.SetLoop(3840, 7680)
@@ -239,11 +201,9 @@ func TestLoopEdgesAreTestedBeforeTheSurfacesTheySitOn(t *testing.T) {
 	}
 }
 
-// TestChipsToggleTheirState walks the transport chips that mirror engine
-// state and checks a click flips each one.
 func TestChipsToggleTheirState(t *testing.T) {
 	a := newApp(t, 4)
-	a.waitCtl = true // W is gated on a live detector
+	a.waitCtl = true
 
 	cases := []struct {
 		label string
@@ -263,8 +223,6 @@ func TestChipsToggleTheirState(t *testing.T) {
 	}
 }
 
-// TestLoopChipMakesAndClearsALoop: one click is the A-then-B pair, and
-// the next click clears it.
 func TestLoopChipMakesAndClearsALoop(t *testing.T) {
 	a := newApp(t, 4)
 	a.handleMouse(pressAt(chipRect(t, a, "LOOP")), false)
@@ -277,38 +235,32 @@ func TestLoopChipMakesAndClearsALoop(t *testing.T) {
 	}
 }
 
-// TestDisabledChipsDoNothing: WAIT without a detector and SETTINGS with
-// no shell to host one are drawn disabled, and clicking them must not
-// reach past the chip.
-// TestTransportButtonsMoveThePlayhead covers the four icon buttons.
 func TestTransportButtonsMoveThePlayhead(t *testing.T) {
 	a := newApp(t, 8)
 	l := a.layout()
 
-	a.handleMouse(pressAt(l.transport[3]), false) // next bar
+	a.handleMouse(pressAt(l.transport[3]), false)
 	if got := a.eng.PosTick(); got != 3840 {
 		t.Errorf("next-bar moved to %d, want 3840", got)
 	}
-	a.handleMouse(pressAt(l.transport[1]), false) // previous bar
+	a.handleMouse(pressAt(l.transport[1]), false)
 	if got := a.eng.PosTick(); got != 0 {
 		t.Errorf("previous-bar from the top of bar 2 moved to %d, want 0", got)
 	}
 	a.handleMouse(pressAt(l.transport[3]), false)
-	a.handleMouse(pressAt(l.transport[0]), false) // to start
+	a.handleMouse(pressAt(l.transport[0]), false)
 	if got := a.eng.PosTick(); got != 0 {
 		t.Errorf("to-start moved to %d, want 0", got)
 	}
 	if a.eng.Playing() {
 		t.Fatal("the fixture should start paused")
 	}
-	a.handleMouse(pressAt(l.transport[2]), false) // play/pause
+	a.handleMouse(pressAt(l.transport[2]), false)
 	if !a.eng.Playing() {
 		t.Error("the play button did not start playback")
 	}
 }
 
-// TestTrackChipMutesAndSolos: left click mutes, right click solos —
-// the mouse equivalents of 1..9 and shift+1..9.
 func TestTrackChipMutesAndSolos(t *testing.T) {
 	a := newAppTracks(t, 3, 4)
 	l := a.layout()
@@ -335,8 +287,6 @@ func TestTrackChipMutesAndSolos(t *testing.T) {
 	}
 }
 
-// TestWheelOverTheTabZooms, and only over the tab: the wheel elsewhere
-// belongs to whatever is under it.
 func TestWheelOverTheTabZooms(t *testing.T) {
 	a := newApp(t, 4)
 	tab := a.layout().tab
@@ -352,8 +302,6 @@ func TestWheelOverTheTabZooms(t *testing.T) {
 	}
 }
 
-// TestPositionCaptionReportsBarAndTime is the "where am I" line; a
-// guitarist looking at four bars of tab has no other way to tell.
 func TestPositionCaptionReportsBarAndTime(t *testing.T) {
 	a := newApp(t, 8)
 	if got, want := a.positionCaption(), "bar 1 of 8"; len(got) < len(want) || got[:len(want)] != want {
@@ -363,8 +311,7 @@ func TestPositionCaptionReportsBarAndTime(t *testing.T) {
 	if got, want := a.positionCaption(), "bar 4 of 8"; got[:len(want)] != want {
 		t.Errorf("after seeking to bar 4 the caption is %q", got)
 	}
-	// 8 bars of 4/4 at 120 BPM is 16 seconds; halving the practice speed
-	// doubles how long it will actually take, and the caption must say so.
+
 	a.eng.SetTempoScale(0.5)
 	if got := a.positionCaption(); !contains(got, "0:32") {
 		t.Errorf("at half speed the total should read 0:32, got %q", got)
@@ -391,7 +338,6 @@ func TestClockText(t *testing.T) {
 	}
 }
 
-// TestSnapToBeatPrefersTheNearestCandidate.
 func TestSnapToBeatPrefersTheNearestCandidate(t *testing.T) {
 	a := newApp(t, 4)
 	for _, c := range []struct{ in, want int64 }{
@@ -399,7 +345,7 @@ func TestSnapToBeatPrefersTheNearestCandidate(t *testing.T) {
 		{100, 0},
 		{3800, 3840},
 		{3840 + 100, 3840},
-		{score.PPQ * 100, 4 * 3840}, // past the end clamps to the last bar line
+		{score.PPQ * 100, 4 * 3840},
 	} {
 		if got := a.snapToBeat(c.in); got != c.want {
 			t.Errorf("snapToBeat(%d) = %d, want %d", c.in, got, c.want)
@@ -407,8 +353,6 @@ func TestSnapToBeatPrefersTheNearestCandidate(t *testing.T) {
 	}
 }
 
-// TestReloadPromptNeedsAReloader: the view must not offer a reload it
-// has no way to perform.
 func TestReloadPromptNeedsAReloader(t *testing.T) {
 	a := newApp(t, 4)
 	a.MarkSettingsChanged()
@@ -426,17 +370,12 @@ func TestReloadPromptNeedsAReloader(t *testing.T) {
 	if reloaded != 1 {
 		t.Errorf("reload ran %d times, want 1", reloaded)
 	}
-	// The offer stays up: a successful reload replaces this whole screen
-	// (taking the prompt with it), so the only screen that can still show
-	// the prompt is one whose reload failed — where the offer is still
-	// true, and withdrawing it would hide that the session no longer
-	// matches the configuration (audit A2).
+
 	if a.reloadPrompt() == "" {
 		t.Error("a failed reload must leave the offer standing")
 	}
 }
 
-// TestSettingsChipEnablesWithAnOpener.
 func TestSettingsChipEnablesWithAnOpener(t *testing.T) {
 	a := newApp(t, 4)
 	find := func() chipState {
@@ -462,9 +401,6 @@ func TestSettingsChipEnablesWithAnOpener(t *testing.T) {
 	}
 }
 
-// TestTrackStripLeavesRoomForTheLiveMeter: a chip drawn under the meter
-// could not be clicked, so tracks that do not fit get no rectangle and
-// the strip says how many it hid.
 func TestTrackStripLeavesRoomForTheLiveMeter(t *testing.T) {
 	a := newAppTracks(t, 9, 2)
 	wide := a.layout()
@@ -482,12 +418,6 @@ func TestTrackStripLeavesRoomForTheLiveMeter(t *testing.T) {
 	}
 }
 
-// --- audit regression tests -------------------------------------------------
-
-// TestTunerHidesTabLoopHandles (audit A3): the tuner replaces the tab, so
-// the tab's loop-edge grab handles must vanish with it — an invisible
-// handle that still answered a click let the cents bar move a loop end.
-// The timeline stays on screen in both views, so its handles remain.
 func TestTunerHidesTabLoopHandles(t *testing.T) {
 	a := newApp(t, 8)
 	a.eng.SetLoop(3840, 7680)
@@ -506,7 +436,6 @@ func TestTunerHidesTabLoopHandles(t *testing.T) {
 		t.Error("the timeline is drawn in the tuner view, so its handles must stay")
 	}
 
-	// And a click where the tab handle would have been must not grab.
 	a.eng.SeekTick(3840)
 	tab := a.tabRect()
 	a.handleMouse(pointer{x: a.xAtTick(3840), y: tab.y + tab.h/2, down: true, pressed: true}, false)
@@ -515,9 +444,6 @@ func TestTunerHidesTabLoopHandles(t *testing.T) {
 	}
 }
 
-// TestRightClickNeverSeeksOrGrabs (audit A4): the right button means one
-// thing — solo a track. A right press that misses every chip must not
-// fall through into the seek and loop gestures.
 func TestRightClickNeverSeeksOrGrabs(t *testing.T) {
 	a := newApp(t, 8)
 	a.eng.SetLoop(0, 3840)
@@ -545,9 +471,6 @@ func TestRightClickNeverSeeksOrGrabs(t *testing.T) {
 	}
 }
 
-// TestStaleDragDiesWithoutActing (audit A8): a gesture that outlives a
-// modal (which swallows the release) must be dropped on the first frame
-// the button is seen up — not resumed on the cursor's current position.
 func TestStaleDragDiesWithoutActing(t *testing.T) {
 	a := newApp(t, 8)
 	tl := a.layout().timeline
@@ -557,7 +480,6 @@ func TestStaleDragDiesWithoutActing(t *testing.T) {
 	}
 	pos := a.eng.PosTick()
 
-	// Button is up, cursor has wandered to the far end of the timeline.
 	a.handleMouse(pointer{x: tl.x + tl.w - 1, y: tl.y + 2}, false)
 	if a.drag != dragNone {
 		t.Error("a drag with the button up should be dropped")
@@ -566,7 +488,6 @@ func TestStaleDragDiesWithoutActing(t *testing.T) {
 		t.Errorf("the dead drag still seeked from %d to %d", pos, got)
 	}
 
-	// And opening a modal kills an in-flight drag outright.
 	a.handleMouse(pressAt(tl), false)
 	a.openHelp()
 	if err := a.Update(); err != nil {
@@ -577,39 +498,27 @@ func TestStaleDragDiesWithoutActing(t *testing.T) {
 	}
 }
 
-// TestNextBarInsideLoopWraps is the regression test for the E1
-// verification follow-up: with the engine now engaging a loop at a
-// position exactly on its end, a next-bar step onto the loop end while
-// PLAYING warped to the loop start only once rendering resumed, and
-// while PAUSED parked on B to warp later — the same keypress did two
-// different things. The UI now owns the decision: forward bar navigation
-// inside an armed loop wraps to the loop start, immediately, in both
-// transport states. Navigation outside the loop is untouched.
 func TestNextBarInsideLoopWraps(t *testing.T) {
 	a := newApp(t, 8)
-	a.eng.SetLoop(3840, 11520) // bars 2-3
-	a.eng.SeekTick(7680)       // bar 3, the loop's last bar
+	a.eng.SetLoop(3840, 11520)
+	a.eng.SeekTick(7680)
 
 	a.seekNextBar()
 	if got := a.eng.PosTick(); got != 3840 {
 		t.Errorf("next-bar from the loop's last bar landed at %d, want the loop start 3840", got)
 	}
 
-	// Outside the loop the key is a plain step: from bar 1 it enters the
-	// loop's first bar, and past the loop it walks bars normally.
 	a.eng.SeekTick(0)
 	a.seekNextBar()
 	if got := a.eng.PosTick(); got != 3840 {
 		t.Errorf("next-bar from bar 1 landed at %d, want 3840", got)
 	}
-	a.eng.SeekTick(11520) // bar 4, past the loop
+	a.eng.SeekTick(11520)
 	a.seekNextBar()
 	if got := a.eng.PosTick(); got != 15360 {
 		t.Errorf("next-bar past the loop landed at %d, want 15360", got)
 	}
 
-	// And backward navigation can still leave the loop: stepping behind
-	// the start is a rewind, from which playback re-enters naturally.
 	a.eng.SeekTick(3840)
 	a.seekPrevBar()
 	if got := a.eng.PosTick(); got != 0 {
@@ -617,8 +526,6 @@ func TestNextBarInsideLoopWraps(t *testing.T) {
 	}
 }
 
-// TestHiddenTracksHint (audit A7): the overflow hint must only promise
-// keys that exist — the bindings stop at track 9.
 func TestHiddenTracksHint(t *testing.T) {
 	a := newApp(t, 1)
 	for _, c := range []struct {
@@ -636,10 +543,6 @@ func TestHiddenTracksHint(t *testing.T) {
 	}
 }
 
-// TestWheelDoesNotZoomUnderTheTuner: the wheel branch was gated on the
-// tab's rectangle but not on the tab being the thing on screen, so
-// scrolling over the tuner silently rezoomed the tablature behind it and
-// the change only surfaced on the next press of T.
 func TestWheelDoesNotZoomUnderTheTuner(t *testing.T) {
 	a := newApp(t, 4)
 	tab := a.layout().tab
@@ -661,10 +564,6 @@ func TestWheelDoesNotZoomUnderTheTuner(t *testing.T) {
 	}
 }
 
-// TestShiftDragDrawsALoopOnTheTimeline: one gesture, one intent — the
-// press anchors an edge, the drag carries the other, both snapped to
-// beats. Dragging back across the anchor swaps the edges rather than
-// collapsing the loop.
 func TestShiftDragDrawsALoopOnTheTimeline(t *testing.T) {
 	a := newApp(t, 8)
 	tl := a.layout().timeline
@@ -684,14 +583,12 @@ func TestShiftDragDrawsALoopOnTheTimeline(t *testing.T) {
 		t.Errorf("shift-drag made loop [%d, %d) on=%v, want [3840, 11520) on=true", la, lb, on)
 	}
 
-	// Back across the anchor: the anchor becomes the END of the loop.
 	a.handleMouse(heldAt(xFor(0), tl.y+tl.h/2), true)
 	la, lb, on = a.eng.Loop()
 	if !on || la != 0 || lb != 3840 {
 		t.Errorf("dragging left of the anchor made [%d, %d) on=%v, want [0, 3840) on=true", la, lb, on)
 	}
 
-	// Releasing keeps the loop and frees the pointer.
 	a.handleMouse(pointer{x: xFor(0), y: tl.y + 2}, true)
 	if a.drag != dragNone {
 		t.Error("releasing the button should end the gesture")
@@ -701,9 +598,6 @@ func TestShiftDragDrawsALoopOnTheTimeline(t *testing.T) {
 	}
 }
 
-// TestShiftPressWithinSlopStaysAPlainSeek: a modifier held a moment too
-// long must not leave a surprise loop behind — under the slop the press
-// is exactly the seek it would have been without shift.
 func TestShiftPressWithinSlopStaysAPlainSeek(t *testing.T) {
 	a := newApp(t, 8)
 	tl := a.layout().timeline
@@ -725,8 +619,6 @@ func TestShiftPressWithinSlopStaysAPlainSeek(t *testing.T) {
 	}
 }
 
-// TestShiftDragDrawsALoopOnTheTab: the tab is the fine-grained surface,
-// and the gesture must work where the eyes already are.
 func TestShiftDragDrawsALoopOnTheTab(t *testing.T) {
 	a := newApp(t, 8)
 	tab := a.layout().tab
@@ -743,17 +635,12 @@ func TestShiftDragDrawsALoopOnTheTab(t *testing.T) {
 	if la >= lb || la%960 != 0 || lb%960 != 0 {
 		t.Errorf("loop [%d, %d) is not snapped to beats", la, lb)
 	}
-	// The span must be the pixels DRAGGED, not the pointer's distance
-	// from the playhead column: the press's own seek recentres the tab,
-	// and measuring through the recentered view used to add the whole
-	// press-to-column distance (400px here) to the loop.
+
 	dragged := int64(100 / a.pxPerTick())
 	if got := lb - la; got > dragged+2*960 {
 		t.Errorf("a 100px drag drew a %d-tick loop, want about %d (± a beat of snap)", got, dragged)
 	}
 
-	// The tuner replaces the tab, so the gesture must not reach the
-	// invisible score behind it.
 	b := newApp(t, 8)
 	b.tunerView = true
 	b.handleMouse(pointer{x: screenW*playheadX + 200, y: y, down: true, pressed: true}, true)
@@ -763,17 +650,12 @@ func TestShiftDragDrawsALoopOnTheTab(t *testing.T) {
 }
 
 func TestShiftDragStaysOnItsAnchorSurface(t *testing.T) {
-	// The tab and the timeline map pixels to ticks at scales an order of
-	// magnitude apart. A drag that drifts a few pixels onto the other
-	// surface must keep the mapping it was anchored with, or the loop
-	// jumps mid-gesture.
+
 	a := newApp(t, 8)
 	l := a.layout()
 	tabY := l.tab.y + l.tab.h/2
 	tlY := l.timeline.y + l.timeline.h/2
 
-	// Anchored on the tab, drifting down onto the timeline strip: the
-	// span stays tab-scale pixels.
 	a.handleMouse(pointer{x: screenW*playheadX + 400, y: tabY, down: true, pressed: true}, true)
 	a.handleMouse(heldAt(screenW*playheadX+500, tlY), true)
 	la, lb, on := a.eng.Loop()
@@ -785,9 +667,6 @@ func TestShiftDragStaysOnItsAnchorSurface(t *testing.T) {
 		t.Errorf("drifting onto the timeline blew the loop up to %d ticks, want about %d", got, dragged)
 	}
 
-	// Anchored on the timeline, drifting up onto the tab: still the
-	// whole-piece mapping, so dragging a tenth of the strip spans about
-	// a tenth of the piece.
 	b := newApp(t, 8)
 	l = b.layout()
 	start := l.timeline.x + l.timeline.w/2
@@ -803,9 +682,6 @@ func TestShiftDragStaysOnItsAnchorSurface(t *testing.T) {
 	}
 }
 
-// TestShiftPressOnALoopEdgeStillResizes: the edges are tested before the
-// new-loop gesture, so shift+dragging an existing edge keeps meaning
-// tick-exact resizing rather than starting a second loop.
 func TestShiftPressOnALoopEdgeStillResizes(t *testing.T) {
 	a := newApp(t, 8)
 	a.eng.SetLoop(3840, 7680)
@@ -816,9 +692,6 @@ func TestShiftPressOnALoopEdgeStillResizes(t *testing.T) {
 	}
 }
 
-// TestTimelineHintTeachesTheMissingGesture: "drag the loop edges" is a
-// lie when no loop has edges; with none set the line teaches the gesture
-// that makes one.
 func TestTimelineHintTeachesTheMissingGesture(t *testing.T) {
 	a := newApp(t, 4)
 	if got := a.timelineHint(); !contains(got, "shift-drag") {
@@ -830,10 +703,6 @@ func TestTimelineHintTeachesTheMissingGesture(t *testing.T) {
 	}
 }
 
-// TestSeekLastBarJumpsToTheEnding: End mirrors Home because the ending
-// of a piece is exactly where A/B loops get set. The binding row is
-// checked here too — a key the overlay does not teach may as well not
-// exist.
 func TestSeekLastBarJumpsToTheEnding(t *testing.T) {
 	a := newApp(t, 8)
 	a.seekLastBar()
@@ -842,7 +711,7 @@ func TestSeekLastBarJumpsToTheEnding(t *testing.T) {
 	}
 
 	empty := newApp(t, 0)
-	empty.seekLastBar() // must not panic or move
+	empty.seekLastBar()
 	if got := empty.eng.PosTick(); got != 0 {
 		t.Errorf("End on a bar-less track moved to %d", got)
 	}
@@ -858,9 +727,6 @@ func TestSeekLastBarJumpsToTheEnding(t *testing.T) {
 	}
 }
 
-// TestDisabledChipClickExplains: a greyed chip still swallows the click,
-// but the swallow now answers — the transient line names what would
-// enable the control instead of leaving a click that visibly did nothing.
 func TestDisabledChipClickExplains(t *testing.T) {
 	a := newApp(t, 4)
 	if a.waitCtl || a.settings != nil {
@@ -881,9 +747,6 @@ func TestDisabledChipClickExplains(t *testing.T) {
 	}
 }
 
-// TestTransportRowSharesOneHeight: the icon buttons and the toggle chips
-// are one visual row, and a couple of pixels of difference between two
-// rounded panels side by side reads as a rendering fault.
 func TestTransportRowSharesOneHeight(t *testing.T) {
 	a := newApp(t, 4)
 	l := a.layout()

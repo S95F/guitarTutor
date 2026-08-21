@@ -14,17 +14,13 @@ import (
 	"github.com/S95F/musicTutor/internal/score/textfmt"
 )
 
-// newTestEditor builds an editor with no Shell behind it. Everything the
-// tests drive is a plain method, so no game loop is involved.
 func newTestEditor() *Editor { return NewEditor(nil) }
 
-// press applies one key with no modifiers.
 func press(t *testing.T, e *Editor, k ebiten.Key) error {
 	t.Helper()
 	return e.handleKey(k, mods{})
 }
 
-// pressMod applies one key with modifiers.
 func pressMod(t *testing.T, e *Editor, k ebiten.Key, m mods) error {
 	t.Helper()
 	return e.handleKey(k, m)
@@ -47,8 +43,7 @@ func TestEditorTypesATwoDigitFret(t *testing.T) {
 	if !ok || n.Fret != 12 {
 		t.Fatalf("got fret %d ok=%v, want 12", n.Fret, ok)
 	}
-	// Past the hold window the next digit starts a fret of its own rather
-	// than making a three-digit number.
+
 	e.frame += edFretHoldFrames + 1
 	e.expireFretDigits()
 	press(t, e, ebiten.KeyDigit3)
@@ -58,9 +53,7 @@ func TestEditorTypesATwoDigitFret(t *testing.T) {
 }
 
 func TestEditorSecondDigitOutOfRangeStartsOver(t *testing.T) {
-	// 2 then 9 would be fret 29, which is legal; 3 then 9 would be 39,
-	// which is past the format's limit, so the 9 has to become a fret of
-	// its own instead of being swallowed.
+
 	e := newTestEditor()
 	press(t, e, ebiten.KeyDigit3)
 	press(t, e, ebiten.KeyDigit9)
@@ -72,7 +65,7 @@ func TestEditorSecondDigitOutOfRangeStartsOver(t *testing.T) {
 func TestEditorNonDigitEndsAPendingFret(t *testing.T) {
 	e := newTestEditor()
 	press(t, e, ebiten.KeyDigit1)
-	press(t, e, ebiten.KeyRight) // move: not a digit
+	press(t, e, ebiten.KeyRight)
 	press(t, e, ebiten.KeyDigit2)
 	if n, _ := e.doc.NoteAt(e.doc.Cursor().Str); n.Fret != 2 {
 		t.Errorf("got fret %d, want 2 — the move should have ended the pending 1", n.Fret)
@@ -84,19 +77,19 @@ func TestEditorDurationKeys(t *testing.T) {
 	if got := e.doc.Duration(); got != score.Quarter {
 		t.Fatalf("a new piece starts on %d ticks, want a quarter (%d)", got, score.Quarter)
 	}
-	press(t, e, ebiten.KeyBracketRight) // shorter
+	press(t, e, ebiten.KeyBracketRight)
 	if got := e.doc.Duration(); got != score.Eighth {
 		t.Errorf("got %d ticks, want an eighth (%d)", got, score.Eighth)
 	}
-	press(t, e, ebiten.KeyPeriod) // dot it
+	press(t, e, ebiten.KeyPeriod)
 	if got, want := e.doc.Duration(), score.Dotted(score.Eighth); got != want {
 		t.Errorf("got %d ticks, want a dotted eighth (%d)", got, want)
 	}
-	press(t, e, ebiten.KeyT) // triplet replaces the dot
+	press(t, e, ebiten.KeyT)
 	if got, want := e.doc.Duration(), score.Triplet(score.Eighth); got != want {
 		t.Errorf("got %d ticks, want an eighth triplet (%d)", got, want)
 	}
-	press(t, e, ebiten.KeyBracketLeft) // longer
+	press(t, e, ebiten.KeyBracketLeft)
 	if got, want := e.doc.Duration(), score.Triplet(score.Quarter); got != want {
 		t.Errorf("got %d ticks, want a quarter triplet (%d)", got, want)
 	}
@@ -119,18 +112,15 @@ func TestEditorDurationStopsAtTheEnds(t *testing.T) {
 }
 
 func TestEditorDurationThatWillNotFitStillArmsTheNextBeat(t *testing.T) {
-	// Choosing a note value must never be refused outright: if it does not
-	// fit the beat under the cursor it still has to become the value the
-	// next note typed will take, or the palette would be unusable in a bar
-	// that happens to be full.
+
 	e := newTestEditor()
-	press(t, e, ebiten.KeyDigit0) // a quarter note
-	press(t, e, ebiten.KeyRight)
 	press(t, e, ebiten.KeyDigit0)
 	press(t, e, ebiten.KeyRight)
 	press(t, e, ebiten.KeyDigit0)
 	press(t, e, ebiten.KeyRight)
-	press(t, e, ebiten.KeyDigit0) // the 4/4 bar is now four quarters
+	press(t, e, ebiten.KeyDigit0)
+	press(t, e, ebiten.KeyRight)
+	press(t, e, ebiten.KeyDigit0)
 	e.setDuration(score.Whole)
 	if got := e.doc.Duration(); got != score.Whole {
 		t.Errorf("the palette is on %d ticks, want the whole note that did not fit", got)
@@ -172,9 +162,7 @@ func TestEditorTechniquesAndTie(t *testing.T) {
 }
 
 func TestEditorShiftedKeysDoNotAlsoFireTheirPlainMeaning(t *testing.T) {
-	// shift+B opens the tempo entry and shift+P saves-and-practices; both
-	// letters are also techniques, and a shifted press that ALSO bent the
-	// note would be a silent corruption of the piece.
+
 	e := newTestEditor()
 	press(t, e, ebiten.KeyDigit5)
 	pressMod(t, e, ebiten.KeyB, mods{shift: true})
@@ -225,7 +213,7 @@ func TestEditorUndoRedoKeys(t *testing.T) {
 	if n, ok := e.doc.NoteAt(e.doc.Cursor().Str); !ok || n.Fret != 7 {
 		t.Error("ctrl+Y did not put the note back")
 	}
-	// ctrl+shift+Z is the other redo, so it has to have something to redo.
+
 	pressMod(t, e, ebiten.KeyZ, mods{ctrl: true})
 	pressMod(t, e, ebiten.KeyZ, mods{ctrl: true, shift: true})
 	if n, ok := e.doc.NoteAt(e.doc.Cursor().Str); !ok || n.Fret != 7 {
@@ -302,12 +290,12 @@ func TestEditorSaveWithoutAPathAsksTheDialog(t *testing.T) {
 	if !strings.HasSuffix(asked[0], ".gtab") || !strings.Contains(asked[0], "My Riff") {
 		t.Errorf("suggested %q, want a .gtab name built from the title", asked[0])
 	}
-	// A second save while the dialog is up must not stack another.
+
 	e.save()
 	if len(asked) != 1 {
 		t.Errorf("a second save opened another dialog (%d total)", len(asked))
 	}
-	// The answer arrives on the mailbox and is applied on the game loop.
+
 	path := filepath.Join(t.TempDir(), "answer")
 	e.OfferSavePath(path)
 	e.drainDialog()
@@ -324,7 +312,7 @@ func TestEditorCancelledSaveDialogReArms(t *testing.T) {
 	var asked int
 	e.SetSaveDialog(func(string) { asked++ })
 	e.save()
-	e.OfferSavePath("") // cancel
+	e.OfferSavePath("")
 	e.drainDialog()
 	if e.dialogBusy {
 		t.Error("a cancelled dialog left the busy guard set")
@@ -344,11 +332,6 @@ func TestEditorSaveWithNoDialogSaysSo(t *testing.T) {
 	}
 }
 
-// TestEditorShowErrorLandsOnTheStatusLine: the integrator's refusals — a
-// saved piece the shell cannot open for practice, say — render exactly
-// like the editor's own: the error colour, and the same hold before they
-// expire. Before ShowError existed, that failure went only to stderr and
-// shift+P read as a dead key.
 func TestEditorShowErrorLandsOnTheStatusLine(t *testing.T) {
 	e := newTestEditor()
 	e.ShowError("cannot practise piece.gtab: no audio")
@@ -356,7 +339,7 @@ func TestEditorShowErrorLandsOnTheStatusLine(t *testing.T) {
 	if msg != "cannot practise piece.gtab: no audio" || !isErr {
 		t.Errorf("message() = %q (error=%v), want the shown error", msg, isErr)
 	}
-	// Held like the editor's own refusals, then gone.
+
 	e.frame += edMsgFrames
 	if msg, _ := e.message(); msg != "" {
 		t.Errorf("the message still reads %q after its hold expired", msg)
@@ -396,8 +379,7 @@ func TestEditorTextViewRoundTrips(t *testing.T) {
 func TestEditorTextViewAppliesEdits(t *testing.T) {
 	e := newTestEditor()
 	e.toggleText()
-	// Retune the piece by editing the text, the way the view exists to
-	// allow.
+
 	setTextLine(t, e, "\\tempo", "\\tempo 96")
 	if !e.text.ok {
 		t.Fatalf("the edited text does not parse: %s", e.text.status)
@@ -431,7 +413,7 @@ func TestEditorTextViewRefusesToApplyBrokenText(t *testing.T) {
 	if !isErr || msg == "" {
 		t.Errorf("got %q (error=%v), want the parser's complaint", msg, isErr)
 	}
-	// The note typed before switching is still in the document.
+
 	if _, ok := e.doc.NoteAt(e.doc.Cursor().Str); !ok {
 		t.Error("the document lost its note while the text was broken")
 	}
@@ -454,7 +436,7 @@ func TestGtabPaneEditing(t *testing.T) {
 	if got := string(p.lines[0][:1]); got != "/" {
 		t.Errorf("got %q after a backspace, want one slash", got)
 	}
-	// Splitting and rejoining a line has to be exactly reversible.
+
 	before := p.text()
 	p.splitLine()
 	p.backspace()
@@ -488,7 +470,7 @@ func TestEditorClickPutsTheCursorWhereYouClicked(t *testing.T) {
 	if len(systems) == 0 {
 		t.Fatal("the piece laid out to no systems")
 	}
-	// The second bar of the first system, on string 3.
+
 	sys := systems[0]
 	if len(sys.bars) < 2 {
 		t.Skip("the default piece does not put two bars on one system")
@@ -509,15 +491,9 @@ func TestEditorClickPutsTheCursorWhereYouClicked(t *testing.T) {
 	}
 }
 
-// TestEditorClickMapsThroughTheClampedScroll: the wheel adjusts e.scroll
-// in Update, but only Draw clamps it — so a wheel flick and a click in the
-// same frame reached clickGrid with a scroll the user has never seen
-// drawn. Past the end of the piece the system index fell out of range and
-// the click went dead; the click now clamps the scroll it maps through,
-// the same clamp the next Draw would apply.
 func TestEditorClickMapsThroughTheClampedScroll(t *testing.T) {
 	e := newTestEditor()
-	// What a wheel flick leaves behind mid-frame: a scroll past any bound.
+
 	e.scroll = 1e9
 	strTop := edGridTop + edSysPadTop
 	if !e.clickGrid(edGridX+10, strTop+2*edStringGap) {
@@ -539,9 +515,6 @@ func TestEditorClickOutsideTheStaffIsIgnored(t *testing.T) {
 	}
 }
 
-// TestEditorLayoutDoesNotOverflow checks that bars are packed into systems
-// that fit the window. A bar drawn past the right margin is one the user
-// cannot click.
 func TestEditorLayoutDoesNotOverflow(t *testing.T) {
 	e := newTestEditor()
 	for i := 0; i < 30; i++ {
@@ -570,8 +543,6 @@ func TestEditorLayoutDoesNotOverflow(t *testing.T) {
 	}
 }
 
-// TestEditorScrollFollowsTheCursor checks that walking to the end of a
-// long piece brings the notation with it.
 func TestEditorScrollFollowsTheCursor(t *testing.T) {
 	e := newTestEditor()
 	for i := 0; i < 40; i++ {
@@ -600,8 +571,7 @@ func TestEditorForAnImportedPieceHasNoPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A .gp or .mid piece cannot be written back to its own file, so the
-	// editor must not remember one.
+
 	e, err := NewEditorFor(nil, sc, "C:\\music\\song.gp")
 	if err != nil {
 		t.Fatal(err)
@@ -627,7 +597,7 @@ func TestEditorTuningCycle(t *testing.T) {
 	if got := e.tuningName(); got != "drop D" {
 		t.Errorf("after one cycle the tuning is %q, want drop D", got)
 	}
-	// All the way round returns to where it started.
+
 	for i := 1; i < len(score.NamedTunings); i++ {
 		e.cycleTuning()
 	}
@@ -655,13 +625,6 @@ func TestEditorMeterEntry(t *testing.T) {
 	}
 }
 
-// TestEditorEntryEnterOnTheSeedChangesNothing: openEntry promises that
-// "pressing enter straight away changes nothing" — the prompt opens
-// seeded with the value already in force. It used to apply the seed
-// anyway: shift+T then enter marked a just-saved piece dirty (the leave
-// prompt then asked about changes nobody made), and the tempo entry
-// applied its ROUNDED display over the exact value underneath — shift+B
-// then enter on an imported 120.3 BPM silently made it 120.
 func TestEditorEntryEnterOnTheSeedChangesNothing(t *testing.T) {
 	e := newTestEditor()
 	if err := e.doc.SetTempo(120.3); err != nil {
@@ -709,8 +672,6 @@ func TestEditorEntryKeepsBadInput(t *testing.T) {
 	}
 }
 
-// editorButtons flattens every toolbar control, so a test can find one
-// by its stable id rather than by where it happens to sit.
 func editorButtons(e *Editor) []edButton {
 	var out []edButton
 	for _, g := range e.toolbarGroups() {
@@ -720,7 +681,6 @@ func editorButtons(e *Editor) []edButton {
 	return append(out, e.fileButtons()...)
 }
 
-// editorButton finds one control by id.
 func editorButton(t *testing.T, e *Editor, id string) edButton {
 	t.Helper()
 	for _, b := range editorButtons(e) {
@@ -733,8 +693,7 @@ func editorButton(t *testing.T, e *Editor, id string) edButton {
 }
 
 func TestEditorToolbarButtonsMatchTheKeys(t *testing.T) {
-	// The toolbar exists to teach the keyboard, so every control has to do
-	// exactly what its key does.
+
 	e := newTestEditor()
 	press(t, e, ebiten.KeyDigit5)
 
@@ -751,10 +710,6 @@ func TestEditorToolbarButtonsMatchTheKeys(t *testing.T) {
 	}
 }
 
-// TestEditorToolbarCarriesNoFormatLetters is the user-facing rule this
-// toolbar was rebuilt for: nothing a guitarist reads on it should be a
-// character out of the file format. The technique letters belong on the
-// KEY of a control, never as the thing the control says it is.
 func TestEditorToolbarCarriesNoFormatLetters(t *testing.T) {
 	e := newTestEditor()
 	press(t, e, ebiten.KeyDigit5)
@@ -774,8 +729,6 @@ func TestEditorToolbarCarriesNoFormatLetters(t *testing.T) {
 	}
 }
 
-// TestEditorNoteValueIsPickedDirectly: six values, exactly one lit, and
-// pressing one selects it rather than stepping toward it.
 func TestEditorNoteValueIsPickedDirectly(t *testing.T) {
 	e := newTestEditor()
 	values := []struct {
@@ -805,12 +758,9 @@ func TestEditorNoteValueIsPickedDirectly(t *testing.T) {
 	}
 }
 
-// TestEditorDotAndTripletKeepTheChosenValue: dotting an eighth gives a
-// dotted eighth, not a dotted quarter — the modifiers apply to whatever
-// is selected, and the selection stays put.
 func TestEditorDotAndTripletKeepTheChosenValue(t *testing.T) {
 	e := newTestEditor()
-	editorButton(t, e, "value480").act() // an eighth
+	editorButton(t, e, "value480").act()
 	editorButton(t, e, "dot").act()
 	if got, want := e.doc.Duration(), score.Dotted(score.Eighth); got != want {
 		t.Errorf("got %d ticks, want a dotted eighth (%d)", got, want)
@@ -831,21 +781,18 @@ func TestEditorDotAndTripletKeepTheChosenValue(t *testing.T) {
 }
 
 func TestEditorNoteControlsAreOffWithoutANote(t *testing.T) {
-	e := newTestEditor() // the cursor starts on a rest
+	e := newTestEditor()
 	for _, id := range []string{"tie", "hammer", "pull", "slide", "bend", "vibrato", "dead"} {
 		if !editorButton(t, e, id).disabled {
 			t.Errorf("the %q control is live with no note under the cursor", id)
 		}
 	}
-	// The note VALUE is not: choosing what to type next is exactly what
-	// you do before there is a note.
+
 	if editorButton(t, e, "value480").disabled {
 		t.Error("the note-value picker is disabled with no note under the cursor")
 	}
 }
 
-// TestEditorUndoRedoAreOnTheToolbar: they were keyboard-only, which hides
-// them from the person most likely to need them.
 func TestEditorUndoRedoAreOnTheToolbar(t *testing.T) {
 	e := newTestEditor()
 	if !editorButton(t, e, "undo").disabled || !editorButton(t, e, "redo").disabled {
@@ -884,9 +831,7 @@ func TestEditorHotspotsAreInsideTheWindow(t *testing.T) {
 }
 
 func TestEditorOpenAndSaveAnImportedPiece(t *testing.T) {
-	// The whole round trip a user takes when they want to fix a bar of an
-	// imported piece: open it, change something, save it as .gtab, and get
-	// a file that plays back as what the editor showed.
+
 	src, err := os.ReadFile("../../testdata/fixture_rich.gtab")
 	if err != nil {
 		t.Fatal(err)
@@ -922,9 +867,7 @@ func TestEditorOpenAndSaveAnImportedPiece(t *testing.T) {
 }
 
 func TestEditorNotationChipsAreDeadInTextMode(t *testing.T) {
-	// A note chip clicked while the text is showing would edit the document
-	// UNDER the text, and applying the text on the way out would discard
-	// that edit without a word. The chips are greyed instead.
+
 	e := newTestEditor()
 	press(t, e, ebiten.KeyDigit5)
 	e.toggleText()
@@ -943,13 +886,13 @@ func TestEditorNotationChipsAreDeadInTextMode(t *testing.T) {
 			t.Errorf("the %q piece control is live while the text is showing", b.id)
 		}
 	}
-	// The file actions stay live: save, back to the notation, practice.
+
 	for _, b := range e.fileButtons() {
 		if b.id != "practice" && b.disabled {
 			t.Errorf("the %q file control is greyed while the text is showing", b.id)
 		}
 	}
-	// And no hotspot reaches a greyed control.
+
 	for _, h := range e.hotspots() {
 		if h.r.y < edGridTop && h.r.x < screenW/2 {
 			t.Errorf("a left-hand control at %+v is still clickable in text mode", h.r)
@@ -958,13 +901,7 @@ func TestEditorNotationChipsAreDeadInTextMode(t *testing.T) {
 }
 
 func TestEditorHelpTableFitsItsCard(t *testing.T) {
-	// The overlay has no scrolling, so a table that outgrows the card runs
-	// its last rows off the bottom of the window — which is where the
-	// "how do I get out of here" line lives.
-	//
-	// Measured through helpLayout, which is what drawHelpOverlay itself
-	// flows from: a test that re-derives the arithmetic passes while the
-	// drawing runs off the bottom, which is exactly what happened here.
+
 	e := newTestEditor()
 	rows := e.editorBindings()
 	f := helpLayout(rows, editorHelpFootnote)
@@ -975,9 +912,6 @@ func TestEditorHelpTableFitsItsCard(t *testing.T) {
 	}
 }
 
-// TestEveryHelpTableFitsItsCard: the editor's is the longest, but the
-// overlay is shared and any of them running off the bottom loses the
-// dismiss line the same way.
 func TestEveryHelpTableFitsItsCard(t *testing.T) {
 	e := newTestEditor()
 	app := newApp(t, 4)
@@ -1005,8 +939,6 @@ func TestEveryHelpTableFitsItsCard(t *testing.T) {
 	}
 }
 
-// --- writing a piece from nothing ----------------------------------------
-
 func TestEditorSpaceAdvancesAndGrowsThePiece(t *testing.T) {
 	e := newTestEditor()
 	press(t, e, ebiten.KeyDigit0)
@@ -1015,8 +947,7 @@ func TestEditorSpaceAdvancesAndGrowsThePiece(t *testing.T) {
 	if got := e.doc.Cursor(); got.Beat == before.Beat && got.Bar == before.Bar {
 		t.Fatalf("space left the cursor at %+v", got)
 	}
-	// Space at the very end of the piece makes somewhere to keep typing,
-	// which is the whole point of it being a separate key from the arrows.
+
 	e.doc.GoToEnd()
 	bars := e.doc.BarCount()
 	press(t, e, ebiten.KeySpace)
@@ -1026,7 +957,7 @@ func TestEditorSpaceAdvancesAndGrowsThePiece(t *testing.T) {
 	if got := e.doc.Cursor().Bar; got != bars {
 		t.Errorf("the cursor is in bar %d, want the new one (%d)", got, bars)
 	}
-	// And the arrows are unchanged: they navigate, they do not create.
+
 	e.doc.GoToEnd()
 	bars = e.doc.BarCount()
 	press(t, e, ebiten.KeyRight)
@@ -1036,8 +967,7 @@ func TestEditorSpaceAdvancesAndGrowsThePiece(t *testing.T) {
 }
 
 func TestEditorStringLabelsIgnoreTheCapo(t *testing.T) {
-	// A capo is a movable nut; a guitarist still calls the fifth string
-	// the A string with one on, and tab is written that way.
+
 	e := newTestEditor()
 	if got := edStringName(e.doc.Track(), 5); got != "A" {
 		t.Errorf("string 5 is labelled %q, want A", got)
@@ -1054,9 +984,7 @@ func TestEditorStringLabelsIgnoreTheCapo(t *testing.T) {
 }
 
 func TestEditorCursorPitchReportsWhatSounds(t *testing.T) {
-	// The fret number is a position; what a writer checks against their
-	// ear is the pitch, and the capo moves that even though it does not
-	// move the string's name.
+
 	e := newTestEditor()
 	e.doc.GoTo(edit.Cursor{Bar: 0, Beat: 0, Str: 5})
 	if got := e.cursorPitch(); got != "A string" {
@@ -1077,8 +1005,7 @@ func TestEditorCursorPitchReportsWhatSounds(t *testing.T) {
 }
 
 func TestEditorRhythmFlags(t *testing.T) {
-	// The flags are the readable half of a note value: one for an eighth,
-	// two for a sixteenth, and none for anything a quarter or longer.
+
 	for _, tt := range []struct {
 		base int64
 		want int
@@ -1101,18 +1028,13 @@ func TestEditorFirstStepsGoAwayOnTheFirstNote(t *testing.T) {
 	if e.isEmpty() {
 		t.Error("a piece with a note in it still reports itself empty")
 	}
-	// A rest is not a note: clearing the only note brings the guidance
-	// back, because the staff is blank again.
+
 	press(t, e, ebiten.KeyDelete)
 	if !e.isEmpty() {
 		t.Error("clearing the only note did not leave the piece empty")
 	}
 }
 
-// --- the text view's file actions ------------------------------------------
-
-// setTextLine rewrites the first text-view line with the given prefix, so
-// a test can edit the piece the way the view exists to allow.
 func setTextLine(t *testing.T, e *Editor, prefix, replacement string) {
 	t.Helper()
 	if e.text == nil {
@@ -1129,10 +1051,7 @@ func setTextLine(t *testing.T, e *Editor, prefix, replacement string) {
 }
 
 func TestEditorTextViewSaveButtonSavesTheTextOnScreen(t *testing.T) {
-	// The Save icon used to serialise the DOCUMENT — the thing the
-	// on-screen text had diverged from — and say "saved" about edits that
-	// never reached the file. It has to take the path ctrl+S takes: apply
-	// the text, return to the notation, then save.
+
 	e := newTestEditor()
 	e.path = filepath.Join(t.TempDir(), "piece.gtab")
 	press(t, e, ebiten.KeyDigit5)
@@ -1155,8 +1074,7 @@ func TestEditorTextViewSaveButtonSavesTheTextOnScreen(t *testing.T) {
 }
 
 func TestEditorTextViewPracticeButtonPractisesTheTextOnScreen(t *testing.T) {
-	// The Practice icon used to see a clean document under an edited text
-	// pane, skip the save, and open the OLD file.
+
 	e := newTestEditor()
 	e.path = filepath.Join(t.TempDir(), "piece.gtab")
 	var practised []string
@@ -1198,9 +1116,7 @@ func TestEditorTextViewSaveButtonKeepsBrokenTextOpen(t *testing.T) {
 }
 
 func TestEditorOpensBrokenTextForRepair(t *testing.T) {
-	// A library piece that will not parse has no score to build a
-	// document from; NewEditorForText is its way into the text view,
-	// which is the only place it can be repaired.
+
 	src := "\\tempo nope\n0.6.1 |\n"
 	path := filepath.Join(t.TempDir(), "broken.gtab")
 	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
@@ -1220,8 +1136,6 @@ func TestEditorOpensBrokenTextForRepair(t *testing.T) {
 		t.Errorf("the pane holds %q, want the file's own text %q", got, src)
 	}
 
-	// Escape with nothing typed walks away instead of holding the user
-	// hostage to a parse error they did not make.
 	if err := e.escapeText(); err != errQuit {
 		t.Errorf("escape from the untouched broken text returned %v, want errQuit", err)
 	}
@@ -1229,9 +1143,6 @@ func TestEditorOpensBrokenTextForRepair(t *testing.T) {
 		t.Error("walking away must not pretend the text was applied")
 	}
 
-	// Typing something that still does not parse re-guards the exit —
-	// once. The first Escape is refused with the way out named; the
-	// second takes it.
 	e.text.insertRune('x')
 	e.text.reparse()
 	if err := e.escapeText(); err != nil {
@@ -1244,7 +1155,6 @@ func TestEditorOpensBrokenTextForRepair(t *testing.T) {
 		t.Errorf("the second escape returned %v, want errQuit", err)
 	}
 
-	// Fixing the text and saving writes the repair back to the same file.
 	e.text = newGtabPaneFromSource([]byte("\\tempo 100\n0.6.1 |\n"))
 	e.applyTextThen(func() { e.save() })
 	if e.text != nil {
@@ -1260,9 +1170,7 @@ func TestEditorOpensBrokenTextForRepair(t *testing.T) {
 }
 
 func TestEditorGreyedControlsInTextModeSayWhy(t *testing.T) {
-	// "type a fret on this string first" is the grid's answer; while the
-	// text is showing there is no fret cell on screen to type into, and the
-	// honest answer is the way back to the grid.
+
 	e := newTestEditor()
 	e.toggleText()
 	for _, g := range e.toolbarGroups() {
@@ -1281,12 +1189,8 @@ func TestEditorGreyedControlsInTextModeSayWhy(t *testing.T) {
 	}
 }
 
-// --- shift+P through the first-save dialog ----------------------------------
-
 func TestEditorShiftPCarriesThroughTheFirstSaveDialog(t *testing.T) {
-	// shift+P on a never-saved piece opens the save-as dialog. Naming the
-	// file has to finish with the practice the key promised — exactly the
-	// way a save asked for on the way out finishes the leaving.
+
 	e := newTestEditor()
 	var practised []string
 	e.SetPractice(func(p string) { practised = append(practised, p) })
@@ -1310,13 +1214,11 @@ func TestEditorShiftPCarriesThroughTheFirstSaveDialog(t *testing.T) {
 }
 
 func TestEditorDialogAnswerAppliesTheOnScreenText(t *testing.T) {
-	// The OS dialog floats while the editor stays interactive: the user
-	// can open the text view and type while it is up. The answer must
-	// save what the screen shows, not the document it diverged from.
+
 	e := newTestEditor()
 	e.SetSaveDialog(func(string) {})
 	press(t, e, ebiten.KeyDigit5)
-	e.save() // opens the dialog: no path yet
+	e.save()
 	if !e.dialogBusy {
 		t.Fatal("the save did not go through the dialog; the test proves nothing")
 	}
@@ -1332,8 +1234,6 @@ func TestEditorDialogAnswerAppliesTheOnScreenText(t *testing.T) {
 		t.Errorf("the file holds %q, want the on-screen text's tempo in it", b)
 	}
 
-	// And when the on-screen text will not parse, nothing is written and
-	// every intent hanging off the answer is dropped.
 	e2 := newTestEditor()
 	var practised []string
 	e2.SetPractice(func(p string) { practised = append(practised, p) })
@@ -1360,10 +1260,7 @@ func TestEditorDialogAnswerAppliesTheOnScreenText(t *testing.T) {
 }
 
 func TestEditorOneDialogAnswerCannotLeaveAndPractise(t *testing.T) {
-	// shift+P floats the dialog, Escape then arms the leave. The single
-	// answer must not pop the editor AND push practice — the user's last
-	// word was "leave". (Escape while the dialog floats is now inert, so
-	// the leave is armed here directly, the way a queued prompt would.)
+
 	e := newTestEditor()
 	var practised []string
 	e.SetPractice(func(p string) { practised = append(practised, p) })
@@ -1382,9 +1279,7 @@ func TestEditorOneDialogAnswerCannotLeaveAndPractise(t *testing.T) {
 }
 
 func TestEditorEscapeIsInertWhileTheDialogFloats(t *testing.T) {
-	// Escape popping the editor from UNDER the floating dialog would
-	// orphan the answer: the dialog's goroutine posts to a mailbox
-	// nothing drains.
+
 	e := newTestEditor()
 	e.SetSaveDialog(func(string) {})
 	e.save()
@@ -1403,7 +1298,7 @@ func TestEditorCancelledSaveDialogDropsThePracticeIntent(t *testing.T) {
 	e.SetSaveDialog(func(string) {})
 	press(t, e, ebiten.KeyDigit5)
 	e.saveAndPractice()
-	e.OfferSavePath("") // cancel
+	e.OfferSavePath("")
 	e.drainDialog()
 	if e.practicePending {
 		t.Error("cancelling the dialog left the practice intent pending")
@@ -1411,8 +1306,7 @@ func TestEditorCancelledSaveDialogDropsThePracticeIntent(t *testing.T) {
 	if len(practised) != 0 {
 		t.Fatalf("a cancelled save still opened practice: %v", practised)
 	}
-	// A later plain save must not surprise the user with the practice
-	// session they cancelled.
+
 	e.save()
 	e.OfferSavePath(filepath.Join(t.TempDir(), "riff"))
 	e.drainDialog()
@@ -1421,11 +1315,8 @@ func TestEditorCancelledSaveDialogDropsThePracticeIntent(t *testing.T) {
 	}
 }
 
-// --- the capo chip -----------------------------------------------------------
-
 func TestEditorCapoChipShowsAndSetsTheCapo(t *testing.T) {
-	// A piece with \capo 2 used to render exactly like one without, and
-	// putting a capo on meant knowing the text format's directive.
+
 	e := newTestEditor()
 	if got := editorButton(t, e, "capo").label; got != "capo" {
 		t.Errorf("with no capo the chip reads %q, want just the word", got)
@@ -1437,16 +1328,12 @@ func TestEditorCapoChipShowsAndSetsTheCapo(t *testing.T) {
 	if e.entry.buf != "0" {
 		t.Errorf("the entry is seeded with %q, want the capo in force (0)", e.entry.buf)
 	}
-	// Typing replaces the seed rather than appending to it: with max 2,
-	// "12" over a seeded "0" used to become "01" and silently commit
-	// capo 1. feed is the same seam updateEntry hands real keystrokes to.
+
 	e.entry.feed([]rune("12"))
 	if e.entry.buf != "12" {
 		t.Fatalf("typing 1 2 over the seed leaves %q, want 12", e.entry.buf)
 	}
-	// The title entry is the exception: a title IS edited by appending,
-	// and eating it on the first keystroke would punish exactly the
-	// person adding one word to a long name.
+
 	e.entry = nil
 	if e.report(e.doc.SetTitle("My Riff")) {
 		e.openEntry(edEntryTitle)
@@ -1482,12 +1369,8 @@ func TestEditorCapoEntryKeepsBadInput(t *testing.T) {
 	}
 }
 
-// --- the text view's legend and help ----------------------------------------
-
 func TestGtabLegendCoversEveryDirective(t *testing.T) {
-	// \instrument, \backing and \program are settable ONLY in the text
-	// view; a legend that omits them hides the one control the
-	// application offers for each.
+
 	for _, directive := range []string{
 		`\title`, `\tempo`, `\time`, `\tuning`, `\capo`, `\track`, `\instrument`, `\backing`, `\program`,
 	} {
@@ -1504,9 +1387,7 @@ func TestGtabLegendCoversEveryDirective(t *testing.T) {
 }
 
 func TestGtabLegendFitsItsColumn(t *testing.T) {
-	// Measured through gtLegendLayout, which is what drawGtabLegend draws
-	// from: the layout stops placing rows that would run off the column, so
-	// "every row placed" means "every row visible".
+
 	r := gtLegendRect()
 	lines := gtLegendLayout(r)
 	if len(lines) != len(gtLegend) {
@@ -1533,9 +1414,7 @@ func TestGtabLegendFitsItsColumn(t *testing.T) {
 }
 
 func TestEditorHelpDescribesTheViewOnScreen(t *testing.T) {
-	// The ? overlay used to show the grid's table over the text view —
-	// telling the user that digits type frets and h is a hammer-on, none
-	// of which is true while every key just types a character.
+
 	e := newTestEditor()
 	if title, _ := e.helpTable(); title != "EDITOR KEYS" {
 		t.Errorf("the grid's help is titled %q, want EDITOR KEYS", title)
@@ -1555,12 +1434,8 @@ func TestEditorHelpDescribesTheViewOnScreen(t *testing.T) {
 	}
 }
 
-// --- one truth for the fret range and for shift+P ----------------------------
-
 func TestEditorFretRangeComesFromTheFormat(t *testing.T) {
-	// "0-24" in the first steps and "0-30" in the help overlay were two
-	// guesses at the same truth; both now read textfmt.MaxFret and cannot
-	// drift apart, or away from the parser.
+
 	want := fmt.Sprintf("0-%d", textfmt.MaxFret)
 	e := newTestEditor()
 	found := false
@@ -1582,8 +1457,7 @@ func TestEditorFretRangeComesFromTheFormat(t *testing.T) {
 }
 
 func TestEditorShiftPIsDescribedAsPracticeEverywhere(t *testing.T) {
-	// The toolbar used to promise "play it back", which reads as an
-	// in-editor preview the editor deliberately does not have.
+
 	e := newTestEditor()
 	if got := editorButton(t, e, "practice").name; got != edPracticeWhat {
 		t.Errorf("the toolbar tooltip says %q, want %q", got, edPracticeWhat)

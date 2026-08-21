@@ -13,8 +13,6 @@ import (
 	"github.com/S95F/musicTutor/internal/synth"
 )
 
-// fakeBackend is an in-process audio.Backend whose stream the test drives
-// by hand: no hardware, no clock — every period is a direct handler call.
 type fakeBackend struct {
 	handler audio.DuplexHandler
 	cfg     audio.StreamConfig
@@ -43,12 +41,6 @@ func (s *fakeStream) Stop() error                { return nil }
 func (s *fakeStream) Close() error               { return nil }
 func (s *fakeStream) Config() audio.StreamConfig { return s.cfg }
 
-// TestLiveLoopScoresLoopback drives the ENTIRE live practice path with the
-// engine's own output looped back as the "guitar": fixture riff -> engine +
-// KS synth rendered in the duplex callback -> delayed mono loopback into
-// the capture side -> live.Session's detector/tracker -> scorer with the
-// delay as its calibrated offset. This is the -listen wiring minus the
-// window, and it must score high: the player is literally the synth.
 func TestLiveLoopScoresLoopback(t *testing.T) {
 	sc, err := textfmt.ParseFile(testdata(t, "fixture_riff.gtab"))
 	if err != nil {
@@ -57,7 +49,7 @@ func TestLiveLoopScoresLoopback(t *testing.T) {
 	const (
 		sr     = 48000
 		period = 480
-		delay  = 4800 // injected round-trip: 100 ms, like a real interface
+		delay  = 4800
 	)
 	eng := engine.New(sc, engine.Options{SampleRate: sr, Voices: synth.NewPluck})
 
@@ -68,10 +60,6 @@ func TestLiveLoopScoresLoopback(t *testing.T) {
 	})
 	eng.SetEventTap(scorer.ExpectNote)
 
-	// The advance lag must exceed the longest sustained note plus its
-	// decay: the tracker reports a note only when it closes, so the
-	// fixture's 2 s whole note arrives ~2 s "late" (same constant as the
-	// -listen wiring; see cmd/musictutor advanceLagFrames).
 	onNotes := func(closed []pitch.Note, current pitch.Note, sounding bool, consumed int64) {
 		scorer.Detected(closed)
 		scorer.Advance(consumed - 4*sr)
@@ -83,10 +71,7 @@ func TestLiveLoopScoresLoopback(t *testing.T) {
 		Engine:  eng,
 		Stream:  audio.StreamConfig{SampleRate: sr, PeriodFrames: period},
 		OnNotes: onNotes,
-		// Phase 4: strums carry the chroma that verifies chords. Wired
-		// exactly as cmd/musictutor does, so this test fails if that
-		// wiring is ever dropped — without it the bar-3 chord silently
-		// reverts to one hit and two misses.
+
 		OnStrums: func(sts []pitch.Strum) {
 			for _, st := range sts {
 				scorer.DetectedStrum(st)
@@ -100,19 +85,14 @@ func TestLiveLoopScoresLoopback(t *testing.T) {
 
 	eng.Play()
 
-	// Drive the callback: capture = the mixed output of `delay` frames
-	// ago (a software loopback). Pace against the analysis goroutine so
-	// the ring never overflows — dropped samples would corrupt scoring.
-	delayLine := make([]float32, delay+20*sr) // delay + whole piece + slack
+	delayLine := make([]float32, delay+20*sr)
 	in := make([]float32, period)
 	outL := make([]float32, period)
 	outR := make([]float32, period)
 	pos := 0
-	totalFrames := 20 * sr // 8 s piece + decay + advance-lag headroom
+	totalFrames := 20 * sr
 	for pos < totalFrames {
-		// Real backpressure, not blind sleeps: under full-suite CPU
-		// load the analysis goroutine can lag far behind a driver
-		// running flat out, and ring overflow would corrupt scoring.
+
 		for session.Backlog() > sr {
 			time.Sleep(time.Millisecond)
 		}
@@ -124,8 +104,6 @@ func TestLiveLoopScoresLoopback(t *testing.T) {
 		pos += period
 	}
 
-	// The analysis goroutine drains asynchronously; wait for all 16
-	// expected notes to be judged.
 	deadline := time.Now().Add(10 * time.Second)
 	var stats practice.Stats
 	for {
@@ -143,11 +121,7 @@ func TestLiveLoopScoresLoopback(t *testing.T) {
 	if total != 16 {
 		t.Fatalf("judged %d notes, want 16 (stats %+v)", total, stats)
 	}
-	// Phase 4 floor. Before chord verification the strummed chord cost
-	// three misses and capped this at 0.8125, so anything at or above
-	// 0.95 is unreachable without strums actually reaching the scorer
-	// through the live session — which is the point of asserting it here
-	// rather than only in the scorer's own round trip.
+
 	if acc := stats.Accuracy(); acc < 0.95 {
 		t.Errorf("accuracy = %.3f, want >= 0.95 (stats %+v)", acc, stats)
 	}

@@ -10,7 +10,6 @@ import (
 	"github.com/S95F/musicTutor/internal/score"
 )
 
-// findWarn returns the warnings containing sub.
 func findWarn(warns []string, sub string) []string {
 	var out []string
 	for _, w := range warns {
@@ -21,7 +20,6 @@ func findWarn(warns []string, sub string) []string {
 	return out
 }
 
-// eventsByKey indexes events by derived MIDI key.
 func eventsByKey(evs []score.NoteEvent) map[int]score.NoteEvent {
 	out := map[int]score.NoteEvent{}
 	for _, ev := range evs {
@@ -30,12 +28,6 @@ func eventsByKey(evs []score.NoteEvent) map[int]score.NoteEvent {
 	return out
 }
 
-// TestTransposeAppliedToSoundingPitch: <pitch> is the WRITTEN pitch;
-// <attributes><transpose> gives the shift to the pitch that SOUNDS. The
-// octave-change -1 case is the one that matters — it is what MuseScore,
-// Guitar Pro and Finale all emit for a guitar part notated in treble clef,
-// so ignoring the element imports every note of an ordinary guitar file an
-// octave sharp, with nothing to say so.
 func TestTransposeAppliedToSoundingPitch(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -47,22 +39,22 @@ func TestTransposeAppliedToSoundingPitch(t *testing.T) {
 		{
 			name:      "octave-change -1 (treble-clef guitar)",
 			transpose: `<transpose><diatonic>0</diatonic><chromatic>0</chromatic><octave-change>-1</octave-change></transpose>`,
-			step:      "E", octave: 3, wantKey: 40, // written E3 (52) sounds E2 (40)
+			step:      "E", octave: 3, wantKey: 40,
 		},
 		{
 			name:      "chromatic -2",
 			transpose: `<transpose><diatonic>-1</diatonic><chromatic>-2</chromatic></transpose>`,
-			step:      "E", octave: 3, wantKey: 50, // written E3 (52) sounds D3 (50)
+			step:      "E", octave: 3, wantKey: 50,
 		},
 		{
 			name:      "octave-change -1 plus double",
 			transpose: `<transpose><diatonic>0</diatonic><chromatic>0</chromatic><octave-change>-1</octave-change><double/></transpose>`,
-			step:      "E", octave: 4, wantKey: 40, // written E4 (64) sounds E2 (40)
+			step:      "E", octave: 4, wantKey: 40,
 		},
 		{
 			name:      "numbered for another staff does not apply",
 			transpose: `<transpose number="2"><diatonic>0</diatonic><chromatic>0</chromatic><octave-change>-1</octave-change></transpose>`,
-			step:      "E", octave: 3, wantKey: 52, // staff 2's shift must not leak onto staff 1
+			step:      "E", octave: 3, wantKey: 52,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -87,16 +79,9 @@ func TestTransposeAppliedToSoundingPitch(t *testing.T) {
 	}
 }
 
-// TestTransposedFixtureMatchesCanonical is the end-to-end form of the
-// same bug, on the shared cross-format fixture: the canonical riff
-// re-notated in treble clef — every written octave one higher, with
-// <transpose><octave-change>-1</octave-change> — is the SAME PIECE, and
-// must import to the identical event table, fingerings and metadata.
-// Before <transpose> was read it imported an octave sharp throughout.
 func TestTransposedFixtureMatchesCanonical(t *testing.T) {
 	data := readFixture(t, "fixture_riff.musicxml")
-	// <tuning-octave> is sounding pitch and must not move; the literal
-	// "<octave>" cannot match inside it.
+
 	up := regexp.MustCompile(`<octave>(\d)</octave>`).ReplaceAllStringFunc(string(data),
 		func(m string) string {
 			d := m[len("<octave>")]
@@ -118,9 +103,6 @@ func TestTransposedFixtureMatchesCanonical(t *testing.T) {
 		checkCanonical(t, s, warns)
 	})
 
-	// With the <technical> fingerings stripped, pitch is all there is: the
-	// written key drives the fretting heuristic and lands in the score
-	// unfiltered, so an unread <transpose> puts every event an octave out.
 	t.Run("inferred fingerings", func(t *testing.T) {
 		stripped := regexp.MustCompile(`(?s)<notations>.*?</notations>`).ReplaceAllString(transposed, "")
 		s, warns, err := Import([]byte(stripped))
@@ -143,13 +125,10 @@ func TestTransposedFixtureMatchesCanonical(t *testing.T) {
 	})
 }
 
-// TestTransposeWithAuthoredFingering: a transposed part whose notes also
-// carry <technical> must not report a written-vs-fingering mismatch — the
-// fingering derives the SOUNDING pitch, which is what transpose produces.
 func TestTransposeWithAuthoredFingering(t *testing.T) {
 	m := `<attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time>` +
 		`<transpose><diatonic>0</diatonic><chromatic>0</chromatic><octave-change>-1</octave-change></transpose></attributes>` +
-		note("E", 3, 1920, 6, 0, "") // written E3, sounds E2 = string 6 fret 0
+		note("E", 3, 1920, 6, 0, "")
 	s, warns, err := Import(wrap(m))
 	if err != nil {
 		t.Fatalf("Import: %v", err)
@@ -163,15 +142,10 @@ func TestTransposeWithAuthoredFingering(t *testing.T) {
 	}
 }
 
-// TestMixedChordKeepsEveryNote: a chord mixing an authored <technical>
-// note with an unfingered one must keep both. The unfingered A2's cheapest
-// position is the open 5th string, which the authored B2 already holds; the
-// merge used to truncate that collision to zero length and drop the note,
-// so the player saw an incomplete chord and was then scored on it.
 func TestMixedChordKeepsEveryNote(t *testing.T) {
 	m := attrs44div480 +
-		note("B", 2, 1920, 5, 2, "") + // authored: string 5 fret 2, key 47
-		note("A", 2, 1920, -1, 0, "<chord/>") // unfingered, key 45
+		note("B", 2, 1920, 5, 2, "") +
+		note("A", 2, 1920, -1, 0, "<chord/>")
 	s, warns, err := Import(wrap(m))
 	if err != nil {
 		t.Fatalf("Import: %v", err)
@@ -208,19 +182,11 @@ func TestMixedChordKeepsEveryNote(t *testing.T) {
 	}
 }
 
-// TestMixedChordInferredNoteJoinsAuthoredShape: the unfingered note of a
-// mixed chord must be fingered where the authored notes put the hand. The
-// chord here is authored at the 12th fret; key 67's cheapest position on
-// its own is string 1 fret 3, and the heuristic — handed only the strings
-// the authored notes left free, and nothing about the frets they hold —
-// chose exactly that: a chord spanning nine frets, never dropped but not
-// something anyone could play as written. With the authored positions
-// passed through as context it lands on string 3 fret 12, inside the shape.
 func TestMixedChordInferredNoteJoinsAuthoredShape(t *testing.T) {
 	m := attrs44div480 +
-		note("E", 3, 1920, 6, 12, "") + // authored: string 6 fret 12, key 52
-		note("A", 3, 1920, 5, 12, "<chord/>") + // authored: string 5 fret 12, key 57
-		note("G", 4, 1920, -1, 0, "<chord/>") // unfingered, key 67
+		note("E", 3, 1920, 6, 12, "") +
+		note("A", 3, 1920, 5, 12, "<chord/>") +
+		note("G", 4, 1920, -1, 0, "<chord/>")
 	s, warns, err := Import(wrap(m))
 	if err != nil {
 		t.Fatalf("Import: %v", err)
@@ -244,7 +210,7 @@ func TestMixedChordInferredNoteJoinsAuthoredShape(t *testing.T) {
 	minF, maxF := 0, 0
 	for _, ev := range evs {
 		if ev.Fret == 0 {
-			continue // open strings need no hand and do not count
+			continue
 		}
 		if minF == 0 || ev.Fret < minF {
 			minF = ev.Fret
@@ -259,29 +225,12 @@ func TestMixedChordInferredNoteJoinsAuthoredShape(t *testing.T) {
 	}
 }
 
-// TestMixedChordMatrix sweeps a mixed two-note chord over every authored
-// string, a range of authored frets, and a range of unfingered pitches,
-// and asserts the properties the mixed-chord path exists to hold:
-//
-//   - both notes survive the import, or a warning names the one that did
-//     not — no note is ever dropped in silence;
-//   - the inferred note never lands on the authored note's string, which
-//     is what the same-string truncation would turn into a lost note;
-//   - when some free string offers a fret within reach of the authored
-//     hand, the inferred note is fingered there rather than wherever the
-//     fretboard is cheapest.
-//
-// The last one is the placement quality the authored positions buy: over
-// this sweep's 811 chords it moves 225 into reach of the authored hand and
-// none out of it.
 func TestMixedChordMatrix(t *testing.T) {
 	steps := []struct {
 		name string
 		semi int
 	}{{"C", 0}, {"D", 2}, {"E", 4}, {"F", 5}, {"G", 7}, {"A", 9}, {"B", 11}}
-	// inReach reports whether any string other than aStr can sound key
-	// within MaxSpan of an authored note at aFret (an open string always
-	// can: it needs no hand).
+
 	inReach := func(aStr, aFret, key int) bool {
 		for s := 1; s <= len(score.StandardTuning); s++ {
 			fret := key - score.StandardTuning[s-1]
@@ -305,13 +254,13 @@ func TestMixedChordMatrix(t *testing.T) {
 				}
 			}
 			if aStep == "" || aOct < 0 || aOct > 9 {
-				continue // the authored pitch needs an accidental; skip it
+				continue
 			}
 			for _, s := range steps {
 				for oct := 2; oct <= 5; oct++ {
 					key := 12*(oct+1) + s.semi
 					if key == aKey {
-						continue // unison: the same-string rules own that case
+						continue
 					}
 					m := attrs44div480 +
 						note(aStep, aOct, 1920, aStr, aFret, "") +
@@ -349,13 +298,10 @@ func TestMixedChordMatrix(t *testing.T) {
 	}
 }
 
-// TestMixedChordUnplaceableNoteWarns: when the authored notes leave the
-// unfingered one genuinely nowhere to go, it is reported — never dropped
-// in silence.
 func TestMixedChordUnplaceableNoteWarns(t *testing.T) {
 	m := attrs44div480 +
-		note("E", 3, 1920, 6, 12, "") + // authored: string 6 fret 12
-		note("E", 2, 1920, -1, 0, "<chord/>") // key 40: only ever string 6 fret 0
+		note("E", 3, 1920, 6, 12, "") +
+		note("E", 2, 1920, -1, 0, "<chord/>")
 	s, warns, err := Import(wrap(m))
 	if err != nil {
 		t.Fatalf("Import: %v", err)
@@ -368,10 +314,6 @@ func TestMixedChordUnplaceableNoteWarns(t *testing.T) {
 	}
 }
 
-// TestPickupMeasureRightAligned: measure implicit="yes" is a pickup bar,
-// which ENDS on the barline instead of starting on it. Laying it out from
-// the start of a full bar puts every note in the piece on the wrong beat
-// relative to the barlines, and the count-in then disagrees with the music.
 func TestPickupMeasureRightAligned(t *testing.T) {
 	doc := wrapMeasures(
 		`<measure number="0" implicit="yes">`+attrs44div480+note("E", 2, 480, 6, 0, "")+`</measure>`,
@@ -392,8 +334,8 @@ func TestPickupMeasureRightAligned(t *testing.T) {
 		start, end int64
 		key        int
 	}{
-		{2880, 3840, 40}, // the pickup quarter ends exactly on the barline
-		{3840, 7680, 43}, // bar 1 beat 1 is where the notation says
+		{2880, 3840, 40},
+		{3840, 7680, 43},
 	}
 	if len(evs) != len(want) {
 		t.Fatalf("got %d events %v, want %d", len(evs), evs, len(want))
@@ -409,8 +351,6 @@ func TestPickupMeasureRightAligned(t *testing.T) {
 	}
 }
 
-// TestPickupMeasureTempoShifted: a tempo mark inside the pickup rides
-// along with the notes it belongs to.
 func TestPickupMeasureTempoShifted(t *testing.T) {
 	doc := wrapMeasures(
 		`<measure number="0" implicit="yes">`+attrs44div480+
@@ -432,15 +372,10 @@ func TestPickupMeasureTempoShifted(t *testing.T) {
 	}
 }
 
-// TestTiedUnisonKeepsBothChains: two notes of the SAME pitch sounding at
-// once on DIFFERENT strings — an open B against the 7th fret of the E
-// string is the everyday example — are separate tie chains. A tie table
-// keyed by pitch alone let one start overwrite the other, so one chain
-// never resolved and its note kept the wrong duration.
 func TestTiedUnisonKeepsBothChains(t *testing.T) {
 	m1 := attrs44div480 +
-		note("B", 3, 1920, 2, 0, `<tie type="start"/>`) + // open 2nd string, key 59
-		note("B", 3, 1920, 3, 4, `<chord/><tie type="start"/>`) // 3rd string fret 4, key 59
+		note("B", 3, 1920, 2, 0, `<tie type="start"/>`) +
+		note("B", 3, 1920, 3, 4, `<chord/><tie type="start"/>`)
 	m2 := note("B", 3, 1920, 2, 0, `<tie type="stop"/>`) +
 		note("B", 3, 1920, 3, 4, `<chord/><tie type="stop"/>`)
 	s, warns, err := Import(wrap(m1, m2))
@@ -470,9 +405,6 @@ func TestTiedUnisonKeepsBothChains(t *testing.T) {
 	}
 }
 
-// TestTieNumberDistinguishesChains: an unfingered unison has no authored
-// string to tell its two simultaneous chains apart, so <tie number> has to
-// — including when the stops arrive in the opposite order to the starts.
 func TestTieNumberDistinguishesChains(t *testing.T) {
 	m1 := attrs44div480 +
 		note("B", 3, 1920, -1, 0, `<tie type="start" number="1"/>`) +
@@ -497,9 +429,6 @@ func TestTieNumberDistinguishesChains(t *testing.T) {
 	}
 }
 
-// TestUnpitchedNotesWarnOnce: a percussion staff is hundreds of
-// <unpitched> notes. One warning each buries every warning that matters,
-// so they are counted and reported once per part.
 func TestUnpitchedNotesWarnOnce(t *testing.T) {
 	un := `<note><unpitched><display-step>C</display-step><display-octave>5</display-octave></unpitched>` +
 		`<duration>480</duration><voice>1</voice></note>`
@@ -520,9 +449,6 @@ func TestUnpitchedNotesWarnOnce(t *testing.T) {
 	}
 }
 
-// TestBackwardRepeatExpanded: a repeated section is played twice. Parsing
-// the repeat and discarding it imports a piece the score says is AAB as
-// AB — a third of the music missing, with nothing to say so.
 func TestBackwardRepeatExpanded(t *testing.T) {
 	doc := wrapMeasures(
 		`<measure number="1">`+attrs44div480+note("E", 2, 1920, 6, 0, "")+
@@ -552,8 +478,6 @@ func TestBackwardRepeatExpanded(t *testing.T) {
 	}
 }
 
-// TestVoltaEndingsExpanded: with 1st/2nd endings the second pass skips the
-// first ending and plays the second.
 func TestVoltaEndingsExpanded(t *testing.T) {
 	doc := wrapMeasures(
 		`<measure number="1"><barline location="left"><repeat direction="forward"/></barline>`+
@@ -572,7 +496,7 @@ func TestVoltaEndingsExpanded(t *testing.T) {
 	if len(findWarn(warns, "expanded")) == 0 {
 		t.Errorf("warnings = %v, want one reporting the expansion", warns)
 	}
-	// Written 1,2,3 plays as 1,2,1,3: E, G, E, A.
+
 	wantKeys := []int{40, 43, 40, 45}
 	evs := s.Events()
 	if len(evs) != len(wantKeys) {
@@ -588,7 +512,6 @@ func TestVoltaEndingsExpanded(t *testing.T) {
 	}
 }
 
-// TestRepeatTimesHonoured: <repeat times="3"> plays the section 3 times.
 func TestRepeatTimesHonoured(t *testing.T) {
 	doc := wrapMeasures(
 		`<measure number="1">` + attrs44div480 + note("E", 2, 1920, 6, 0, "") +
@@ -603,12 +526,6 @@ func TestRepeatTimesHonoured(t *testing.T) {
 	}
 }
 
-// TestRepeatRestoresMeterAcrossPasses: a meter change INSIDE a repeated
-// section must not leak into the section's second pass. Nothing in the
-// file restates the earlier signature at the repeat sign — a performer
-// simply returns to it — so the state at each measure has to be restored
-// rather than carried forward, and the meter map has to agree with it or
-// the bar layout and the notes part company.
 func TestRepeatRestoresMeterAcrossPasses(t *testing.T) {
 	doc := wrapMeasures(
 		`<measure number="1">`+attrs44div480+note("E", 2, 1920, 6, 0, "")+`</measure>`,
@@ -622,7 +539,7 @@ func TestRepeatRestoresMeterAcrossPasses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
-	// Written 1,2,3 plays as 1,2,3,2,3 under 4/4, 4/4, 2/4, 4/4, 2/4.
+
 	want := []struct {
 		start, end int64
 		key        int
@@ -657,9 +574,6 @@ func TestRepeatRestoresMeterAcrossPasses(t *testing.T) {
 	}
 }
 
-// TestJumpDirectionsWarn: D.C./D.S./coda jumps are not followed — their
-// semantics compose in ways no bounded reading of the markup settles — so
-// the user is told the import is not the whole piece.
 func TestJumpDirectionsWarn(t *testing.T) {
 	doc := wrapMeasures(
 		`<measure number="1">`+attrs44div480+note("E", 2, 1920, 6, 0, "")+`</measure>`,
@@ -678,15 +592,12 @@ func TestJumpDirectionsWarn(t *testing.T) {
 	}
 }
 
-// TestUnbalancedVoltaNotExpanded: malformed repeat markup falls back to
-// the written order WITH a warning rather than guessing — a half-right
-// expansion would silently teach the wrong music.
 func TestUnbalancedVoltaNotExpanded(t *testing.T) {
 	doc := wrapMeasures(
 		`<measure number="1"><barline location="left"><repeat direction="forward"/></barline>`+
 			attrs44div480+note("E", 2, 1920, 6, 0, "")+`</measure>`,
 		`<measure number="2"><barline location="left"><ending number="1" type="start"/></barline>`+
-			note("G", 2, 1920, 6, 3, "")+`</measure>`, // the volta never closes
+			note("G", 2, 1920, 6, 3, "")+`</measure>`,
 	)
 	s, warns, err := Import(doc)
 	if err != nil {
@@ -700,8 +611,6 @@ func TestUnbalancedVoltaNotExpanded(t *testing.T) {
 	}
 }
 
-// TestNoRepeatMarkupIsSilent: a plain final barline is not repeat markup,
-// so an ordinary file gains no warning from any of this.
 func TestNoRepeatMarkupIsSilent(t *testing.T) {
 	doc := wrapMeasures(
 		`<measure number="1">` + attrs44div480 + note("E", 2, 1920, 6, 0, "") +
@@ -716,28 +625,16 @@ func TestNoRepeatMarkupIsSilent(t *testing.T) {
 	}
 }
 
-// TestInferredFingeringPastMIDIRangeDropped: fretting places by pitch
-// arithmetic with no MIDI ceiling of its own, so an extreme (but
-// well-formed) capo can hand an inferred note a fingering sounding past
-// MIDI 127. Validate rejects such a score outright, so before the fix one
-// hostile note failed the whole import ("imported score failed
-// validation"); it must instead be dropped with a warning, like every
-// other unplayable note, and the sane notes must survive.
 func TestInferredFingeringPastMIDIRangeDropped(t *testing.T) {
-	// Round 2 note: the original vehicle was <capo>40</capo>, which the
-	// importer now clamps to "no capo" — so the extreme here is a LEGAL
-	// one-string tuning at G9 (127) under a +1 octave transposition. The
-	// heuristic happily frets the written G9 twelve frets up (sounding
-	// 139), and without the ceiling that one note fails the final
-	// Validate and kills the whole import.
+
 	m := `<attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time>` +
 		`<transpose><diatonic>0</diatonic><chromatic>0</chromatic><octave-change>1</octave-change></transpose>` +
 		`<staff-details><staff-lines>1</staff-lines>` +
 		`<staff-tuning line="1"><tuning-step>G</tuning-step><tuning-octave>9</tuning-octave></staff-tuning>` +
 		`</staff-details></attributes>` +
-		// Written G8 (115) sounds 127: fret 0, the one playable pitch.
+
 		`<note><pitch><step>G</step><octave>8</octave></pitch><duration>960</duration><voice>1</voice></note>` +
-		// Written G9 (127) sounds 139: fret 12 on the G9 string — past MIDI 127.
+
 		`<note><pitch><step>G</step><octave>9</octave></pitch><duration>960</duration><voice>1</voice></note>`
 	s, warns, err := Import(wrap(m))
 	if err != nil {
@@ -755,20 +652,13 @@ func TestInferredFingeringPastMIDIRangeDropped(t *testing.T) {
 	}
 }
 
-// TestStaffTuningOutsideMIDIFallsBack: a <staff-tuning> whose open string
-// sits outside MIDI 0-127 (a negative octave, or octave 9 past G9) used
-// to be installed verbatim into Track.Tuning — round 1 made the notes
-// derived from it drop, but the stored tuning itself stayed nonsense for
-// the UI and synth to use, and \tuning refuses to write it, so the piece
-// could never save. The staff is now rejected wholesale like gpimport's
-// parseTuning does, warned, and the current (standard) tuning kept.
 func TestStaffTuningOutsideMIDIFallsBack(t *testing.T) {
 	for _, tc := range []struct {
 		name, step string
 		octave     string
 	}{
-		{name: "below MIDI 0", step: "C", octave: "-3"},  // key -24
-		{name: "above MIDI 127", step: "B", octave: "9"}, // key 131
+		{name: "below MIDI 0", step: "C", octave: "-3"},
+		{name: "above MIDI 127", step: "B", octave: "9"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := `<attributes><divisions>480</divisions><time><beats>4</beats><beat-type>4</beat-type></time>` +
@@ -795,12 +685,6 @@ func TestStaffTuningOutsideMIDIFallsBack(t *testing.T) {
 	}
 }
 
-// TestOverflowingMeterNumeratorRejected: a <beats> value large enough
-// that numerator*beat-ticks wraps int64 used to slide the measure start
-// to a negative tick and slip past the MaxTicks extent check — the import
-// "succeeded" with a track of zero bars and zero events and no
-// explanation. It must error like any other measure past the score
-// limit (TestHostileMeterScoreTooLong is the non-overflowing cousin).
 func TestOverflowingMeterNumeratorRejected(t *testing.T) {
 	m1 := `<attributes><divisions>480</divisions><time><beats>18014398509481984</beats><beat-type>4</beat-type></time></attributes>`
 	m2 := `<note><pitch><step>E</step><octave>2</octave></pitch><duration>1920</duration><voice>1</voice></note>`

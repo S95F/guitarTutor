@@ -52,9 +52,6 @@ func TestNewSoundFontFactoryNilSafety(t *testing.T) {
 	}
 }
 
-// TestSoundFontVoice exercises the real synthesis path. It needs an actual
-// SoundFont, which the repository does not ship and tests never download:
-// drop any General MIDI .sf2 at testdata/test.sf2 to run it.
 func TestSoundFontVoice(t *testing.T) {
 	const path = "testdata/test.sf2"
 	if _, err := os.Stat(path); err != nil {
@@ -70,9 +67,6 @@ func TestSoundFontVoice(t *testing.T) {
 	}
 	v := factory(48000, 25)
 
-	// Additive contract: with nothing sounding, Render must leave a
-	// prefilled mix untouched (meltysynth itself overwrites its buffers;
-	// the wrapper must not).
 	left := make([]float32, 512)
 	right := make([]float32, 512)
 	for i := range left {
@@ -85,18 +79,15 @@ func TestSoundFontVoice(t *testing.T) {
 		}
 	}
 
-	// A note produces signal.
 	v.NoteOn(40, 0.8)
 	l2, r2 := renderFrames(v, 4800, 480)
 	if peak(l2) == 0 && peak(r2) == 0 {
 		t.Fatal("no signal after NoteOn")
 	}
 
-	// AllNotesOff kills voices immediately; allow the synthesizer's
-	// current 64-frame block to drain, then require near-silence.
 	v.AllNotesOff()
 	l3, r3 := renderFrames(v, 4800, 480)
-	const floor = 0.001 // -60 dBFS
+	const floor = 0.001
 	if p := peak(l3[128:]); p > floor {
 		t.Errorf("left peak %g after AllNotesOff, want <= %g", p, floor)
 	}
@@ -105,10 +96,6 @@ func TestSoundFontVoice(t *testing.T) {
 	}
 }
 
-// buildTinySF2 assembles the smallest SoundFont meltysynth will parse — one
-// preset over one instrument over one 64-sample mono sample — so the slot
-// bookkeeping of soundFontVoice can be tested without shipping a real .sf2
-// (which the repository deliberately does not; see TestSoundFontVoice).
 func buildTinySF2() []byte {
 	le := binary.LittleEndian
 	u16 := func(b *bytes.Buffer, v uint16) { binary.Write(b, le, v) }
@@ -124,31 +111,27 @@ func buildTinySF2() []byte {
 		b.Write(body)
 	}
 
-	// INFO list: version and a bank name.
 	info := &bytes.Buffer{}
 	info.WriteString("INFO")
 	chunk(info, "ifil", []byte{2, 0, 1, 0})
 	chunk(info, "INAM", []byte("tiny\x00\x00"))
 
-	// sdta list: 64 zero samples (the state tests never render).
 	sdta := &bytes.Buffer{}
 	sdta.WriteString("sdta")
 	chunk(sdta, "smpl", make([]byte, 128))
 
-	// pdta list: one preset -> one instrument -> one sample, each list
-	// closed by its terminator record.
 	phdr := &bytes.Buffer{}
 	name20(phdr, "P")
-	u16(phdr, 0) // patch
-	u16(phdr, 0) // bank
-	u16(phdr, 0) // zone start
+	u16(phdr, 0)
+	u16(phdr, 0)
+	u16(phdr, 0)
 	u32(phdr, 0)
 	u32(phdr, 0)
 	u32(phdr, 0)
 	name20(phdr, "EOP")
 	u16(phdr, 0)
 	u16(phdr, 0)
-	u16(phdr, 1) // terminator zone start = 1: preset 0 has one zone
+	u16(phdr, 1)
 	u32(phdr, 0)
 	u32(phdr, 0)
 	u32(phdr, 0)
@@ -165,7 +148,7 @@ func buildTinySF2() []byte {
 		b := &bytes.Buffer{}
 		u16(b, genType)
 		u16(b, value)
-		u16(b, 0) // terminator
+		u16(b, 0)
 		u16(b, 0)
 		return b.Bytes()
 	}
@@ -178,27 +161,27 @@ func buildTinySF2() []byte {
 
 	shdr := &bytes.Buffer{}
 	name20(shdr, "S")
-	u32(shdr, 0)     // start
-	u32(shdr, 48)    // end
-	u32(shdr, 8)     // loop start
-	u32(shdr, 40)    // loop end
-	u32(shdr, 48000) // sample rate
+	u32(shdr, 0)
+	u32(shdr, 48)
+	u32(shdr, 8)
+	u32(shdr, 40)
+	u32(shdr, 48000)
 	shdr.WriteByte(60)
 	shdr.WriteByte(0)
 	u16(shdr, 0)
-	u16(shdr, 1)                 // mono
-	shdr.Write(make([]byte, 46)) // terminator record
+	u16(shdr, 1)
+	shdr.Write(make([]byte, 46))
 
 	pdta := &bytes.Buffer{}
 	pdta.WriteString("pdta")
 	chunk(pdta, "phdr", phdr.Bytes())
 	chunk(pdta, "pbag", bag(0, 1))
 	chunk(pdta, "pmod", make([]byte, 10))
-	chunk(pdta, "pgen", gens(41, 0)) // instrument generator -> instrument 0
+	chunk(pdta, "pgen", gens(41, 0))
 	chunk(pdta, "inst", inst.Bytes())
 	chunk(pdta, "ibag", bag(0, 1))
 	chunk(pdta, "imod", make([]byte, 10))
-	chunk(pdta, "igen", gens(53, 0)) // sampleID generator -> sample 0
+	chunk(pdta, "igen", gens(53, 0))
 	chunk(pdta, "shdr", shdr.Bytes())
 
 	body := &bytes.Buffer{}
@@ -212,7 +195,6 @@ func buildTinySF2() []byte {
 	return out.Bytes()
 }
 
-// tinySoundFontVoice builds a soundFontVoice over buildTinySF2.
 func tinySoundFontVoice(t *testing.T) *soundFontVoice {
 	t.Helper()
 	sf, err := meltysynth.NewSoundFont(bytes.NewReader(buildTinySF2()))
@@ -226,7 +208,6 @@ func tinySoundFontVoice(t *testing.T) *soundFontVoice {
 	return v
 }
 
-// heldSlot returns the single held slot, failing the test otherwise.
 func heldSlot(t *testing.T, v *soundFontVoice) *sfSlot {
 	t.Helper()
 	var held *sfSlot
@@ -244,12 +225,6 @@ func heldSlot(t *testing.T, v *soundFontVoice) *sfSlot {
 	return held
 }
 
-// TestSoundFontChainedLegatoKeepsPitch: a chained slur or legato run —
-// every note continued from the one before, the normal shape of a wind
-// slur and of a hammer-on lick — must leave the channel sounding the LAST
-// note's pitch. The channel's pitch is the key it was struck at plus the
-// bend applied to it, so the two must add up to the logical key after
-// every link of the chain, not only the first.
 func TestSoundFontChainedLegatoKeepsPitch(t *testing.T) {
 	steps := []struct {
 		name string
@@ -275,10 +250,6 @@ func TestSoundFontChainedLegatoKeepsPitch(t *testing.T) {
 	}
 }
 
-// TestSoundFontChainedSlideArrives: the same property for a slide — the
-// glide's destination is where the channel comes to rest, so struck key
-// plus destination bend must equal the note the score wrote, on the second
-// link of a chain as much as on the first.
 func TestSoundFontChainedSlideArrives(t *testing.T) {
 	v := tinySoundFontVoice(t)
 	v.NoteOn(60, 0.9)
@@ -291,11 +262,6 @@ func TestSoundFontChainedSlideArrives(t *testing.T) {
 	}
 }
 
-// TestSoundFontNoteOnSpecReport pins the ContinuationReporter contract the
-// engine's release bookkeeping depends on: true exactly when the From
-// note's channel was taken over, false for a plain attack and for the
-// bend-range refusal — the case where the engine must release the origin
-// itself or nothing ever will.
 func TestSoundFontNoteOnSpecReport(t *testing.T) {
 	v := tinySoundFontVoice(t)
 	if v.NoteOnSpecReport(NoteSpec{Key: 60, Velocity: 0.9}) {
@@ -312,20 +278,11 @@ func TestSoundFontNoteOnSpecReport(t *testing.T) {
 	}
 }
 
-// TestSoundFontLegatoBeyondBendRangeReattacks: a chain that walks further
-// from the struck key than the channel's bend range can reach must fall
-// back to a fresh attack — the documented policy (continuation): attacking
-// afresh is always better than sounding the wrong pitch. Before the range
-// was measured from the struck key it was measured from the previous
-// note, so a long chain drifted out of reach and the bend silently
-// clamped nothing — the note just sounded wrong.
 func TestSoundFontLegatoBeyondBendRangeReattacks(t *testing.T) {
 	v := tinySoundFontVoice(t)
 	v.NoteOn(60, 0.9)
 	v.NoteOnSpec(NoteSpec{Key: 70, Velocity: 0.9, Attack: AttackLegato, From: 60})
-	// 60 -> 70 -> 80: the second link is 10 semitones from its
-	// predecessor but 20 from the struck key — out of the channel's
-	// 12-semitone reach, so it must be a fresh attack, in tune.
+
 	v.NoteOnSpec(NoteSpec{Key: 80, Velocity: 0.9, Attack: AttackLegato, From: 70})
 	var sounding *sfSlot
 	for i := range v.slots {

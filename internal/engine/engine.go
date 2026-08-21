@@ -1,31 +1,3 @@
-// Package engine is musicTutor's frame-counted practice sequencer: the one
-// clock everything else hangs off (ROADMAP.md "Guiding principles").
-//
-// The engine owns a playback position in ticks and advances it by rendered
-// audio frames, converting frames to ticks through the score's tempo map
-// scaled by the practice tempo scale. All sounding sources — track voices,
-// the metronome click, and the optional backing track (see backing.go) —
-// are mixed here, scheduled by frame count. Wall clock and time.Ticker are
-// never consulted.
-//
-// Contract (the parts that are correctness features, not preferences):
-//
-//   - Rendering advances tick position segment-wise: a render block is split
-//     at every boundary that changes the frames-per-tick conversion or the
-//     event stream — tempo-map changes, the loop end point, and the score
-//     end — so loops are sample-accurate and tempo changes land exactly.
-//   - When the position reaches the loop end (B), the remaining frames of
-//     the block continue from the loop start (A) in the same Render call;
-//     ringing notes get AllNotesOff at the boundary. Gapless is the default;
-//     an optional count-in plays between passes.
-//   - Read (io.Reader for oto) and all control methods are safe to call
-//     concurrently: controls take a short mutex; Render never blocks on
-//     anything else and never allocates in steady state.
-//   - UI state queries (PosTick, etc.) are cheap snapshots.
-//   - Wait mode (SetWaitMode; see wait.go) halts the position exactly at
-//     the frame a user-track NoteOn would fire and holds those events
-//     unfired until ConfirmWait releases them on the release frame; frames
-//     keep flowing while waiting (voice tails ring, metronome silent).
 package engine
 
 import (
@@ -39,136 +11,102 @@ import (
 	"github.com/S95F/musicTutor/internal/synth"
 )
 
-// Options configures a new Engine.
 type Options struct {
-	// SampleRate in Hz. 0 means 48000 (the project-wide standard).
 	SampleRate int
-	// Voices creates one Voice per track. Nil panics: the engine does
-	// not choose synthesis.
+
 	Voices synth.Factory
-	// Metronome enables the click at start.
+
 	Metronome bool
-	// CountInBeats is the number of click beats before playback starts
-	// when Play is called from a stopped/paused position. 0 disables.
+
 	CountInBeats int
-	// CountInEveryPass repeats the count-in between loop passes
-	// (default false: loop passes are gapless).
+
 	CountInEveryPass bool
 }
 
-// RampConfig is the progressive speed trainer: after each completed loop
-// pass, the tempo scale increases by Increment until Target.
 type RampConfig struct {
 	Enabled   bool
-	Increment float64 // added to the tempo scale per pass, e.g. 0.05
-	Target    float64 // stop raising at this scale, e.g. 1.0
+	Increment float64
+	Target    float64
 }
 
-// Tempo scale bounds and the default sample rate.
 const (
 	defaultSampleRate = 48000
 	minTempoScale     = 0.25
 	maxTempoScale     = 2.0
 )
 
-// readBlockFrames is the internal block size Read renders through.
 const readBlockFrames = 2048
 
-// Engine sequences one Score. Create with New; drive audio by Read
-// (io.Reader yielding interleaved stereo float32 little-endian, the format
-// oto is configured for) or RenderFrames for offline use.
 type Engine struct {
-	mu sync.Mutex // guards everything below except the atomic snapshots
+	mu sync.Mutex
 
 	sc               *score.Score
 	sampleRate       int
 	countInBeats     int
 	countInEveryPass bool
 
-	events   []score.NoteEvent // flattened score, sorted by Start
-	scoreEnd int64             // tick just past the last bar
+	events   []score.NoteEvent
+	scoreEnd int64
 
-	voices []synth.Voice // one per track
-	// artic is the same voice again where it can sound a NoteSpec, and nil
-	// where it cannot. Which one a voice is never changes, so the question
-	// is asked once here rather than on every note.
+	voices []synth.Voice
+
 	artic []synth.Articulator
-	// articRep is the voice once more where it can also REPORT a refused
-	// continuation (synth.ContinuationReporter); nil elsewhere. soundEvent
-	// needs the answer to know whether the From note's suppressed release
-	// is still owed.
-	articRep  []synth.ContinuationReporter
-	muted     []bool // one per track
-	userTrack []bool // one per track: Role == score.RoleUser
 
-	// Transport and control state.
+	articRep  []synth.ContinuationReporter
+	muted     []bool
+	userTrack []bool
+
 	playing bool
-	pos     float64 // position in ticks; fractional between frames
-	scale   float64 // practice tempo scale
+	pos     float64
+	scale   float64
 	ramp    RampConfig
 
 	loopA, loopB int64
 	loopOn       bool
-	passes       int // completed loop passes since SetLoop
+	passes       int
 
 	metronome bool
 
-	// Wait-mode state (see wait.go). While waiting the position is frozen
-	// at the wait point's frame with its events unfired; waitReleased marks
-	// a confirmed wait whose held events fire at the next action frame.
 	waitMode     bool
 	waiting      bool
 	waitReleased bool
-	waitTick     int64 // tick of the wait point; valid while waiting
-	waitTrack    int   // track waits engage on; -1 = every user track
-	waitRelTrack int   // track the CURRENT release is owed to; -1 = none
+	waitTick     int64
+	waitTrack    int
+	waitRelTrack int
 
-	// Scheduling state.
-	nextEvent int          // index into events of the next unfired event
-	active    []activeNote // sounding notes awaiting their NoteOff
-	absFrame  int64        // output frames produced since New (the stream clock)
+	nextEvent int
+	active    []activeNote
+	absFrame  int64
 	tap       func(ev score.NoteEvent, outFrame int64)
 
-	// Segment state: one span of constant frames-per-tick, anchored at an
-	// exact tick so event frames are independent of block partitioning.
-	// See render.go.
 	segValid  bool
-	anchor    float64 // tick at segment start
-	fpt       float64 // frames per tick within the segment
-	segFrame  int     // frames rendered since anchor
-	segEnd    int     // segment length in frames
-	boundary  int64   // tick the segment ends at
+	anchor    float64
+	fpt       float64
+	segFrame  int
+	segEnd    int
+	boundary  int64
 	bKind     boundaryKind
-	nextBeat  int64 // tick of the next metronome beat
-	beatLen   int64 // ticks per beat under the segment's meter
-	barLen    int64 // ticks per bar under the segment's meter
-	meterBase int64 // tick the segment's meter took effect
+	nextBeat  int64
+	beatLen   int64
+	barLen    int64
+	meterBase int64
 
-	// Backing-track state (see backing.go): decoded stereo audio at the
-	// engine sample rate, pinned to score time. backBase is the fractional
-	// file sample position at the current segment's anchor; within a
-	// segment the file position advances by scale samples per frame.
 	backL, backR []float32
-	backOffset   float64 // seconds added to score time to get file time
+	backOffset   float64
 	backGain     float64
 	backBase     float64
 
-	// Count-in state. Active while ciBeatsLeft > 0; position frozen.
 	ciBeatsLeft int
-	ciFPB       int // frames per count-in beat
-	ciFrameIn   int // frames into the current count-in beat
+	ciFPB       int
+	ciFrameIn   int
 
-	// Prerendered metronome bursts and the currently sounding clicks.
 	accentBuf, beatBuf []float32
 	clicks             [4]clickState
 
-	// Read conversion buffers (single reader, as io.Reader implies).
 	readL, readR   []float32
-	rem            [8]byte // partially consumed frame
+	rem            [8]byte
 	remOff, remLen int
 
-	// Published snapshots, refreshed once per render block and on every
-	// control change; read lock-free by the state query methods.
 	aPos     atomic.Int64
 	aPlaying atomic.Bool
 	aPasses  atomic.Int64
@@ -180,31 +118,20 @@ type Engine struct {
 	aWaitGen atomic.Uint64
 	aDiscont atomic.Int64
 
-	// The Pos snapshot (see PlayPos). Its fields only mean anything read
-	// together — a tick paired with the rate and the frame it was true at
-	// — which a bag of independent atomics cannot promise: a reader can
-	// land between two of publish's stores and pair a new tick with the
-	// old rate. aPosSeq is a sequence lock around the group: publish makes
-	// it odd before writing and even after, so a reader that sees the same
-	// even value either side of its own reads knows the set is consistent.
-	// Only publish writes, and only under mu, so writers never race each
-	// other and the lock needs no writer-side mutual exclusion of its own.
 	aPosSeq  atomic.Uint64
-	aPosTick atomic.Uint64 // float64 bits
-	aPosRate atomic.Uint64 // float64 bits
+	aPosTick atomic.Uint64
+	aPosRate atomic.Uint64
 	aPosAdv  atomic.Bool
 	aPosDisc atomic.Int64
 }
 
-// An activeNote is a sounding note awaiting its NoteOff at end.
 type activeNote struct {
 	track int
 	key   int
-	str   int   // the string it is sounding on; 0 when the score names none
-	end   int64 // tick, exclusive
+	str   int
+	end   int64
 }
 
-// New builds an engine for sc. The score must already Validate.
 func New(sc *score.Score, opts Options) *Engine {
 	if opts.Voices == nil {
 		panic("engine: Options.Voices is nil")
@@ -246,9 +173,6 @@ func New(sc *score.Score, opts Options) *Engine {
 	return e
 }
 
-// --- Transport ---
-
-// Play starts or resumes playback (with count-in, if configured).
 func (e *Engine) Play() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -262,10 +186,6 @@ func (e *Engine) Play() {
 	e.publish()
 }
 
-// Pause stops advancing; position is kept. Ringing notes are silenced.
-// An active wait is cleared without firing its held notes; Play re-arms
-// wait mode at the next user note (the same one, if the position has not
-// moved).
 func (e *Engine) Pause() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -280,12 +200,8 @@ func (e *Engine) Pause() {
 	e.publish()
 }
 
-// Playing reports whether the transport is running (count-in included).
 func (e *Engine) Playing() bool { return e.aPlaying.Load() }
 
-// SeekTick moves the position. Ringing notes are silenced. An active wait
-// is cleared without firing its held notes; wait mode re-arms at the next
-// user note at or after the seek target.
 func (e *Engine) SeekTick(tick int64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -304,12 +220,6 @@ func (e *Engine) SeekTick(tick int64) {
 	e.publish()
 }
 
-// SetLoop sets loop points [a, b) in ticks and enables looping.
-// Callers pass bar boundaries; the engine loops whatever it is given,
-// clamped to the score (a at least 0, b at most the score end). If the
-// clamped span is empty, looping is disabled. An active wait is cleared
-// without firing its held notes (the loop change moves the goalposts);
-// wait mode re-arms at the next user note.
 func (e *Engine) SetLoop(a, b int64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -334,7 +244,6 @@ func (e *Engine) SetLoop(a, b int64) {
 	e.publish()
 }
 
-// ClearLoop disables looping. Like SetLoop, an active wait is cleared.
 func (e *Engine) ClearLoop() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -345,40 +254,16 @@ func (e *Engine) ClearLoop() {
 	e.publish()
 }
 
-// markDiscontinuity stamps the stream clock as the moment the position or
-// the loop bounds jumped under the player. Caller holds mu.
 func (e *Engine) markDiscontinuity() { e.aDiscont.Store(e.absFrame) }
 
-// DiscontinuityFrame returns the output-clock frame of the most recent
-// position discontinuity: a seek, or a loop change. It is 0 until one
-// happens.
-//
-// A loop WRAP is deliberately not one. Wrapping is the practice loop
-// working as intended — the notes near the loop end were heard and are
-// still being answered — whereas a seek or a loop edit truncates the
-// player's chance to answer whatever just sounded. Wiring that judges
-// timing uses this to tell those apart: the practice Scorer abandons
-// expectations stamped before this frame, so a UI action cannot age them
-// into misses (see Scorer.AbandonBefore). Comparing frames rather than
-// counting events makes the split exact — everything the tap stamped
-// before the jump is stale, everything after it is live — which a bare
-// counter cannot express, since the tap keeps running between the seek
-// and the analysis goroutine noticing it.
-//
-// Lock-free snapshot, safe from any goroutine.
 func (e *Engine) DiscontinuityFrame() int64 { return e.aDiscont.Load() }
 
-// Loop returns the loop points and whether looping is enabled.
 func (e *Engine) Loop() (a, b int64, on bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.loopA, e.loopB, e.loopOn
 }
 
-// SetTempoScale sets the practice speed multiplier (1.0 = as written,
-// 0.5 = half speed). Clamped to [0.25, 2.0]. Takes effect at the next
-// render block; pitch is unaffected (synthesis is re-rendered, not
-// resampled).
 func (e *Engine) SetTempoScale(s float64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -386,22 +271,18 @@ func (e *Engine) SetTempoScale(s float64) {
 	e.publish()
 }
 
-// TempoScale returns the current practice speed multiplier.
 func (e *Engine) TempoScale() float64 {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.scale
 }
 
-// SetRamp configures the progressive speed trainer.
 func (e *Engine) SetRamp(r RampConfig) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.ramp = r
 }
 
-// SetMetronome toggles the click. Enabling it mid-play takes effect at the
-// next beat boundary at or after the current position.
 func (e *Engine) SetMetronome(on bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -409,13 +290,10 @@ func (e *Engine) SetMetronome(on bool) {
 		return
 	}
 	e.metronome = on
-	// nextBeat only advances while the click is on, so the current
-	// segment's beat schedule may be stale; rebuild it so every beat
-	// since the segment anchor is not fired at once.
+
 	e.segValid = false
 }
 
-// SetTrackMuted mutes or unmutes a track by index.
 func (e *Engine) SetTrackMuted(track int, muted bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -437,27 +315,14 @@ func (e *Engine) SetTrackMuted(track int, muted bool) {
 	e.muted[track] = muted
 }
 
-// SetEventTap registers fn to be called for every scheduled NoteOn as it
-// fires, with the exact output frame it sounds on. The tap is the seam the
-// Phase 2 scorer hangs off: expected notes arrive frame-stamped on the
-// same clock the duplex stream runs on, ready to match against detected
-// input notes (plus the calibrated latency offset).
-//
-// fn runs on the render goroutine with the engine lock held: it must not
-// call back into the engine, block, or allocate — copy the event into a
-// preallocated ring and get out. Events fire for muted tracks too (the tap
-// reports the musical schedule, not what is audible). Pass nil to remove.
 func (e *Engine) SetEventTap(fn func(ev score.NoteEvent, outFrame int64)) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.tap = fn
 }
 
-// TotalFrames returns the output frames produced since New — the stream
-// clock, advancing even while paused (silence still fills the stream).
 func (e *Engine) TotalFrames() int64 { return e.aFrames.Load() }
 
-// TrackMuted reports a track's mute state.
 func (e *Engine) TrackMuted(track int) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -467,47 +332,23 @@ func (e *Engine) TrackMuted(track int) bool {
 	return e.muted[track]
 }
 
-// --- State snapshots (cheap; safe from any goroutine) ---
-
-// PosTick returns the current playback position in ticks.
 func (e *Engine) PosTick() int64 { return e.aPos.Load() }
 
-// A PlayPos is one consistent snapshot of where the transport is and how
-// fast it is moving. PosTick answers only the first half, and answers it in
-// whole ticks refreshed once per render block, which is a staircase: a
-// caller that draws it directly steps forward once per block and stands
-// still in between. The rate and the frame stamp here are what let a caller
-// carry the position smoothly between publishes and still be anchored to
-// the engine's clock rather than keeping a private one.
 type PlayPos struct {
-	// Tick is the fractional playback position at the moment of publish.
-	// PosTick is this floored.
 	Tick float64
-	// TicksPerSecond is the rate the position advances at here: the score
-	// tempo at Tick times the practice scale. It is reported even while
-	// frozen, so a caller knows the speed a resume will pick up at.
+
 	TicksPerSecond float64
-	// Advancing reports whether the position is actually moving. It is
-	// false while paused or stopped, during a count-in, and while halted
-	// at a wait point — every case where frames keep flowing but the
-	// position deliberately does not.
+
 	Advancing bool
-	// Discontinuity is DiscontinuityFrame at publish time: the frame the
-	// position last jumped under the player. A caller that interpolates
-	// uses it to tell a jump it must follow instantly from ordinary
-	// motion it should glide through.
+
 	Discontinuity int64
 }
 
-// Pos returns the transport position, its rate, and the output frame both
-// were true at, as one consistent set. Lock-free snapshot, safe from any
-// goroutine — including, unlike the methods that take mu, from a caller
-// polling every display frame while the render thread is inside a block.
 func (e *Engine) Pos() PlayPos {
 	for {
 		seq := e.aPosSeq.Load()
 		if seq&1 != 0 {
-			// A publish is mid-write; nothing readable until it finishes.
+
 			runtime.Gosched()
 			continue
 		}
@@ -520,29 +361,19 @@ func (e *Engine) Pos() PlayPos {
 		if e.aPosSeq.Load() == seq {
 			return p
 		}
-		// A publish landed inside the read: the fields may be from either
-		// side of it. Take them again.
+
 		runtime.Gosched()
 	}
 }
 
-// PassCount returns completed loop passes since the loop was set.
 func (e *Engine) PassCount() int { return int(e.aPasses.Load()) }
 
-// EffectiveBPM returns the sounding tempo at the current position
-// (score tempo × tempo scale).
 func (e *Engine) EffectiveBPM() float64 { return math.Float64frombits(e.aBPM.Load()) }
 
-// CountingIn reports whether a count-in is sounding, and if so how many
-// click beats remain.
 func (e *Engine) CountingIn() (bool, int) {
 	return e.aCiOn.Load(), int(e.aCiLeft.Load())
 }
 
-// --- Audio ---
-
-// Read implements io.Reader for oto: interleaved stereo float32 LE.
-// It never returns an error and always fills p (silence when paused).
 func (e *Engine) Read(p []byte) (int, error) {
 	w := 0
 	for w < len(p) {
@@ -555,8 +386,7 @@ func (e *Engine) Read(p []byte) (int, error) {
 		e.remOff, e.remLen = 0, 0
 		frames := (len(p) - w) / 8
 		if frames == 0 {
-			// Less than one frame of space left: render one frame
-			// into the remainder buffer and copy what fits.
+
 			e.RenderFrames(e.readL[:1], e.readR[:1])
 			binary.LittleEndian.PutUint32(e.rem[0:], math.Float32bits(e.readL[0]))
 			binary.LittleEndian.PutUint32(e.rem[4:], math.Float32bits(e.readR[0]))
@@ -576,9 +406,6 @@ func (e *Engine) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// RenderFrames renders exactly len(left) frames into the given buffers
-// (zeroing them first). Offline path: used by `musictutor render` and by
-// tests. Same code path as Read.
 func (e *Engine) RenderFrames(left, right []float32) {
 	clear(left)
 	clear(right)

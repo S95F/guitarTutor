@@ -1,7 +1,5 @@
 package midiimport
 
-// Round-2 sweep regression: imported labels always save.
-
 import (
 	"strings"
 	"testing"
@@ -13,11 +11,6 @@ import (
 	"github.com/S95F/musicTutor/internal/score/textfmt"
 )
 
-// TestImportedLabelsAlwaysSave: SMF track-name text is arbitrary bytes.
-// A conductor-track name (the piece title) or a track name holding "//"
-// or a line break flowed verbatim into the score, and textfmt.Format
-// refuses both — an import that plays but can never be saved. Labels are
-// now cleaned with a warning.
 func TestImportedLabelsAlwaysSave(t *testing.T) {
 	var cond smf.Track
 	cond.Add(0, smf.MetaTrackSequenceName("Song // Take 2"))
@@ -57,17 +50,8 @@ func TestImportedLabelsAlwaysSave(t *testing.T) {
 	}
 }
 
-// TestHostileMetaLengthRejected: gomidi reads a meta or sysex event's
-// declared variable-length size and allocates it (make([]byte, ln))
-// before reading — and bounds it by neither the track chunk nor the file.
-// A five-byte varlen claiming ~4 GB of data in a 200-byte file drove a
-// multi-gigabyte allocation, an out-of-memory the readSMF recover cannot
-// catch. The pre-scan rejects a declared length larger than the whole
-// file up front, so the import fails fast instead of exhausting memory.
 func TestHostileMetaLengthRejected(t *testing.T) {
-	// MThd (format 0, 1 track, PPQ 480) + one MTrk whose first event is a
-	// meta event declaring 0x0FFFFFFF (~268M) bytes of data via a four-byte
-	// varlen 0xFF 0xFF 0xFF 0x7F.
+
 	data := []byte("MThd\x00\x00\x00\x06\x00\x00\x00\x01\x01\xe0" +
 		"MTrk\x00\x00\x00\x0a\x00\xff\x01\xff\xff\xff\x7f\x00\xff\x2f\x00")
 	done := make(chan struct{})
@@ -86,9 +70,6 @@ func TestHostileMetaLengthRejected(t *testing.T) {
 	}
 }
 
-// TestValidFileWithMetaTextStillImports: the pre-scan must not false-
-// reject a legitimate file — its meta text events (track name, etc.)
-// carry ordinary small lengths and pass straight through.
 func TestValidFileWithMetaTextStillImports(t *testing.T) {
 	var tr smf.Track
 	tr.Add(0, smf.MetaTrackSequenceName("A perfectly ordinary track name"))

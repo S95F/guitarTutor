@@ -1,13 +1,5 @@
 //go:build ignore
 
-// Command gen_fixture_mxl packs testdata/fixture_riff.musicxml into the
-// .mxl ZIP container (META-INF/container.xml naming the rootfile, plus the
-// document) as testdata/fixture_riff.mxl. Run it from the repository root
-// after editing the .musicxml fixture:
-//
-//	go run internal/mxlimport/gen_fixture_mxl.go
-//
-// TestMXLMatchesMusicXML fails until the two fixtures agree again.
 package main
 
 import (

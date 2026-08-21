@@ -1,8 +1,5 @@
 package ui
 
-// Windowing is untestable headlessly, so these tests drive the extracted
-// input logic (loopSetA/loopSetB, barAt) directly against a real engine.
-
 import (
 	"fmt"
 	"strings"
@@ -16,8 +13,6 @@ import (
 	"github.com/S95F/musicTutor/internal/synth"
 )
 
-// newApp builds an App over a validated score whose single track holds the
-// given bars.
 func newApp(t *testing.T, bars int) *App {
 	t.Helper()
 	sc := &score.Score{
@@ -37,8 +32,6 @@ func newApp(t *testing.T, bars int) *App {
 	return New(eng, sc, 0)
 }
 
-// newAppTracks builds an App over a score with n identically-shaped
-// tracks, for the mute/solo tests.
 func newAppTracks(t *testing.T, tracks, bars int) *App {
 	t.Helper()
 	sc := &score.Score{
@@ -60,28 +53,22 @@ func newAppTracks(t *testing.T, tracks, bars int) *App {
 	return New(eng, sc, 0)
 }
 
-// TestLoopKeysEmptyTrack is the regression test for finding A3: with a
-// displayed track that has zero bars, barAt returns -1 and the A/B loop
-// handlers used to index bars[-1] and panic.
 func TestLoopKeysEmptyTrack(t *testing.T) {
 	a := newApp(t, 0)
 	if i := a.barAt(0); i != -1 {
 		t.Fatalf("barAt(0) on a bar-less track = %d, want -1", i)
 	}
-	a.loopSetA() // panicked before the i >= 0 guard
+	a.loopSetA()
 	a.loopSetB()
 	if _, _, on := a.eng.Loop(); on {
 		t.Fatal("loop enabled on a track with no bars")
 	}
 }
 
-// result builds a NoteResult keyed at (start, str) with verdict v.
 func result(start int64, str int, v practice.Verdict) practice.NoteResult {
 	return practice.NoteResult{Event: score.NoteEvent{Start: start, String: str}, Verdict: v}
 }
 
-// TestNilSafety: with no feeds set, the state merge and Update run clean
-// and the app reports Phase 1 behavior — not live, no verdicts, W inert.
 func TestNilSafety(t *testing.T) {
 	a := newApp(t, 1)
 	a.syncLive()
@@ -106,15 +93,11 @@ func TestNilSafety(t *testing.T) {
 	}
 }
 
-// TestVerdictKeying: results key tab notes by (Event.Start, Event.String),
-// so two strings sounding at the same tick map independently, and a
-// re-judgement of the same key (loop pass) replaces the old verdict while
-// still accumulating stats.
 func TestVerdictKeying(t *testing.T) {
 	a := newApp(t, 1)
 	a.OfferResults([]practice.NoteResult{
 		result(960, 6, practice.VerdictHit),
-		result(960, 5, practice.VerdictMiss), // same tick, other string
+		result(960, 5, practice.VerdictMiss),
 	})
 	a.syncLive()
 	if v, ok := a.verdicts[noteKey{960, 6}]; !ok || v != practice.VerdictHit {
@@ -124,7 +107,6 @@ func TestVerdictKeying(t *testing.T) {
 		t.Errorf("verdict(960, string 5) = %v, %v; want Miss", v, ok)
 	}
 
-	// Second pass re-judges string 5: latest verdict wins.
 	a.OfferResults([]practice.NoteResult{result(960, 5, practice.VerdictClose)})
 	a.syncLive()
 	if v := a.verdicts[noteKey{960, 5}]; v != practice.VerdictClose {
@@ -139,10 +121,6 @@ func TestVerdictKeying(t *testing.T) {
 	}
 }
 
-// TestVerdictNotPaintedAheadOfPlayhead is the regression test for the
-// loop-pass staleness bug: verdicts are keyed by tick and never cleared,
-// so the tab used to paint pass 1's verdict on a note pass 2 had not
-// reached yet — an upcoming note rendering green before it was played.
 func TestVerdictNotPaintedAheadOfPlayhead(t *testing.T) {
 	a := newApp(t, 2)
 	a.OfferResults([]practice.NoteResult{result(960, 6, practice.VerdictHit)})
@@ -167,30 +145,21 @@ func TestVerdictNotPaintedAheadOfPlayhead(t *testing.T) {
 		}
 	}
 
-	// A note that was never judged stays unpainted wherever the playhead is.
 	if _, ok := a.verdictAt(1920, 6, 5000); ok {
 		t.Error("verdict painted for a note that was never judged")
 	}
 }
 
-// TestVerdictSurvivesLoopWrapUntilRejudged: wrapping to the top of a loop
-// must not paint the previous pass's verdicts on the notes ahead, but the
-// note the playhead has already passed keeps its verdict until this pass's
-// own result replaces it. Results arrive seconds late, so the previous
-// pass's verdicts are still landing after the wrap.
 func TestVerdictSurvivesLoopWrapUntilRejudged(t *testing.T) {
 	a := newApp(t, 2)
-	const first, second = int64(0), int64(3840) // bar 1 and bar 2 downbeats
+	const first, second = int64(0), int64(3840)
 
-	// Pass 1 judges both notes.
 	a.OfferResults([]practice.NoteResult{
 		result(first, 6, practice.VerdictHit),
 		result(second, 6, practice.VerdictMiss),
 	})
 	a.syncLive()
 
-	// Pass 2 has wrapped and is sitting on the first note. The second
-	// note is ahead: its pass-1 miss must not show.
 	if _, ok := a.verdictAt(second, 6, first); ok {
 		t.Error("pass 1 verdict painted on a note pass 2 has not reached")
 	}
@@ -198,15 +167,12 @@ func TestVerdictSurvivesLoopWrapUntilRejudged(t *testing.T) {
 		t.Errorf("verdict under the playhead = %v, %v; want Hit, true", v, ok)
 	}
 
-	// A late pass-1 result landing after the wrap is still gated.
 	a.OfferResults([]practice.NoteResult{result(second, 6, practice.VerdictMiss)})
 	a.syncLive()
 	if _, ok := a.verdictAt(second, 6, first); ok {
 		t.Error("late pass 1 verdict painted on a note ahead of the playhead")
 	}
 
-	// Once the playhead reaches it and this pass re-judges it, the new
-	// verdict shows.
 	a.OfferResults([]practice.NoteResult{result(second, 6, practice.VerdictHit)})
 	a.syncLive()
 	if v, ok := a.verdictAt(second, 6, second); !ok || v != practice.VerdictHit {
@@ -214,7 +180,6 @@ func TestVerdictSurvivesLoopWrapUntilRejudged(t *testing.T) {
 	}
 }
 
-// TestTunerFeed: OfferTuner publishes latest-wins tuner state.
 func TestTunerFeed(t *testing.T) {
 	a := newApp(t, 1)
 	a.OfferTuner(pitch.Note{Key: 40, Cents: 12}, true)
@@ -229,8 +194,6 @@ func TestTunerFeed(t *testing.T) {
 	}
 }
 
-// TestLiveStatus: the status fn is polled once per merge, and clearing it
-// with nil turns the live HUD off again.
 func TestLiveStatus(t *testing.T) {
 	a := newApp(t, 1)
 	polls := 0
@@ -253,8 +216,6 @@ func TestLiveStatus(t *testing.T) {
 	}
 }
 
-// TestWaitControl: SetWaitControl gates the W key's action, and
-// toggleWait mirrors the engine wait mode for the HUD.
 func TestWaitControl(t *testing.T) {
 	a := newApp(t, 1)
 	a.SetWaitControl(true)
@@ -272,9 +233,6 @@ func TestWaitControl(t *testing.T) {
 	}
 }
 
-// TestFeedsConcurrent hammers the feed methods from several goroutines
-// while the "game loop" merges — the race detector is the real assertion;
-// the count check proves no result is lost or double-counted.
 func TestFeedsConcurrent(t *testing.T) {
 	a := newApp(t, 1)
 	const goroutines, per = 4, 250
@@ -304,17 +262,16 @@ func TestFeedsConcurrent(t *testing.T) {
 			a.syncLive()
 		}
 	}
-	a.syncLive() // pick up anything offered after the last merge
+	a.syncLive()
 	if a.stats.Hit != goroutines*per {
 		t.Errorf("stats.Hit = %d, want %d (results lost or double-counted)", a.stats.Hit, goroutines*per)
 	}
-	// Each goroutine keyed its own string, so every offer is distinct.
+
 	if want := per * goroutines; len(a.verdicts) != want {
 		t.Errorf("verdict keys = %d, want %d", len(a.verdicts), want)
 	}
 }
 
-// TestKeyName pins the MIDI-to-name mapping used by the tuner overlay.
 func TestKeyName(t *testing.T) {
 	for _, c := range []struct {
 		key  int
@@ -326,31 +283,24 @@ func TestKeyName(t *testing.T) {
 	}
 }
 
-// TestLoopKeysSetLoop checks the guards did not change normal behavior:
-// A then B on a two-bar piece loops the whole piece.
 func TestLoopKeysSetLoop(t *testing.T) {
 	a := newApp(t, 2)
 	barLen := a.displayed().Bars[0].Len()
 
-	a.loopSetA() // at tick 0: loop bar 1
+	a.loopSetA()
 	la, lb, on := a.eng.Loop()
 	if !on || la != 0 || lb != barLen {
 		t.Fatalf("after A: loop = [%d, %d) on=%v, want [0, %d) on=true", la, lb, on, barLen)
 	}
 
-	a.eng.SeekTick(barLen) // into bar 2
-	a.loopSetB()           // extend the end to bar 2's end
+	a.eng.SeekTick(barLen)
+	a.loopSetB()
 	la, lb, on = a.eng.Loop()
 	if !on || la != 0 || lb != 2*barLen {
 		t.Fatalf("after B: loop = [%d, %d) on=%v, want [0, %d) on=true", la, lb, on, 2*barLen)
 	}
 }
 
-// --- Phase 5: fixed-BPM entry ---
-
-// TestBPMEntryTyping drives the numeric entry's state machine: digits
-// accumulate up to the cap, backspace deletes, a leading zero is absorbed,
-// and both endings close the box.
 func TestBPMEntryTyping(t *testing.T) {
 	a := newApp(t, 1)
 	if a.bpmEntry {
@@ -360,13 +310,13 @@ func TestBPMEntryTyping(t *testing.T) {
 	if !a.bpmEntry {
 		t.Fatal("openBPMEntry did not open the entry")
 	}
-	for _, d := range []byte("0192") { // leading zero absorbed, then capped at 3
+	for _, d := range []byte("0192") {
 		a.bpmDigit(d)
 	}
 	if a.bpmDigits != "192" {
 		t.Errorf("typed digits = %q, want %q", a.bpmDigits, "192")
 	}
-	a.bpmDigit('7') // past bpmEntryMaxDigits
+	a.bpmDigit('7')
 	if a.bpmDigits != "192" {
 		t.Errorf("digits past the cap = %q, want %q", a.bpmDigits, "192")
 	}
@@ -381,19 +331,15 @@ func TestBPMEntryTyping(t *testing.T) {
 	if got := a.eng.TempoScale(); got != 1 {
 		t.Errorf("cancel changed the tempo scale to %v, want 1", got)
 	}
-	// Digits typed while the entry is closed are ignored. The entry is
-	// the only thing that consumes them: Update returns early while
-	// a.bpmEntry is set, so they never reach the mute/solo bindings.
+
 	a.bpmDigit('5')
 	if a.bpmDigits != "" {
 		t.Errorf("digit accepted with the entry closed: %q", a.bpmDigits)
 	}
 }
 
-// TestBPMEntryConversion checks the BPM-to-tempo-scale conversion against
-// the score's own tempo, including both clamp ends.
 func TestBPMEntryConversion(t *testing.T) {
-	a := newApp(t, 1) // fixture is 500000 us/quarter = 120 BPM
+	a := newApp(t, 1)
 	if got := a.baseBPM(); got != 120 {
 		t.Fatalf("fixture base BPM = %v, want 120", got)
 	}
@@ -405,10 +351,10 @@ func TestBPMEntryConversion(t *testing.T) {
 	}{
 		{60, 0.5, 60, false},
 		{90, 0.75, 90, false},
-		{240, 2.0, 240, false}, // exactly the ceiling: not a clamp
-		{300, 2.0, 240, true},  // above it
-		{30, 0.25, 30, false},  // exactly the floor
-		{20, 0.25, 30, true},   // below it
+		{240, 2.0, 240, false},
+		{300, 2.0, 240, true},
+		{30, 0.25, 30, false},
+		{20, 0.25, 30, true},
 	} {
 		scale, actual, clamped := a.scaleForBPM(c.target)
 		if scale != c.scale || actual != c.actual || clamped != c.wantClamped {
@@ -418,9 +364,6 @@ func TestBPMEntryConversion(t *testing.T) {
 	}
 }
 
-// TestBPMEntryUsesTempoAtPlayhead: the target is relative to the score's
-// tempo where the playhead is, not to the piece's opening tempo, so a
-// typed BPM means the same thing in a piece with tempo changes.
 func TestBPMEntryUsesTempoAtPlayhead(t *testing.T) {
 	a := newApp(t, 2)
 	barLen := a.displayed().Bars[0].Len()
@@ -433,15 +376,12 @@ func TestBPMEntryUsesTempoAtPlayhead(t *testing.T) {
 	if got := a.baseBPM(); got != 60 {
 		t.Fatalf("base BPM in bar 2 = %v, want 60", got)
 	}
-	// 90 BPM is x0.75 of bar 1's tempo but x1.5 of bar 2's.
+
 	if scale, _, _ := a.scaleForBPM(90); scale != 1.5 {
 		t.Errorf("scaleForBPM(90) in bar 2 = %v, want 1.5", scale)
 	}
 }
 
-// TestBPMEntryCommit applies the typed target to the engine and reports
-// what happened, naming the clamped result when the target was out of
-// reach rather than silently doing something else.
 func TestBPMEntryCommit(t *testing.T) {
 	a := newApp(t, 1)
 
@@ -473,7 +413,6 @@ func TestBPMEntryCommit(t *testing.T) {
 		t.Errorf("clamp message = %q, want it to name both the target and the 240 BPM it got", msg)
 	}
 
-	// Committing nothing is a no-op, not a tempo change.
 	a.openBPMEntry()
 	a.commitBPMEntry()
 	if got := a.eng.TempoScale(); got != 2.0 {
@@ -481,8 +420,6 @@ func TestBPMEntryCommit(t *testing.T) {
 	}
 }
 
-// TestBPMMessageExpires: the result line is transient, so it does not sit
-// under the tab for the rest of the session.
 func TestBPMMessageExpires(t *testing.T) {
 	a := newApp(t, 1)
 	a.setBPMMessage("hello")
@@ -495,9 +432,6 @@ func TestBPMMessageExpires(t *testing.T) {
 	}
 }
 
-// --- Phase 5: mute and solo ---
-
-// muteState reads the engine's per-track mute flags.
 func muteState(a *App) []bool {
 	m := make([]bool, len(a.sc.Tracks))
 	for i := range m {
@@ -518,17 +452,14 @@ func sameBools(a, b []bool) bool {
 	return true
 }
 
-// TestSoloRestoresUserMutes is the core of the mute/solo contract: solo
-// mutes the other tracks, and releasing it restores exactly the mutes the
-// user had chosen, not "everything unmuted".
 func TestSoloRestoresUserMutes(t *testing.T) {
 	a := newAppTracks(t, 4, 1)
-	a.toggleMute(0) // the user's own choice: track 1 muted
+	a.toggleMute(0)
 	if want := []bool{true, false, false, false}; !sameBools(muteState(a), want) {
 		t.Fatalf("after muting track 1: %v, want %v", muteState(a), want)
 	}
 
-	a.toggleSolo(2) // solo track 3
+	a.toggleSolo(2)
 	if want := []bool{true, true, false, true}; !sameBools(muteState(a), want) {
 		t.Fatalf("under solo of track 3: %v, want %v", muteState(a), want)
 	}
@@ -536,7 +467,7 @@ func TestSoloRestoresUserMutes(t *testing.T) {
 		t.Errorf("solo = %d, want 3 (1-based)", a.solo)
 	}
 
-	a.toggleSolo(2) // release
+	a.toggleSolo(2)
 	if want := []bool{true, false, false, false}; !sameBools(muteState(a), want) {
 		t.Fatalf("after releasing solo: %v, want the user's own mutes %v", muteState(a), want)
 	}
@@ -545,9 +476,6 @@ func TestSoloRestoresUserMutes(t *testing.T) {
 	}
 }
 
-// TestSoloMovesAndMarks: soloing another track moves the solo, and the
-// track chips' state text distinguishes a mute the user asked for from
-// one solo implies.
 func TestSoloMovesAndMarks(t *testing.T) {
 	a := newAppTracks(t, 3, 1)
 	a.toggleMute(0)
@@ -558,7 +486,7 @@ func TestSoloMovesAndMarks(t *testing.T) {
 		}
 	}
 
-	a.toggleSolo(2) // move the solo to track 3
+	a.toggleSolo(2)
 	if a.solo != 3 {
 		t.Fatalf("solo = %d after soloing track 3, want 3", a.solo)
 	}
@@ -579,36 +507,30 @@ func TestSoloMovesAndMarks(t *testing.T) {
 	}
 }
 
-// TestMuteWhileSoloed: mute keys pressed under an active solo record the
-// user's intent (the badge changes) and take effect when the solo is
-// released. Muting the soloed track itself is audible immediately.
 func TestMuteWhileSoloed(t *testing.T) {
 	a := newAppTracks(t, 3, 1)
 	a.toggleSolo(0)
-	a.toggleMute(1) // a track solo already silences
+	a.toggleMute(1)
 	if want := []bool{false, true, true}; !sameBools(muteState(a), want) {
 		t.Fatalf("muting a solo-silenced track changed what is audible: %v, want %v", muteState(a), want)
 	}
 	if got := a.trackStateText(1); got != "muted" {
 		t.Errorf("trackStateText(1) = %q, want %q - the user's choice is recorded", got, "muted")
 	}
-	a.toggleMute(0) // mute the soloed track: everything goes quiet
+	a.toggleMute(0)
 	if want := []bool{true, true, true}; !sameBools(muteState(a), want) {
 		t.Errorf("muting the soloed track: %v, want %v", muteState(a), want)
 	}
 	a.toggleMute(0)
-	a.toggleSolo(0) // release: track 2's mute survives
+	a.toggleSolo(0)
 	if want := []bool{false, true, false}; !sameBools(muteState(a), want) {
 		t.Errorf("after release: %v, want %v", muteState(a), want)
 	}
 }
 
-// TestMuteStateSeededFromEngine: a piece opened with tracks already muted
-// (the cmd layer mutes the player's own part for play-along) keeps that as
-// the user's baseline instead of being unmuted by the first solo release.
 func TestMuteStateSeededFromEngine(t *testing.T) {
 	a := newAppTracks(t, 3, 1)
-	a.eng.SetTrackMuted(2, true) // as the app layer configured it
+	a.eng.SetTrackMuted(2, true)
 
 	a.toggleSolo(0)
 	a.toggleSolo(0)
@@ -617,8 +539,6 @@ func TestMuteStateSeededFromEngine(t *testing.T) {
 	}
 }
 
-// TestMuteSoloOutOfRange: the digit keys are bound to nine tracks whatever
-// the piece has, so the handlers must ignore indexes past the end.
 func TestMuteSoloOutOfRange(t *testing.T) {
 	a := newAppTracks(t, 2, 1)
 	a.toggleMute(5)
@@ -631,10 +551,6 @@ func TestMuteSoloOutOfRange(t *testing.T) {
 	}
 }
 
-// --- Phase 5: count-in ---
-
-// TestCountInToggle: C flips the count-in for the next Play, and with no
-// way to reach the running engine the state says so rather than lying.
 func TestCountInToggle(t *testing.T) {
 	a := newApp(t, 1)
 	a.SetCountIn(4)
@@ -655,8 +571,7 @@ func TestCountInToggle(t *testing.T) {
 	if !a.countInStale {
 		t.Error("with no applier the change must be reported as pending a re-open")
 	}
-	// With no reloader wired the honesty channel is the transient message:
-	// the chip alone would claim a change the running engine will not honour.
+
 	if got := a.bpmMessage(); !strings.Contains(got, "next opened") {
 		t.Errorf("transient message = %q, want it to say the change applies on the next open", got)
 	}
@@ -667,8 +582,6 @@ func TestCountInToggle(t *testing.T) {
 	}
 }
 
-// TestCountInFromNoneUsesDefault: a piece opened without a count-in gets
-// the four-beat default when the user turns one on.
 func TestCountInFromNoneUsesDefault(t *testing.T) {
 	a := newApp(t, 1)
 	a.SetCountIn(0)
@@ -681,8 +594,6 @@ func TestCountInFromNoneUsesDefault(t *testing.T) {
 	}
 }
 
-// TestCountInApplier: with a hook that reaches the engine, the change is
-// pushed through and the HUD drops the caveat.
 func TestCountInApplier(t *testing.T) {
 	a := newApp(t, 1)
 	a.SetCountIn(2)
@@ -703,9 +614,6 @@ func TestCountInApplier(t *testing.T) {
 		t.Errorf("an accepted change should raise no caveat, got %q", msg)
 	}
 
-	// An applier that cannot make it stick must not be believed — and with
-	// a reloader wired, the pending change raises the F5 prompt instead of
-	// the transient message, because F5 is the way to make it real.
 	a.SetCountInApplier(func(int) bool { return false })
 	a.SetReloader(func() {})
 	a.toggleCountIn()
@@ -717,10 +625,6 @@ func TestCountInApplier(t *testing.T) {
 	}
 }
 
-// --- Phase 5: help overlay and the binding table ---
-
-// TestHelpOverlayOpenClose: the overlay is a plain flag so Update can route
-// the whole keyboard to it.
 func TestHelpOverlayOpenClose(t *testing.T) {
 	a := newApp(t, 1)
 	if a.helpOpen {
@@ -736,17 +640,11 @@ func TestHelpOverlayOpenClose(t *testing.T) {
 	}
 }
 
-// TestHelpGroupsCoverTable: the overlay is generated from the binding
-// table, so every row appears exactly once and the groups keep table
-// order - this is what stops the overlay drifting from the hint line.
 func TestHelpGroupsCoverTable(t *testing.T) {
 	a := newApp(t, 1)
 	var flat []helpBinding
 	seen := map[string]bool{}
-	// Grouped exactly the way the overlay groups them — through
-	// helpSections, the function drawHelpOverlay itself calls. Asking a
-	// second, App-local helper the same question let the two answers
-	// drift while this test kept passing.
+
 	for _, g := range helpSections(a.helpRows()) {
 		if g.Name == "" {
 			t.Error("help group with no name")
@@ -775,15 +673,10 @@ func TestHelpGroupsCoverTable(t *testing.T) {
 	}
 }
 
-// TestHintLineFromTable: the HUD hint is generated from the same table and
-// honours the availability gates, so it never advertises a dead key.
 func TestHintLineFromTable(t *testing.T) {
 	a := newApp(t, 1)
 	line := a.hintLine()
-	// Compared against the RESOLVED table: a few rows reword themselves
-	// for how the view is hosted (escape quits a standalone window and
-	// goes back under the shell), so the static table is not what the
-	// footer promises.
+
 	for _, b := range a.helpRows() {
 		if b.Hint == "" || b.Off {
 			continue
@@ -792,8 +685,7 @@ func TestHintLineFromTable(t *testing.T) {
 			t.Errorf("hint line %q is missing %q", line, b.Hint)
 		}
 	}
-	// Standalone: nothing hosts this view, so escape ends the run and
-	// must not promise a screen to go back to.
+
 	if !strings.Contains(line, "esc quit") {
 		t.Errorf("hint line %q should say esc quits with no shell behind it", line)
 	}
@@ -809,20 +701,12 @@ func TestHintLineFromTable(t *testing.T) {
 	if !strings.Contains(a.hintLine(), "W wait") {
 		t.Error("hint line omits W once a detector is present")
 	}
-	// The hint must fit the window, measured with the face that draws it
-	// and from the margin it is drawn at. Asserting 7px per byte was the
-	// bitmap-font assumption the typeface change removed from the drawing
-	// code; left here it was checking a width the UI no longer produces —
-	// too generous for wide glyphs, and wrong in the other direction for
-	// any multi-byte rune.
+
 	if w := uiPadX + textW(a.hintLine()); w > screenW-uiPadX {
 		t.Errorf("hint line ends at %.0fpx, past the %.0fpx margin", w, float64(screenW-uiPadX))
 	}
 }
 
-// TestStatusLineCountsPassesOnlyInsideALoop: the pass counter counts laps
-// of a loop, and shown unconditionally it read "pass 0" for the whole of
-// every straight-through session.
 func TestStatusLineCountsPassesOnlyInsideALoop(t *testing.T) {
 	a := newApp(t, 2)
 	if got := a.statusLine(); strings.Contains(got, "pass") {
@@ -834,9 +718,6 @@ func TestStatusLineCountsPassesOnlyInsideALoop(t *testing.T) {
 	}
 }
 
-// TestRampExplainsWhenItCannotAct: the R toggle stands either way, but a
-// chip lighting up when nothing can happen is a promise — the transient
-// line says what is still missing.
 func TestRampExplainsWhenItCannotAct(t *testing.T) {
 	a := newApp(t, 2)
 
@@ -848,21 +729,18 @@ func TestRampExplainsWhenItCannotAct(t *testing.T) {
 		t.Errorf("ramp with no loop said %q, want it to ask for a loop", got)
 	}
 
-	// Toggling OFF explains nothing: there is nothing to arm.
 	a.frame += bpmMsgFrames
 	a.toggleRamp()
 	if got := a.bpmMessage(); got != "" {
 		t.Errorf("toggling ramp off posted %q", got)
 	}
 
-	// With a loop but already at full speed, the ramp has nowhere to go.
 	a.eng.SetLoop(0, 3840)
 	a.toggleRamp()
 	if got := a.bpmMessage(); !strings.Contains(got, "full speed") {
 		t.Errorf("ramp at full speed said %q, want it to say so", got)
 	}
 
-	// A loop and headroom: the ramp will act, so no caveat.
 	a.frame += bpmMsgFrames
 	a.toggleRamp()
 	a.eng.SetTempoScale(0.75)
@@ -872,11 +750,6 @@ func TestRampExplainsWhenItCannotAct(t *testing.T) {
 	}
 }
 
-// TestHelpRowsNameTheirRemedies: a greyed W or S row used to say only
-// "(not available now)"; each now says what would turn the key on, and
-// the overlay drops the generic stamp for rows that explained themselves.
-// T stays active either way but carries the same caveat, so nobody has to
-// open a silent tuner to learn why it is silent.
 func TestHelpRowsNameTheirRemedies(t *testing.T) {
 	a := newApp(t, 1)
 	row := func(keys string) helpBinding {
@@ -911,8 +784,6 @@ func TestHelpRowsNameTheirRemedies(t *testing.T) {
 		t.Errorf("T's row %q should carry the live-input caveat", tr.Desc)
 	}
 
-	// A greyed row with no explanation of its own keeps the generic
-	// marker — better a stamp than silence.
 	f5 := row("F5")
 	if !f5.Off {
 		t.Fatal("the fixture has no reloader, so F5 should be off")
@@ -921,7 +792,6 @@ func TestHelpRowsNameTheirRemedies(t *testing.T) {
 		t.Errorf("the unexplained F5 row lost its marker: %q", got)
 	}
 
-	// With the live wiring and a shell in place, every caveat withdraws.
 	a.SetWaitControl(true)
 	a.SetLiveStatus(func() (float64, int64) { return -20, 0 })
 	a.syncLive()
@@ -937,11 +807,6 @@ func TestHelpRowsNameTheirRemedies(t *testing.T) {
 	}
 }
 
-// TestNoteCueKeepsBothChannels is the regression for the drawTab colour
-// fight: the verdict branch used to win the glyph colour from the
-// sounding branch, so from the second loop pass on the note being played
-// right now wore last pass's green or red instead of the you-are-here
-// highlight. The cues are separate channels and must coexist.
 func TestNoteCueKeepsBothChannels(t *testing.T) {
 	a := newApp(t, 2)
 
@@ -965,19 +830,12 @@ func TestNoteCueKeepsBothChannels(t *testing.T) {
 		t.Error("the verdict displaced the sounding cue; both must show at once")
 	}
 
-	// An active wait point still owns the glyph — it is the one cue that
-	// demands something of the player right now.
 	waiting := map[noteKey]bool{{0, 6}: true}
 	if col, _ := a.noteCue(0, 3840, 6, false, 100, 100, waiting); col != a.pulseCol() {
 		t.Errorf("a waited-on note = %v, want the wait pulse", col)
 	}
 }
 
-// --- Phase 5: live warning banner ---
-
-// TestLiveWarning: the app layer raises and clears the banner, the user
-// dismisses it, and re-reporting the same condition does not push it back
-// in their face - but a different one does.
 func TestLiveWarning(t *testing.T) {
 	a := newApp(t, 1)
 	if a.warningVisible() {
@@ -994,7 +852,7 @@ func TestLiveWarning(t *testing.T) {
 	if a.warningVisible() {
 		t.Fatal("warning still visible after dismissal")
 	}
-	a.SetLiveWarning("capture and playback are different devices") // same condition, re-reported
+	a.SetLiveWarning("capture and playback are different devices")
 	a.syncLive()
 	if a.warningVisible() {
 		t.Error("a re-report of the dismissed message raised the banner again")
@@ -1013,11 +871,6 @@ func TestLiveWarning(t *testing.T) {
 	}
 }
 
-// --- Phase 5: shell citizenship ---
-
-// TestQuitAll: Q leaves the whole application when the integrator wires
-// that up, and keeps the standalone behaviour of finishing the screen when
-// it does not. Escape always finishes only this screen.
 func TestQuitAll(t *testing.T) {
 	a := newApp(t, 1)
 	if err := a.quitApp(); err != errQuit {
@@ -1033,19 +886,12 @@ func TestQuitAll(t *testing.T) {
 	}
 }
 
-// TestNewNarrowsWaitModeToTheDisplayedTrack is the W2/W3 regression at the
-// wiring level. newAppTracks builds tracks that are all RoleUser (the
-// zero value, and what a hand-written duet .gtab produces). Left to the
-// engine's default, wait mode halts at ANY user track's note — including
-// notes this view never draws and the scorer is never told to expect, so
-// nothing can release the halt and playback stops for good. New must
-// point the engine at the track it is displaying.
 func TestNewNarrowsWaitModeToTheDisplayedTrack(t *testing.T) {
 	sc := &score.Score{
 		Tempos: score.TempoMap{{Tick: 0, USPerQuarter: 500000}},
 		Meters: score.MeterMap{{Tick: 0, Num: 4, Den: 4}},
 	}
-	// Track 0 plays on beat 1, track 1 on beat 2. Both are RoleUser.
+
 	first := &score.Track{Name: "lead", Tuning: score.StandardTuning}
 	second := &score.Track{Name: "harmony", Tuning: score.StandardTuning}
 	sc.Tracks = []*score.Track{first, second}
@@ -1064,7 +910,7 @@ func TestNewNarrowsWaitModeToTheDisplayedTrack(t *testing.T) {
 	}
 
 	eng := engine.New(sc, engine.Options{Voices: synth.NewPluck})
-	New(eng, sc, 0) // displaying track 0
+	New(eng, sc, 0)
 	eng.SetWaitMode(true)
 	eng.Play()
 
@@ -1078,7 +924,6 @@ func TestNewNarrowsWaitModeToTheDisplayedTrack(t *testing.T) {
 	}
 	eng.ConfirmWait()
 
-	// Track 1's note (tick 960) must not halt a session practising track 0.
 	for i := 0; i < 400; i++ {
 		eng.RenderFrames(l, r)
 	}

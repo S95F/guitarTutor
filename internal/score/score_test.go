@@ -16,7 +16,7 @@ func TestDurations(t *testing.T) {
 
 func TestTempoMapConstant(t *testing.T) {
 	m := TempoMap{{Tick: 0, USPerQuarter: USPerQuarter(120)}}
-	// At 120 BPM one quarter (PPQ ticks) is 0.5 s.
+
 	if got := m.TimeAt(PPQ); math.Abs(got-0.5) > 1e-9 {
 		t.Errorf("TimeAt(PPQ) = %v, want 0.5", got)
 	}
@@ -29,12 +29,12 @@ func TestTempoMapConstant(t *testing.T) {
 }
 
 func TestTempoMapChange(t *testing.T) {
-	// 120 BPM for 2 quarters, then 60 BPM.
+
 	m := TempoMap{
 		{Tick: 0, USPerQuarter: USPerQuarter(120)},
 		{Tick: 2 * PPQ, USPerQuarter: USPerQuarter(60)},
 	}
-	// 2 quarters at 120 (1.0 s) + 1 quarter at 60 (1.0 s).
+
 	if got := m.TimeAt(3 * PPQ); math.Abs(got-2.0) > 1e-9 {
 		t.Errorf("TimeAt(3*PPQ) = %v, want 2.0", got)
 	}
@@ -44,7 +44,7 @@ func TestTempoMapChange(t *testing.T) {
 	if got := m.At(2 * PPQ); got != USPerQuarter(60) {
 		t.Errorf("At at change = %d, want 60 BPM", got)
 	}
-	// Round-trip a spread of ticks through TimeAt/TickAt.
+
 	for _, tick := range []int64{0, 1, PPQ, 2*PPQ - 1, 2 * PPQ, 3 * PPQ, 10 * PPQ} {
 		if got := m.TickAt(m.TimeAt(tick)); got != tick {
 			t.Errorf("round trip %d -> %d", tick, got)
@@ -106,7 +106,6 @@ func TestBuildersAndValidate(t *testing.T) {
 		t.Errorf("End = %d, want %d", end, int64(2*Whole))
 	}
 
-	// Break it: overfill a bar.
 	b3 := tr.AppendBar(4, 4)
 	b3.AddBeat(Whole, Note{String: 1, Fret: 0})
 	b3.AddBeat(Quarter, Note{String: 1, Fret: 0})
@@ -147,7 +146,7 @@ func TestEventsTieMergesTechniques(t *testing.T) {
 	s.Tracks = []*Track{tr}
 	b := tr.AppendBar(4, 4)
 	b.AddBeat(Half, Note{String: 5, Fret: 2})
-	// Vibrato written on the sustained (tied) half of the note.
+
 	b.AddBeat(Half, Note{String: 5, Fret: 2, Tied: true, Tech: TechVibrato})
 
 	evs := s.Events()
@@ -182,7 +181,7 @@ func TestValidateRejectsDegenerateTempoAndPitch(t *testing.T) {
 		t.Error("Validate accepted negative USPerQuarter")
 	}
 	s = base()
-	s.Tracks[0].Bars[0].Beats[0].Notes[0].Fret = 90 // 40 + 90 = 130 > 127
+	s.Tracks[0].Bars[0].Beats[0].Notes[0].Fret = 90
 	if err := s.Validate(); err == nil {
 		t.Error("Validate accepted a note above MIDI key 127")
 	}
@@ -200,9 +199,6 @@ func TestValidateRejectsInvalidMeters(t *testing.T) {
 		return s
 	}
 
-	// A zero denominator past the last bar: the shape a hostile MIDI
-	// time-signature meta produced pre-fix, which panicked BeatLen with
-	// a divide by zero on a seek to the end of the piece.
 	s := base()
 	s.Meters = MeterMap{{Tick: 0, Num: 4, Den: 4}, {Tick: 3840, Num: 4, Den: 0}}
 	if err := s.Validate(); err == nil {
@@ -213,7 +209,7 @@ func TestValidateRejectsInvalidMeters(t *testing.T) {
 	if err := s.Validate(); err == nil {
 		t.Error("Validate accepted a zero meter numerator")
 	}
-	// A denominator finer than the tick grid truncates BeatLen to zero.
+
 	s = base()
 	s.Meters = MeterMap{{Tick: 0, Num: 1, Den: 7680}}
 	if err := s.Validate(); err == nil {
@@ -230,7 +226,7 @@ func TestEventsTieMismatchDegrades(t *testing.T) {
 	s.Tracks = []*Track{tr}
 	b := tr.AppendBar(4, 4)
 	b.AddBeat(Half, Note{String: 5, Fret: 2})
-	// Tie marked but fret differs: must become a fresh attack, not merge.
+
 	b.AddBeat(Half, Note{String: 5, Fret: 4, Tied: true})
 
 	evs := s.Events()
@@ -248,13 +244,13 @@ func TestEventsChordAndOrder(t *testing.T) {
 	s.Tracks = []*Track{tr}
 	b := tr.AppendBar(4, 4)
 	b.AddBeat(Half, Note{String: 6, Fret: 0}, Note{String: 5, Fret: 2}, Note{String: 4, Fret: 2})
-	b.AddBeat(Half) // rest
+	b.AddBeat(Half)
 
 	evs := s.Events()
 	if len(evs) != 3 {
 		t.Fatalf("got %d events, want 3", len(evs))
 	}
-	// E5 power chord: E2 B2 E3.
+
 	want := []int{40, 47, 52}
 	for i, ev := range evs {
 		if ev.Key != want[i] && i < len(want) {
@@ -266,12 +262,6 @@ func TestEventsChordAndOrder(t *testing.T) {
 	}
 }
 
-// TestValidateRejectsDuplicateStringInBeat: one string sounds once per
-// beat. The editor enforces it as it types, the .gtab parser rejects it,
-// and textfmt.Format refuses to write it — but Validate used to accept it,
-// leaving a model state every other layer treats as impossible: Events
-// keys its tie bookkeeping by string, so two notes on one string in one
-// beat give it two answers. Validate now closes that gap.
 func TestValidateRejectsDuplicateStringInBeat(t *testing.T) {
 	s := &Score{
 		Tempos: TempoMap{{Tick: 0, USPerQuarter: USPerQuarter(120)}},
@@ -286,7 +276,6 @@ func TestValidateRejectsDuplicateStringInBeat(t *testing.T) {
 		t.Fatal("Validate accepted two notes on one string in a beat")
 	}
 
-	// A chord that spreads across distinct strings is still fine.
 	s.Tracks[0].Bars[0].Beats[0].Notes = []Note{
 		{String: 3, Fret: 0}, {String: 2, Fret: 2}, {String: 1, Fret: 3},
 	}

@@ -1,11 +1,5 @@
 package ui
 
-// The editor's one-line entry prompt: the tempo, the meter and the title,
-// each typed into a small panel over the notation.
-//
-// The toolbar that used to live here is in editortoolbar.go, where it is
-// symbols rather than the text chips this file was written for.
-
 import (
 	"fmt"
 	"strconv"
@@ -19,7 +13,6 @@ import (
 	"github.com/S95F/musicTutor/internal/score/textfmt"
 )
 
-// cursorTech is the technique bitmask on the note under the cursor.
 func (e *Editor) cursorTech() score.Technique {
 	if n, ok := e.doc.NoteAt(e.doc.Cursor().Str); ok {
 		return n.Tech
@@ -27,9 +20,6 @@ func (e *Editor) cursorTech() score.Technique {
 	return 0
 }
 
-// --- the one-line entry ----------------------------------------------
-
-// edEntryKind is what a prompt is asking for.
 type edEntryKind int
 
 const (
@@ -39,27 +29,19 @@ const (
 	edEntryCapo
 )
 
-// An edEntry is the prompt open over the notation.
 type edEntry struct {
 	kind   edEntryKind
 	prompt string
 	hint   string
 	buf    string
 	max    int
-	// seeded marks buf as the value already in force rather than
-	// something the user typed. The first typed rune replaces it whole:
-	// nobody edits "0" into "12" by appending, and a seed that has to be
-	// backspaced away first turns every entry into three keystrokes of
-	// correction before the real one.
+
 	seeded bool
-	// allow reports whether a typed rune belongs in this entry, so a
-	// numeric field cannot be filled with letters.
+
 	allow func(r rune) bool
 	apply func(*Editor, string) error
 }
 
-// openEntry starts a prompt, seeded with what is currently in force so
-// that pressing enter straight away changes nothing.
 func (e *Editor) openEntry(kind edEntryKind) {
 	switch kind {
 	case edEntryTempo:
@@ -95,10 +77,7 @@ func (e *Editor) openEntry(kind edEntryKind) {
 			buf: e.doc.Score().Title, max: 80,
 			allow: func(r rune) bool { return r >= 32 && r != 127 },
 			apply: func(e *Editor, s string) error {
-				// The title entry is never seeded (typing appends, see
-				// below), so the enter-straight-away case is caught here:
-				// an unchanged title is not an edit and must not mark the
-				// piece dirty.
+
 				if s = strings.TrimSpace(s); s == e.doc.Score().Title {
 					return nil
 				}
@@ -120,16 +99,10 @@ func (e *Editor) openEntry(kind edEntryKind) {
 			},
 		}
 	}
-	// Only the numeric prompts replace their seed on the first digit:
-	// nobody edits "0" into "12" by appending, but a title IS edited by
-	// appending, and eating it on the first keystroke would punish
-	// exactly the person adding one word to a long name.
+
 	e.entry.seeded = kind != edEntryTitle
 }
 
-// feed types this frame's runes into the entry: the first allowed one
-// replaces a seeded value whole (see edEntry.seeded), later ones append
-// up to max.
 func (en *edEntry) feed(runes []rune) {
 	for _, r := range runes {
 		if !en.allow(r) {
@@ -144,7 +117,6 @@ func (en *edEntry) feed(runes []rune) {
 	}
 }
 
-// parseMeterText reads "n/d".
 func parseMeterText(s string) (num, den int, ok bool) {
 	i := strings.IndexByte(s, '/')
 	if i < 0 {
@@ -158,8 +130,6 @@ func parseMeterText(s string) (num, den int, ok bool) {
 	return n, d, true
 }
 
-// updateEntry runs the prompt. It owns the keyboard while it is open, so
-// typing a digit into a tempo cannot also write a fret.
 func (e *Editor) updateEntry() {
 	en := e.entry
 	en.feed(ebiten.AppendInputChars(nil))
@@ -173,23 +143,16 @@ func (e *Editor) updateEntry() {
 	case inpututil.IsKeyJustPressed(ebiten.KeyEnter) || inpututil.IsKeyJustPressed(ebiten.KeyNumpadEnter):
 		e.commitEntry()
 	}
-	// A click outside the box cancels, matching the practice view's tempo
-	// entry.
+
 	if e.ptr.pressed && !e.ptr.over(edEntryRect()) {
 		e.entry = nil
 	}
 }
 
-// commitEntry applies the prompt, keeping it open when what was typed does
-// not work — losing a half-typed value to a typo is its own small cruelty.
 func (e *Editor) commitEntry() {
 	en := e.entry
 	if en.seeded {
-		// Nothing was typed: the buf is still the value already in force,
-		// and openEntry promises that enter straight away changes nothing.
-		// Applying it anyway marked the piece dirty for an edit nobody
-		// made — and the tempo entry applied its ROUNDED display over the
-		// exact value underneath, turning an imported 120.3 BPM into 120.
+
 		e.entry = nil
 		return
 	}
