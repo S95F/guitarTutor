@@ -19,6 +19,8 @@
 // a chord from scratch (docs/DECISIONS.md D4).
 package pitch
 
+import "math"
+
 // Config parameterizes the detector and tracker.
 type Config struct {
 	// SampleRate in Hz of the input stream.
@@ -74,6 +76,26 @@ func DefaultConfig(sampleRate int) Config {
 		NoiseFloorDB:     -55,
 		StrumWindowHops:  defaultStrumWindowHops,
 	}
+}
+
+// ConfigForKeys returns the defaults with the f0 search range fitted to an
+// instrument whose sounding compass is lowKey..highKey (MIDI): the floor a
+// whole tone under the lowest note, the ceiling a fourth over the highest
+// (players overshoot, and altissimo exists above every published range).
+// Fitting the range matters both ways: a floor far below the instrument
+// enlarges the subharmonic-error surface for nothing, and the guitar
+// default's 1500 Hz ceiling sits only three semitones over a soprano sax's
+// top E6 — anything higher would be forced unvoiced by the alias guard.
+func ConfigForKeys(sampleRate, lowKey, highKey int) Config {
+	cfg := DefaultConfig(sampleRate)
+	cfg.MinHz = keyHz(lowKey - 2)
+	cfg.MaxHz = keyHz(highKey + 5)
+	return cfg
+}
+
+// keyHz is the equal-tempered frequency of a MIDI key (A4 = 69 = 440 Hz).
+func keyHz(key int) float64 {
+	return 440 * math.Pow(2, float64(key-69)/12)
 }
 
 // withDefaults fills zero fields with DefaultConfig values and clamps the

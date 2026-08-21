@@ -312,10 +312,11 @@ func loadBacking(eng *engine.Engine, path string, offsetSec, gain float64) error
 }
 
 // makeFactory picks the synthesis path: SoundFont when supplied, otherwise
-// the built-in Karplus-Strong pluck (no assets needed).
+// the built-in voices (no assets needed) — the Karplus-Strong pluck for
+// fretted tracks, the sustained reed for tracks whose program names a wind.
 func makeFactory(sf2 string) (synth.Factory, error) {
 	if sf2 == "" {
-		return synth.NewPluck, nil
+		return synth.NewBuiltin, nil
 	}
 	sf, err := synth.LoadSoundFont(sf2)
 	if err != nil {
