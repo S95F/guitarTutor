@@ -12,6 +12,7 @@ import (
 
 	"github.com/S95F/musicTutor/internal/appconfig"
 	"github.com/S95F/musicTutor/internal/audio"
+	"github.com/S95F/musicTutor/internal/engine"
 	"github.com/S95F/musicTutor/internal/ui"
 )
 
@@ -641,5 +642,118 @@ func TestEditPieceOpensBrokenGtabInTheEditor(t *testing.T) {
 	}
 	if got := sh.Depth(); got != 2 {
 		t.Errorf("editPiece on a missing file changed the stack to %d deep, want it untouched at 2", got)
+	}
+}
+
+// uneditableMusicXML loads — and practises — but the editor cannot square
+// it: odd divisions leave the bar's trailing rest at a length no writable
+// note value tiles, so edit.Open refuses. It is the routing test's proof
+// that "loads" and "edits" are different questions.
+const uneditableMusicXML = `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Guitar</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes>
+        <divisions>7</divisions>
+        <time><beats>4</beats><beat-type>4</beat-type></time>
+      </attributes>
+      <note><pitch><step>E</step><octave>2</octave></pitch><duration>3</duration></note>
+      <note><rest/><duration>25</duration></note>
+    </measure>
+  </part>
+</score-partwise>
+`
+
+// TestEditPieceUneditableImportStaysOnTheBrowser covers the one editPiece
+// combination the broken-.gtab test cannot: a piece that LOADS (it plays,
+// it sits in recents) but that ui.NewEditorFor refuses. The E press must
+// not push a dead editor — the refusal goes to the start screen's status
+// band (showEditor calls Browser.ShowError, which this package cannot
+// read back; the stack staying put is the observable half).
+func TestEditPieceUneditableImportStaysOnTheBrowser(t *testing.T) {
+	t.Setenv(appconfig.EnvConfigDir, t.TempDir())
+	path := filepath.Join(t.TempDir(), "odd.musicxml")
+	if err := os.WriteFile(path, []byte(uneditableMusicXML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The fixture must stay what it claims: loadable, not editable — if
+	// the editor learns to square it, this routing case no longer exists.
+	sc, _, err := load(path)
+	if err != nil {
+		t.Fatalf("the fixture stopped loading: %v", err)
+	}
+	if _, err := ui.NewEditorFor(nil, sc, path); err == nil {
+		t.Skip("the editor now opens this piece; the refusal path needs a new fixture")
+	}
+
+	prefs := &shellPrefs{}
+	o := &shellOpener{prefs: prefs}
+	sh, browser := ui.NewBrowserShell(ui.Services{Opener: o, Prefs: prefs, Library: pieceLibrary{}})
+	o.shell, o.browser = sh, browser
+	t.Cleanup(o.CloseCurrent)
+
+	o.editPiece(path)
+	if err := sh.Update(); err != nil {
+		t.Fatalf("draining the shell: %v", err)
+	}
+	if got := sh.Depth(); got != 1 {
+		t.Fatalf("editPiece on an uneditable import left the shell %d deep, want 1 (no dead editor)", got)
+	}
+}
+
+// TestSoundFontAdoptionMarksOnTheGameLoop pins the race-free half of the
+// SoundFont dialog: the goroutine that persists a pick must never touch
+// the practice view itself (MarkSettingsChanged writes state the game
+// loop reads unlocked — the same class as the F1 map race), so the pick
+// is recorded on the opener and drained by the view's per-frame hook on
+// the game loop. Open consumes a pending mark: a piece opened after the
+// pick is built from the new config and must not offer a reload for it.
+func TestSoundFontAdoptionMarksOnTheGameLoop(t *testing.T) {
+	t.Setenv(appconfig.EnvConfigDir, t.TempDir())
+
+	backend := &stubBackend{
+		capture:  []audio.DeviceInfo{{ID: "cap-1", Name: "Stub Audio (Stub Interface)", Default: true}},
+		playback: []audio.DeviceInfo{{ID: "pb-1", Name: "Stub Out (Stub Interface)", Default: true}},
+	}
+	useStubBackend(t, backend)
+
+	prefs := &shellPrefs{}
+	prefs.SetDevices("cap-1", "pb-1")
+	o := &shellOpener{prefs: prefs}
+	t.Cleanup(o.CloseCurrent)
+
+	// The dialog goroutine's whole job: persist, and arm the mark.
+	o.adoptSoundFont("picked.sf2")
+	if got := prefs.SoundFont(); got != "picked.sf2" {
+		t.Errorf("adopted SoundFont = %q, want picked.sf2", got)
+	}
+	if cfg, err := appconfig.Load(); err != nil || cfg.SoundFontPath != "picked.sf2" {
+		t.Errorf("persisted SoundFont = %q (err %v), want picked.sf2 saved", cfg.SoundFontPath, err)
+	}
+	if !o.sfPicked.Load() {
+		t.Fatal("adoptSoundFont did not arm the settings-changed mark")
+	}
+
+	// The game-loop drain consumes the mark exactly once.
+	sc := oneBarScore(t)
+	app := ui.New(newEngine(sc, engine.Options{}), sc, 0)
+	app.SetReloader(func() {})
+	o.drainSettingsMark(app)
+	if o.sfPicked.Load() {
+		t.Error("drainSettingsMark left the mark armed")
+	}
+
+	// A pick pending when a piece opens is consumed by the open itself:
+	// the new engine was built from the adopted config. The pick must be
+	// gone by makeFactory, so the empty SoundFont path here stands in for
+	// any current one.
+	prefs.SetSoundFont("")
+	o.sfPicked.Store(true)
+	if _, _, err := o.Open(oneBarGtab(t)); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if o.sfPicked.Load() {
+		t.Error("Open left a pre-open pick armed; the fresh piece would offer a pointless reload")
 	}
 }

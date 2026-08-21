@@ -761,6 +761,35 @@ func TestCalibrateAdoptsADeviceTheUserChose(t *testing.T) {
 	}
 }
 
+// TestCalibrateRefusesTheAmbiguousDefaultPair: with no flags, nothing
+// remembered, and a backend that marks no system default, both endpoints
+// resolve to "" — the exact ""|"" key calibratedOffset refuses as
+// ambiguous. runCalibrate used to measure anyway and print "live scoring
+// will use this offset" about an offset no lookup would ever return (and,
+// with a stub that delivers no audio, sat out the full 20 s deadline
+// first). It must refuse before touching the device, naming -in/-out.
+func TestCalibrateRefusesTheAmbiguousDefaultPair(t *testing.T) {
+	t.Setenv(appconfig.EnvConfigDir, t.TempDir())
+	backend := &stubBackend{
+		capture:  []audio.DeviceInfo{{ID: "a", Name: "A"}},
+		playback: []audio.DeviceInfo{{ID: "b", Name: "B"}},
+	}
+	useStubBackend(t, backend)
+
+	err := runCalibrate(nil)
+	if err == nil {
+		t.Fatal("runCalibrate with no resolvable devices returned nil, want a refusal")
+	}
+	for _, want := range []string{"-in", "-out", "musictutor devices"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not mention %q", err, want)
+		}
+	}
+	if n := backend.openCount(); n != 0 {
+		t.Errorf("the refused calibration opened the device %d times, want 0", n)
+	}
+}
+
 // deadNoteWaitScore: one dead (muted) note, then a normal one. A damped
 // string produces no trackable f0, so the only evidence the player struck
 // it is the attack itself.

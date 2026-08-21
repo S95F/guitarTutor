@@ -797,6 +797,14 @@ func runCalibrate(args []string) error {
 	for _, n := range notes {
 		fmt.Fprintln(os.Stderr, "warning:", n)
 	}
+	// With no flags, no remembered devices and a backend that marks no
+	// system default, both IDs resolve empty — the very ""|"" key
+	// calibratedOffset refuses as ambiguous. Measuring would work and the
+	// save would claim "live scoring will use this offset" about an offset
+	// no lookup will ever return, so refuse up front with the fix.
+	if inID == "" && outID == "" {
+		return fmt.Errorf("this backend marks no default devices, so the offset would be stored under no device at all; pick them with -in and -out (run 'musictutor devices')")
+	}
 	fmt.Printf("measuring playback [%s] -> capture [%s]\n",
 		deviceLabel(playback, outID), deviceLabel(capture, inID))
 

@@ -8,8 +8,9 @@
 //
 //	go run ./tools/uishot -screen practice -o practice.png
 //
-// screens: start, start-bare, settings, editor, editor-new, editor-pick,
-// editor-text, editor-help, practice, practice-live, help, tuner
+// screens: glyphs, start, start-bare, settings, editor, editor-new,
+// editor-pick, editor-text, editor-help, practice, practice-live, help,
+// tuner
 package main
 
 import (

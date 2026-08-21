@@ -95,7 +95,16 @@ func (o *shellOpener) showEditor(sc *score.Score, path string) {
 		// choice that has to come before anything is written.
 		ed = ui.NewEditorChoosing(o.shell)
 	} else if ed, err = ui.NewEditorFor(o.shell, sc, path); err != nil {
+		// A piece can load — and practise — and still be one the editor
+		// cannot square (an import packed to within a sliver of full, in
+		// durations the format cannot write). The refusal lands on the
+		// start screen's status band, where the E press came from: stderr
+		// is invisible to the windowed user, and a keypress that silently
+		// does nothing reads as a dead key.
 		fmt.Fprintln(os.Stderr, "musictutor: cannot edit that piece:", err)
+		if o.browser != nil {
+			o.browser.ShowError(fmt.Sprintf("cannot open %s for editing: %v", filepath.Base(path), err))
+		}
 		return
 	}
 	o.installEditor(ed)
@@ -247,7 +256,11 @@ func (o *shellOpener) showSettings(app *ui.App) {
 	// the dialog can outlive the screen that opened it (Escape while it
 	// sits behind the window) — and the practice view is told, so the
 	// piece still playing the old voice offers its reload instead of
-	// silently disagreeing with the config.
+	// silently disagreeing with the config. Telling it happens through
+	// sfPicked and drainSettingsMark, never by touching the App from this
+	// goroutine: MarkSettingsChanged writes view state the game loop reads
+	// unlocked, so calling it here was a data race — the same discipline
+	// the mailbox above exists for.
 	st.SetFilePicker(func(exts []string, chosen func(string)) {
 		if !o.sfDialog.CompareAndSwap(false, true) {
 			chosen("") // already open; re-arm the row rather than stack a second
@@ -257,11 +270,7 @@ func (o *shellOpener) showSettings(app *ui.App) {
 			defer o.sfDialog.Store(false)
 			path := pickSoundFont()
 			if path != "" {
-				o.prefs.SetSoundFont(path)
-				_ = o.prefs.Save()
-				if app != nil {
-					app.MarkSettingsChanged()
-				}
+				o.adoptSoundFont(path)
 			}
 			chosen(path)
 		}()
@@ -597,6 +606,15 @@ type shellOpener struct {
 	// rebuilt on every visit, and the dialog can outlive it.
 	sfDialog atomic.Bool
 
+	// sfPicked notes that the dialog goroutine has persisted a SoundFont
+	// the running piece was not built with. The goroutine must not tell
+	// the practice view itself — MarkSettingsChanged writes state the game
+	// loop reads unlocked — so the news waits here for drainSettingsMark,
+	// which the view's own per-frame latency hook runs on the game loop.
+	// Open consumes it: a piece opened after the pick is built FROM the
+	// new config and must not start life offering a pointless reload.
+	sfPicked atomic.Bool
+
 	otoOnce sync.Once
 	otoCtx  *oto.Context
 	otoErr  error
@@ -625,6 +643,12 @@ func (o *shellOpener) Open(path string) (ui.Screen, []string, error) {
 	if err := ensureTracks(sc, "play"); err != nil {
 		return nil, warns, err
 	}
+	// This open reads the config below, so any SoundFont a floating dialog
+	// has already persisted is not news to the piece being built. Cleared
+	// before the read rather than after: a pick landing between the two
+	// then raises a spurious reload offer, where the other order would
+	// swallow a real one.
+	o.sfPicked.Store(false)
 	fac, err := makeFactory(o.prefs.SoundFont())
 	if err != nil {
 		return nil, warns, err
@@ -776,6 +800,27 @@ func importSummary(warns []string) string {
 	return fmt.Sprintf("imported with %d warnings: %s (and %d more)", len(warns), warns[0], len(warns)-1)
 }
 
+// adoptSoundFont records a SoundFont the dialog goroutine picked: the
+// config is updated and persisted (both under shellPrefs' locks), and the
+// practice view's reload offer is armed through sfPicked rather than
+// called — see drainSettingsMark.
+func (o *shellOpener) adoptSoundFont(path string) {
+	o.prefs.SetSoundFont(path)
+	_ = o.prefs.Save()
+	o.sfPicked.Store(true)
+}
+
+// drainSettingsMark delivers a pending settings-changed mark to the
+// practice view. It runs on the game loop — the view calls the latency
+// hook below every frame it draws — which is what makes the call safe;
+// while another screen covers the view nothing drains, and the mark is
+// simply waiting when the user comes back to the piece it is about.
+func (o *shellOpener) drainSettingsMark(app *ui.App) {
+	if o.sfPicked.CompareAndSwap(true, false) {
+		app.MarkSettingsChanged()
+	}
+}
+
 // watchOutputLatency tells the practice view how much rendered audio has
 // not been heard yet, so the playhead can sit on the note that is sounding
 // instead of the one being rendered (see internal/ui/playhead.go).
@@ -792,6 +837,10 @@ func importSummary(warns []string) string {
 // is what happens between a piece being closed and its view being popped.
 func (o *shellOpener) watchOutputLatency(app *ui.App) {
 	app.SetOutputLatency(func() time.Duration {
+		// Piggybacked here because this closure is the one thing the view
+		// runs every frame: it is the game-loop delivery point for state a
+		// dialog goroutine could not hand the view directly.
+		o.drainSettingsMark(app)
 		trim := time.Duration(o.prefs.SyncTrim()) * time.Millisecond
 		switch {
 		case o.session != nil:
