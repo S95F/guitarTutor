@@ -136,12 +136,20 @@ func buildTrack(pd *partData, role score.TrackRole, specs []barSpec) *score.Trac
 			active = kept
 			var notes []score.Note
 			for _, n := range active {
-				notes = append(notes, score.Note{
+				nn := score.Note{
 					String:   n.str,
 					Fret:     n.fret,
 					Tied:     n.start < segStart,
 					Inferred: n.inferred,
-				})
+				}
+				// A technique describes the transition INTO the note, so
+				// it rides the segment carrying the attack; the Tied
+				// continuations Events merges back would otherwise
+				// restate it on every beat the note sustains through.
+				if n.start == segStart {
+					nn.Tech = n.tech
+				}
+				notes = append(notes, nn)
 			}
 			sort.Slice(notes, func(i, j int) bool { return notes[i].String > notes[j].String })
 			bar.AddBeat(segEnd-segStart, notes...)

@@ -357,6 +357,28 @@ func (n *xmlNote) tie() (stop, start bool, num int) {
 	return stop, start, num
 }
 
+// slurs returns the numbers of the slur arcs stopping and starting on this
+// note, across every <notations> block. A missing (or non-positive) number
+// attribute is the schema's default 1. type="continue" changes no state and
+// is dropped here, as is anything unrecognized.
+func (n *xmlNote) slurs() (stops, starts []int) {
+	for _, nt := range n.Notations {
+		for _, sl := range nt.Slurs {
+			num := sl.Number
+			if num < 1 {
+				num = 1
+			}
+			switch sl.Type {
+			case "stop":
+				stops = append(stops, num)
+			case "start":
+				starts = append(starts, num)
+			}
+		}
+	}
+	return stops, starts
+}
+
 // fingering returns the authored <technical> string and fret, if both are
 // present. MusicXML's <string> numbering (1 = highest-pitched) matches the
 // score model's, so the value is used directly.
@@ -382,6 +404,15 @@ type xmlTie struct {
 
 type xmlNotations struct {
 	Technical *xmlTechnical `xml:"technical"`
+	Slurs     []xmlSlur     `xml:"slur"`
+}
+
+// xmlSlur is <notations><slur>: a phrasing arc from its type="start" note
+// through its type="stop" note. The number attribute distinguishes arcs
+// that overlap in time; files with a single arc rarely bother to write it.
+type xmlSlur struct {
+	Type   string `xml:"type,attr"`
+	Number int    `xml:"number,attr"`
 }
 
 type xmlTechnical struct {

@@ -27,6 +27,14 @@ type rawNote struct {
 	str, fret  int  // fingering; str 0 until assigned
 	hasFing    bool // authored <technical> string+fret
 	inferred   bool // fingering came from internal/fretting
+	// slurred: a slur arc begun at an earlier onset was still open when
+	// this note started. Recorded on every note of a chord — the arc
+	// covers the onset, not one head — so whichever note survives the
+	// wind chord collapse still carries it. Only finishWind consumes it;
+	// mapping a fretted part's slurs to hammer-ons/pull-offs is a
+	// separate decision, not taken by this importer.
+	slurred bool
+	tech    score.Technique // techniques for the built note's attack
 }
 
 // An openTie is a tie start still waiting for its stop.
@@ -147,6 +155,13 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 	transpose := 0         // written-to-sounding shift for staff 1
 	var measureStart int64 // score tick of the current measure's start
 	var open []openTie     // tie starts awaiting their stops
+	// Slur arcs, keyed by their number attribute so overlapping arcs stay
+	// apart. An arc spans measures freely, so nothing prunes this at
+	// barlines; an arc never stopped simply stays open to the part's end,
+	// which is how a phrase mark reads, and an unmatched stop deletes
+	// nothing — neither is worth a warning, since nothing is lost.
+	slurs := map[int]bool{}
+	slurInto := false // an arc from an earlier onset covers the current onset
 	// Aggregate warning counters, reported once per part.
 	var rounded, mismatched, otherVoice, otherStaff, grace, badTie, badFing, oversized int
 	var unpitched, noPitch, badDur, badStep, strayChord, pickups, untracked, authoredFing int
@@ -348,6 +363,23 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 					}
 					continue
 				}
+				// Coverage is decided per ONSET, before this note's own
+				// endpoints apply: an arc starting here covers only LATER
+				// notes, and the note an arc stops on is the arc's last
+				// covered note. Chord members reuse the head's answer
+				// rather than re-reading the state their head's start
+				// already changed. Grace notes left the walk above, so an
+				// arc touching one is simply an arc missing an endpoint.
+				if !isChord {
+					slurInto = len(slurs) > 0
+				}
+				slurStops, slurStarts := e.slurs()
+				for _, num := range slurStops {
+					delete(slurs, num)
+				}
+				for _, num := range slurStarts {
+					slurs[num] = true
+				}
 				key, ok := midiKey(e.Pitch.Step, e.Pitch.Alter, e.Pitch.Octave)
 				if !ok {
 					badStep++
@@ -397,7 +429,7 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 					}
 					badTie++
 				}
-				n := &rawNote{start: start, end: end, key: key}
+				n := &rawNote{start: start, end: end, key: key, slurred: slurInto}
 				if usable {
 					n.str, n.fret, n.hasFing = str, fret, true
 					if pd.tuning[str-1]+pd.capo+fret != key {
@@ -652,6 +684,11 @@ func (im *importer) finish(pd *partData) {
 // authoritative, and rewriting it would silently change the music. Below,
 // the floor is the instrument's lowest note; above, MIDI 127 is the only
 // ceiling — altissimo is real playing and imports fine.
+//
+// A note a slur arc was open across plays without a fresh tongue —
+// TechSlur. The flag was recorded per onset on every chord member, so it
+// survives both filters here no matter which chord note carried the slur
+// elements.
 func (im *importer) finishWind(pd *partData, label string) {
 	w := pd.wind
 	// Range first, chords second: a chord whose TOP note is outside the
@@ -694,6 +731,9 @@ func (im *importer) finishWind(pd *partData, label string) {
 	for _, n := range pd.notes {
 		p := w.NoteFor(n.key)
 		n.str, n.fret = p.String, p.Fret
+		if n.slurred {
+			n.tech = score.TechSlur
+		}
 	}
 }
 

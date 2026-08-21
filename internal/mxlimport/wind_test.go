@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/S95F/musicTutor/internal/score"
+	"github.com/S95F/musicTutor/internal/score/textfmt"
 )
 
 // wrapWindPart builds a one-part document whose declaration carries a
@@ -254,4 +255,220 @@ func TestWindChordKeepsHighestPlayable(t *testing.T) {
 	if !found {
 		t.Errorf("warnings %v never explain the dropped G3", warns)
 	}
+}
+
+// slurNote builds an unfingered <note> whose trailing <notations> block —
+// where real exporters put it — carries raw slur elements. extra is
+// note()'s leading children (<chord/>, <grace/>, <tie/>...).
+func slurNote(step string, octave, dur int, extra, slurs string) string {
+	return `<note>` + extra +
+		`<pitch><step>` + step + `</step><octave>` + string(rune('0'+octave)) + `</octave></pitch>` +
+		`<duration>` + itoa(dur) + `</duration><voice>1</voice>` +
+		`<notations>` + slurs + `</notations></note>`
+}
+
+// eventTechs flattens the events' techniques, in event order, for
+// comparing which notes a slur covered.
+func eventTechs(t *testing.T, s *score.Score, want []score.Technique) {
+	t.Helper()
+	evs := s.Events()
+	if len(evs) != len(want) {
+		t.Fatalf("got %d events, want %d: %v", len(evs), len(want), evs)
+	}
+	for i, ev := range evs {
+		if ev.Tech != want[i] {
+			t.Errorf("event %d (key %d) Tech = %v, want %v", i, ev.Key, ev.Tech, want[i])
+		}
+	}
+}
+
+// TestWindSlurPhrase: a slur over n1..n3 is one tongue stroke. TechSlur
+// marks a note slurred INTO, so n2 and n3 carry it and n1 — which takes
+// the attack — does not; the stop note is the arc's last covered note.
+func TestWindSlurPhrase(t *testing.T) {
+	m := attrs44div480 +
+		slurNote("C", 5, 480, "", `<slur type="start"/>`) +
+		slurNote("D", 5, 480, "", "") +
+		slurNote("E", 5, 960, "", `<slur type="stop"/>`)
+	s, warns, err := Import(wrapWindPart("Soprano Sax", 0, m))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if len(warns) != 0 {
+		t.Errorf("warnings = %v, want none", warns)
+	}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	eventTechs(t, s, []score.Technique{0, score.TechSlur, score.TechSlur})
+}
+
+// TestWindSeparateSlurs: an arc's stop closes it AFTER the stop note is
+// covered, so the note following one slur starts the next phrase with a
+// fresh attack.
+func TestWindSeparateSlurs(t *testing.T) {
+	m := attrs44div480 +
+		slurNote("C", 5, 480, "", `<slur type="start"/>`) +
+		slurNote("D", 5, 480, "", `<slur type="stop"/>`) +
+		slurNote("E", 5, 480, "", `<slur type="start"/>`) +
+		slurNote("F", 5, 480, "", `<slur type="stop"/>`)
+	s, warns, err := Import(wrapWindPart("Soprano Sax", 0, m))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if len(warns) != 0 {
+		t.Errorf("warnings = %v, want none", warns)
+	}
+	eventTechs(t, s, []score.Technique{0, score.TechSlur, 0, score.TechSlur})
+}
+
+// TestWindOverlappingNumberedSlurs: arc 1 over n1..n3 and arc 2 over
+// n2..n4 overlap, kept apart by their number attributes. A note is covered
+// when ANY arc was open before it started, so n2..n4 slur and n5 — after
+// both arcs closed — attacks fresh.
+func TestWindOverlappingNumberedSlurs(t *testing.T) {
+	m := attrs44div480 +
+		slurNote("C", 5, 480, "", `<slur type="start" number="1"/>`) +
+		slurNote("D", 5, 480, "", `<slur type="start" number="2"/>`) +
+		slurNote("E", 5, 480, "", `<slur type="stop" number="1"/>`) +
+		slurNote("F", 5, 240, "", `<slur type="stop" number="2"/>`) +
+		slurNote("G", 5, 240, "", "")
+	s, warns, err := Import(wrapWindPart("Soprano Sax", 0, m))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if len(warns) != 0 {
+		t.Errorf("warnings = %v, want none", warns)
+	}
+	eventTechs(t, s, []score.Technique{0, score.TechSlur, score.TechSlur, score.TechSlur, 0})
+}
+
+// TestWindSlurAcrossCollapsedChords: slur coverage belongs to the ONSET,
+// not to one chord head, so it composes with the wind chord collapse in
+// either direction. The first chord's head STARTS the arc — the chord is
+// the arc's first note, so its surviving top note keeps its attack — and
+// the second chord's head (not its surviving top note) carries the stop,
+// yet the top note still slurs.
+func TestWindSlurAcrossCollapsedChords(t *testing.T) {
+	m := attrs44div480 +
+		slurNote("D", 5, 960, "", `<slur type="start"/>`) +
+		slurNote("A", 4, 960, "<chord/>", "") +
+		slurNote("C", 5, 960, "", `<slur type="stop"/>`) +
+		slurNote("E", 5, 960, "<chord/>", "")
+	s, warns, err := Import(wrapWindPart("Soprano Sax", 0, m))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if got := findWarn(warns, "plays one note at a time"); len(got) != 1 {
+		t.Errorf("warnings = %v, want one about the resolved chords", warns)
+	}
+	evs := s.Events()
+	if len(evs) != 2 || evs[0].Key != 74 || evs[1].Key != 76 {
+		t.Fatalf("events = %v, want the chords' top notes 74 and 76", evs)
+	}
+	eventTechs(t, s, []score.Technique{0, score.TechSlur})
+}
+
+// TestWindSlurAcrossTieKeepsTie: ties and slurs are separate — a tied
+// continuation merges in score.Events regardless, and a note both tied
+// and slur-covered stays one merged event carrying TechSlur.
+func TestWindSlurAcrossTieKeepsTie(t *testing.T) {
+	m := attrs44div480 +
+		slurNote("C", 5, 480, "", `<slur type="start"/>`) +
+		slurNote("D", 5, 480, `<tie type="start"/>`, "") +
+		slurNote("D", 5, 480, `<tie type="stop"/>`, "") +
+		slurNote("C", 5, 480, "", `<slur type="stop"/>`)
+	s, warns, err := Import(wrapWindPart("Soprano Sax", 0, m))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if len(warns) != 0 {
+		t.Errorf("warnings = %v, want none", warns)
+	}
+	evs := s.Events()
+	if len(evs) != 3 || evs[1].End-evs[1].Start != 2*score.PPQ {
+		t.Fatalf("events = %v, want three with the tied pair merged into one half note", evs)
+	}
+	eventTechs(t, s, []score.Technique{0, score.TechSlur, score.TechSlur})
+}
+
+// TestWindSlurOnGraceNoteIgnored: grace notes are outside the import
+// subset, so an arc touching one is an arc missing an endpoint — the
+// main note keeps its attack (the state never saw the start), the
+// dangling stop closes nothing, and later notes are unaffected.
+func TestWindSlurOnGraceNoteIgnored(t *testing.T) {
+	m := attrs44div480 +
+		slurNote("D", 5, 0, "<grace/>", `<slur type="start"/>`) +
+		slurNote("C", 5, 960, "", `<slur type="stop"/>`) +
+		slurNote("E", 5, 960, "", "")
+	s, warns, err := Import(wrapWindPart("Soprano Sax", 0, m))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if len(warns) != 1 || len(findWarn(warns, "grace")) != 1 {
+		t.Errorf("warnings = %v, want exactly the grace-note skip", warns)
+	}
+	eventTechs(t, s, []score.Technique{0, 0})
+}
+
+// TestFrettedSlursUntouched: mapping a fretted part's slurs to hammer-ons
+// and pull-offs is a separate decision, not taken by the importer — the
+// arcs must not leak TechHammer onto a guitar line.
+func TestFrettedSlursUntouched(t *testing.T) {
+	m := `<measure number="1">` + attrs44div480 +
+		slurNote("E", 4, 480, "", `<slur type="start"/>`) +
+		slurNote("G", 4, 480, "", "") +
+		slurNote("A", 4, 960, "", `<slur type="stop"/>`) +
+		`</measure>`
+	s, _, err := Import(wrapMeasures(m))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if s.Tracks[0].Wind != nil {
+		t.Fatalf("the default part imported as a %s, want fretted", s.Tracks[0].Wind.Name)
+	}
+	eventTechs(t, s, []score.Technique{0, 0, 0})
+}
+
+// TestWindSlurRoundTripsThroughTextFormat: the imported slurs survive
+// Format and Parse through internal/score/textfmt — the wind alphabet
+// spells TechSlur as the letter l on the covered notes' tokens — which
+// proves the whole chain: parse, collapse, track build, writer, parser.
+func TestWindSlurRoundTripsThroughTextFormat(t *testing.T) {
+	m := attrs44div480 +
+		slurNote("C", 5, 480, "", `<slur type="start"/>`) +
+		slurNote("D", 5, 480, "", "") +
+		slurNote("E", 5, 960, "", `<slur type="stop"/>`)
+	s, _, err := Import(wrapWindPart("Soprano Sax", 0, m))
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	text, err := textfmt.Format(s)
+	if err != nil {
+		t.Fatalf("Format: %v", err)
+	}
+	// Written pitch on a B-flat soprano is sounding+2: C5 (72) writes as
+	// D5 and takes no letter; the covered D5 and E5 write as E5 and F#5
+	// with the slur letter on their tokens (the writer elides a repeated
+	// duration, so the quarter-note E5 carries its letter bare).
+	for _, tok := range []string{"E5l", "F#5.2l"} {
+		if !strings.Contains(string(text), tok) {
+			t.Errorf("formatted text lacks %q:\n%s", tok, text)
+		}
+	}
+	rt, err := textfmt.Parse(text, "roundtrip")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	evs, rtevs := s.Events(), rt.Events()
+	if len(rtevs) != len(evs) {
+		t.Fatalf("round trip has %d events, want %d", len(rtevs), len(evs))
+	}
+	for i := range evs {
+		if rtevs[i].Key != evs[i].Key || rtevs[i].Tech != evs[i].Tech {
+			t.Errorf("round-trip event %d = key %d tech %v, want key %d tech %v",
+				i, rtevs[i].Key, rtevs[i].Tech, evs[i].Key, evs[i].Tech)
+		}
+	}
+	eventTechs(t, rt, []score.Technique{0, score.TechSlur, score.TechSlur})
 }

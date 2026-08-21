@@ -45,7 +45,10 @@
 //     chromatic lane at sounding pitch. Chords keep only their highest
 //     note, authored <technical> fingerings are ignored, and notes below
 //     the instrument's lowest note (or past MIDI 127) are dropped — each
-//     with a warning. An explicit <staff-tuning> overrides the
+//     with a warning. A <notations><slur> arc marks every note under it
+//     past the first as TechSlur — slurred into, not re-tongued; slurs on
+//     fretted parts are not imported (a hammer-on/pull-off mapping is a
+//     separate decision). An explicit <staff-tuning> overrides the
 //     classification back to fretted: a real tab staff is stronger
 //     evidence than a program number.
 //   - Everything else unsupported degrades to a warning, never an error;
