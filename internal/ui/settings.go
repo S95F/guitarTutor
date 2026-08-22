@@ -908,7 +908,7 @@ func (s *Settings) soundFontNote() (string, color.RGBA) {
 
 func (s *Settings) soundFontText() string {
 	if s.soundFont == "" {
-		return "built-in pluck"
+		return "built-in voices (pluck for strings, reed for winds)"
 	}
 	return s.soundFont
 }
@@ -1187,7 +1187,7 @@ func (s *Settings) items() []settingsItem {
 		}
 		sfButtons = append([]settingsButton{browse}, sfButtons...)
 	}
-	b.addRow("soundfont", ellipsizeW(s.soundFontText(), 430), colHUD, sfButtons...)
+	b.addRow("instrument sounds", ellipsizeW(s.soundFontText(), 430), colHUD, sfButtons...)
 	sfNote, sfCol := s.soundFontNote()
 	b.reserveNote(settingsSfNoteLines, sfNote, sfCol)
 

@@ -1,7 +1,10 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -27,7 +30,10 @@ const (
 	edEntryMeter
 	edEntryTitle
 	edEntryCapo
+	edEntrySaveName
 )
+
+var errEntryKeep = errors.New("keep the entry open")
 
 type edEntry struct {
 	kind   edEntryKind
@@ -103,6 +109,49 @@ func (e *Editor) openEntry(kind edEntryKind) {
 	e.entry.seeded = kind != edEntryTitle
 }
 
+func (e *Editor) openSaveEntry() {
+	if e.leaving {
+		e.leaving = false
+		e.leaveAfterSave = true
+	}
+	e.entry = &edEntry{
+		kind: edEntrySaveName, prompt: "name the piece — it saves into your library",
+		hint: "letters and spaces are fine",
+		buf:  strings.TrimSuffix(e.suggestedName(), ".gtab"), max: 60,
+		allow: func(r rune) bool {
+			switch r {
+			case '/', '\\', ':', '*', '?', '"', '<', '>', '|':
+				return false
+			}
+			return r >= 32 && r != 127
+		},
+		apply: func(e *Editor, s string) error {
+			name := strings.TrimSpace(s)
+			if name == "" {
+				return fmt.Errorf("the piece needs a name")
+			}
+			target := filepath.Join(e.libraryDir, name+".gtab")
+			if _, err := os.Stat(target); err == nil {
+				return fmt.Errorf("your library already has a piece called %q — pick another name", name)
+			}
+			if !e.writeTo(target) {
+				return errEntryKeep
+			}
+			e.afterSave()
+			return nil
+		},
+	}
+	e.entry.seeded = true
+}
+
+func (e *Editor) closeEntry() {
+	if e.saveEntryOpen() {
+		e.leaveAfterSave = false
+		e.practicePending = false
+	}
+	e.entry = nil
+}
+
 func (en *edEntry) feed(runes []rune) {
 	for _, r := range runes {
 		if !en.allow(r) {
@@ -139,29 +188,30 @@ func (e *Editor) updateEntry() {
 			en.buf, en.seeded = string(r[:len(r)-1]), false
 		}
 	case inpututil.IsKeyJustPressed(ebiten.KeyEscape):
-		e.entry = nil
+		e.closeEntry()
 	case inpututil.IsKeyJustPressed(ebiten.KeyEnter) || inpututil.IsKeyJustPressed(ebiten.KeyNumpadEnter):
 		e.commitEntry()
 	}
 
-	if e.ptr.pressed && !e.ptr.over(edEntryRect()) {
-		e.entry = nil
+	if e.entry != nil && e.ptr.pressed && !e.ptr.over(edEntryRect()) {
+		e.closeEntry()
 	}
 }
 
 func (e *Editor) commitEntry() {
 	en := e.entry
-	if en.seeded {
-
+	if en.seeded && en.kind != edEntrySaveName {
 		e.entry = nil
 		return
 	}
 	if strings.TrimSpace(en.buf) == "" && en.kind != edEntryTitle {
-		e.entry = nil
+		e.closeEntry()
 		return
 	}
 	if err := en.apply(e, en.buf); err != nil {
-		e.report(err)
+		if err != errEntryKeep {
+			e.report(err)
+		}
 		return
 	}
 	e.entry = nil

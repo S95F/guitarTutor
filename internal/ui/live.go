@@ -52,6 +52,42 @@ type liveUI struct {
 	warnShown bool
 
 	warnAsserted bool
+
+	stallLastFrames int64
+	stallCount      int
+	stallPrev       string
+	stalled         bool
+}
+
+const (
+	audioStallWarning = "no sound is coming out — playback is stalled; press S for settings and check the playback device"
+	audioStallAfter   = 150
+)
+
+func (a *App) checkAudioStalled() {
+	if !a.eng.Playing() {
+		a.stallCount = 0
+		return
+	}
+	f := a.eng.TotalFrames()
+	if f != a.stallLastFrames {
+		a.stallLastFrames = f
+		a.stallCount = 0
+		if a.stalled {
+			a.stalled = false
+			a.SetLiveWarning(a.stallPrev)
+		}
+		return
+	}
+	if a.stalled {
+		return
+	}
+	a.stallCount++
+	if a.stallCount >= audioStallAfter {
+		a.stalled = true
+		a.stallPrev = a.warnMsg
+		a.SetLiveWarning(audioStallWarning)
+	}
 }
 
 func (a *App) OfferResults(rs []practice.NoteResult) {

@@ -168,6 +168,7 @@ func (a *App) SetQuitAll(fn func()) { a.quitAll = fn }
 func (a *App) Update() error {
 	a.frame++
 	a.syncLive()
+	a.checkAudioStalled()
 
 	a.stepPlayhead()
 	a.ptr = readPointer()

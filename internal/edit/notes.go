@@ -10,7 +10,7 @@ import (
 func (d *Doc) SetFret(fret int) error {
 	if w := d.Track().Wind; w != nil {
 
-		return fmt.Errorf("a %s takes note names (A-G), not fret numbers", w.Name)
+		return fmt.Errorf("%s takes note names (A-G), not fret numbers", score.An(w.Name))
 	}
 	if fret < 0 || fret > textfmt.MaxFret {
 		return fmt.Errorf("fret %d is outside 0-%d", fret, textfmt.MaxFret)
@@ -149,8 +149,8 @@ func (d *Doc) SetDuration(ticks int64) error {
 		return d.refitCurrentBar(d.cur.Beat)
 	})
 	if err != nil {
-		return fmt.Errorf("a %s does not fit in what is left of bar %d: %w",
-			durationLabel(ticks), d.cur.Bar+1, err)
+		return fmt.Errorf("%s does not fit in what is left of bar %d: %w",
+			score.An(durationLabel(ticks)), d.cur.Bar+1, err)
 	}
 	d.dur = ticks
 	return nil
@@ -213,7 +213,7 @@ func (d *Doc) ToggleTie() error {
 func (d *Doc) ToggleTech(t score.Technique) error {
 	if w := d.Track().Wind; w != nil && t&(score.TechPull|score.TechDead) != 0 {
 
-		return fmt.Errorf("pull-offs and dead notes do not exist on a %s", w.Name)
+		return fmt.Errorf("pull-offs and dead notes do not exist on %s", score.An(w.Name))
 	}
 	str := d.cur.Str
 	return d.mutate(func() error {

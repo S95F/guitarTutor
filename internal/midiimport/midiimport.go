@@ -514,7 +514,7 @@ func (im *importer) normalize(rt *rawTrack) {
 	}
 	if truncated > 0 {
 		if rt.wind != nil {
-			im.warnf("%s: truncated %d note(s) still sounding at the next attack (a %s plays one note at a time)", rt.desc(), truncated, rt.wind.Name)
+			im.warnf("%s: truncated %d note(s) still sounding at the next attack (%s plays one note at a time)", rt.desc(), truncated, score.An(rt.wind.Name))
 		} else {
 			im.warnf("%s: truncated %d note(s) overlapping a later note on the same string", rt.desc(), truncated)
 		}
@@ -559,8 +559,8 @@ func (im *importer) assignWind(rt *rawTrack) {
 			continue
 		}
 		if n.key > 127-w.Transpose {
-			im.warnf("%s: dropped note (key %d) at tick %d: its written pitch on a %s is past MIDI 127",
-				rt.desc(), n.key, n.start, w.Name)
+			im.warnf("%s: dropped note (key %d) at tick %d: its written pitch on %s is past MIDI 127",
+				rt.desc(), n.key, n.start, score.An(w.Name))
 			continue
 		}
 		note := w.NoteFor(n.key)
@@ -580,7 +580,7 @@ func (im *importer) assignWind(rt *rawTrack) {
 		prev = n
 	}
 	if dropped > 0 {
-		im.warnf("%s: dropped %d chord note(s), keeping the highest; a %s plays one note at a time",
+		im.warnf("%s: dropped %d chord note(s), keeping the highest; %s plays one note at a time",
 			rt.desc(), dropped, w.Name)
 	}
 }

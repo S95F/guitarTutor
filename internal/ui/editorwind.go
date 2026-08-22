@@ -70,7 +70,9 @@ func (e *Editor) typeNoteLetter(class int) {
 			best = cand
 		}
 	}
-	e.report(e.doc.SetWindPitch(best))
+	if e.report(e.doc.SetWindPitch(best)) {
+		e.auditionNote()
+	}
 }
 
 func abs(v int) int {

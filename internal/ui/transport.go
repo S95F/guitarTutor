@@ -580,8 +580,11 @@ func (a *App) drawTrackStrip(dst *ebiten.Image, l practiceLayout, p pointer) {
 		}
 		name := a.sc.Tracks[i].Name
 		if name == "" {
-
-			name = "untitled"
+			if w := a.sc.Tracks[i].Wind; w != nil {
+				name = w.Name
+			} else {
+				name = "guitar"
+			}
 		}
 		muted := a.mutedAudibly(i)
 		fill, edge, col := colPanel, colPanelEdge, colNote

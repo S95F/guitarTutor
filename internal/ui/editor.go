@@ -85,13 +85,17 @@ type Editor struct {
 	practicePending bool
 
 	saveDialog func(suggest string)
-	dialogBusy bool
-	mailMu     sync.Mutex
-	mail       *string
+	libraryDir string
+
+	leaveAfterSave bool
+	dialogBusy     bool
+	mailMu         sync.Mutex
+	mail           *saveAnswer
 
 	onSaved func(path string)
 
-	practice func(path string)
+	practice   func(path string)
+	auditionFn func(program, key int)
 }
 
 func NewEditor(sh *Shell) *Editor {
@@ -128,13 +132,35 @@ func NewEditorForText(sh *Shell, src []byte, path string) *Editor {
 
 func (e *Editor) SetSaveDialog(fn func(suggest string)) { e.saveDialog = fn }
 
+func (e *Editor) SetLibraryDir(dir string) { e.libraryDir = dir }
+
 func (e *Editor) SetOnSaved(fn func(path string)) { e.onSaved = fn }
 
 func (e *Editor) SetPractice(fn func(path string)) { e.practice = fn }
 
+func (e *Editor) SetAudition(fn func(program, key int)) { e.auditionFn = fn }
+
+func (e *Editor) auditionNote() {
+	if e.auditionFn == nil {
+		return
+	}
+	tr := e.doc.Track()
+	if n, ok := e.doc.NoteAt(e.doc.Cursor().Str); ok && n.Tech&score.TechDead == 0 {
+		e.auditionFn(tr.Program, tr.Pitch(n))
+	}
+}
+
+type saveAnswer struct{ path, problem string }
+
 func (e *Editor) OfferSavePath(path string) {
 	e.mailMu.Lock()
-	e.mail = &path
+	e.mail = &saveAnswer{path: path}
+	e.mailMu.Unlock()
+}
+
+func (e *Editor) OfferSaveProblem(msg string) {
+	e.mailMu.Lock()
+	e.mail = &saveAnswer{problem: msg}
 	e.mailMu.Unlock()
 }
 
@@ -913,13 +939,17 @@ func (e *Editor) handleKey(k ebiten.Key, m mods) error {
 	case ebiten.KeyUp:
 		if wind {
 
-			e.report(e.doc.NudgePitch(nudgeStep(m)))
+			if e.report(e.doc.NudgePitch(nudgeStep(m))) {
+				e.auditionNote()
+			}
 		} else {
 			e.doc.MoveString(-1)
 		}
 	case ebiten.KeyDown:
 		if wind {
-			e.report(e.doc.NudgePitch(-nudgeStep(m)))
+			if e.report(e.doc.NudgePitch(-nudgeStep(m))) {
+				e.auditionNote()
+			}
 		} else {
 			e.doc.MoveString(1)
 		}
@@ -962,7 +992,7 @@ func (e *Editor) handleKey(k ebiten.Key, m mods) error {
 
 	case ebiten.KeyH:
 		if wind {
-			e.report(fmt.Errorf("no hammer-ons on a %s — l marks a slur", e.doc.Track().Wind.Name))
+			e.report(fmt.Errorf("no hammer-ons on %s — l marks a slur", score.An(e.doc.Track().Wind.Name)))
 		} else {
 			e.report(e.doc.ToggleTech(score.TechHammer))
 		}
@@ -970,7 +1000,7 @@ func (e *Editor) handleKey(k ebiten.Key, m mods) error {
 		if m.shift {
 			e.saveAndPractice()
 		} else if wind {
-			e.report(fmt.Errorf("no pull-offs on a %s — l marks a slur", e.doc.Track().Wind.Name))
+			e.report(fmt.Errorf("no pull-offs on %s — l marks a slur", score.An(e.doc.Track().Wind.Name)))
 		} else {
 			e.report(e.doc.ToggleTech(score.TechPull))
 		}
@@ -989,7 +1019,7 @@ func (e *Editor) handleKey(k ebiten.Key, m mods) error {
 		e.report(e.doc.ToggleTech(score.TechVibrato))
 	case ebiten.KeyX:
 		if wind {
-			e.report(fmt.Errorf("no dead notes on a %s — R makes the beat a rest", e.doc.Track().Wind.Name))
+			e.report(fmt.Errorf("no dead notes on %s — R makes the beat a rest", score.An(e.doc.Track().Wind.Name)))
 		} else {
 			e.report(e.doc.ToggleTech(score.TechDead))
 		}
@@ -1019,7 +1049,7 @@ func (e *Editor) handleKey(k ebiten.Key, m mods) error {
 	case ebiten.KeyU:
 		if m.shift {
 			if wind {
-				e.report(fmt.Errorf("a %s has no tuning to cycle", e.doc.Track().Wind.Name))
+				e.report(fmt.Errorf("%s has no tuning to cycle", score.An(e.doc.Track().Wind.Name)))
 			} else {
 				e.cycleTuning()
 			}
@@ -1074,6 +1104,7 @@ func (e *Editor) typeFret(digit int) {
 		return
 	}
 	e.fretDigits, e.fretUntil = next, e.frame+edFretHoldFrames
+	e.auditionNote()
 }
 
 func (e *Editor) commitFretDigits() { e.fretDigits, e.fretUntil = "", 0 }
@@ -1237,7 +1268,11 @@ func (e *Editor) redo() {
 
 func (e *Editor) save() bool {
 	if e.path == "" {
-		e.saveAs()
+		if e.libraryDir != "" {
+			e.openSaveEntry()
+		} else {
+			e.saveAs()
+		}
 		return false
 	}
 	return e.writeTo(e.path)
@@ -1253,6 +1288,23 @@ func (e *Editor) saveAs() {
 	}
 	e.dialogBusy = true
 	e.saveDialog(e.suggestedName())
+}
+
+func (e *Editor) saveEntryOpen() bool { return e.entry != nil && e.entry.kind == edEntrySaveName }
+
+func (e *Editor) afterSave() {
+	if e.leaveAfterSave {
+		e.leaveAfterSave = false
+		e.practicePending = false
+		e.finishLeaving()
+		return
+	}
+	if e.practicePending {
+		e.practicePending = false
+		if e.practice != nil {
+			e.practice(e.path)
+		}
+	}
 }
 
 func (e *Editor) suggestedName() string {
@@ -1299,7 +1351,13 @@ func (e *Editor) drainDialog() {
 		return
 	}
 	e.dialogBusy = false
-	path := *got
+	if got.problem != "" {
+		e.practicePending = false
+		e.leaving = false
+		e.ShowError(got.problem)
+		return
+	}
+	path := got.path
 	if path == "" {
 
 		e.practicePending = false
@@ -1343,7 +1401,7 @@ func (e *Editor) saveAndPractice() {
 	if e.doc.Dirty() || e.path == "" {
 		if !e.save() {
 
-			e.practicePending = e.dialogBusy
+			e.practicePending = e.dialogBusy || e.saveEntryOpen()
 			return
 		}
 	}

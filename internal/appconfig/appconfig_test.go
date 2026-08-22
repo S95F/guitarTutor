@@ -39,8 +39,8 @@ func TestLoadMissingFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load on missing file: %v, want nil", err)
 	}
-	if !reflect.DeepEqual(c, Config{}) {
-		t.Errorf("Load = %+v, want zero Config", c)
+	if !reflect.DeepEqual(c, Config{CountInBeats: DefaultCountInBeats}) {
+		t.Errorf("Load = %+v, want the first-run defaults", c)
 	}
 }
 

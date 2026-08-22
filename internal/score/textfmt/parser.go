@@ -250,7 +250,7 @@ func (p *parser) beatWord(tied bool) error {
 func (p *parser) beatChord(tied bool, start pos) error {
 	p.ensureTrack()
 	if w := p.track.Wind; w != nil {
-		return p.errAt(start, "chord on a %s, which plays one note at a time", w.Name)
+		return p.errAt(start, "chord on %s, which plays one note at a time", score.An(w.Name))
 	}
 	p.sc.next()
 	var notes []score.Note
@@ -358,7 +358,7 @@ func (p *parser) windNote(t *tokScan, w *score.WindInstrument, tied bool) (score
 	np := t.pos()
 	written, ok := t.pitch()
 	if !ok {
-		return score.Note{}, p.errAt(np, "malformed beat %q: a %s note is a written pitch name like %s", t.tok, w.Name, pitchName(w.Written(w.LowSounding)))
+		return score.Note{}, p.errAt(np, "malformed beat %q: %s note is a written pitch name like %s", t.tok, score.An(w.Name), pitchName(w.Written(w.LowSounding)))
 	}
 	name := t.tok[:t.i]
 	sounding := w.Sounding(written)
@@ -549,10 +549,10 @@ func (p *parser) directive() error {
 			return p.errAt(tp, "unknown instrument %q (this app knows: %s)", iname, strings.Join(score.WindNames(), ", "))
 		}
 		if p.track.Wind != nil {
-			return p.errAt(tp, "the track is already a %s", p.track.Wind.Name)
+			return p.errAt(tp, "the track is already %s", score.An(p.track.Wind.Name))
 		}
 		if p.tuningSet || p.capoSet {
-			return p.errAt(tp, `\instrument cannot follow \tuning or \capo: a %s has no strings`, w.Name)
+			return p.errAt(tp, `\instrument cannot follow \tuning or \capo: %s has no strings`, score.An(w.Name))
 		}
 		p.track.Wind = w
 		p.track.Tuning = nil
@@ -567,7 +567,7 @@ func (p *parser) directive() error {
 			return err
 		}
 		if w := p.track.Wind; w != nil {
-			return p.errAt(tp, `\tuning on a %s, which has no strings`, w.Name)
+			return p.errAt(tp, `\tuning on %s, which has no strings`, score.An(w.Name))
 		}
 		p.tuningSet = true
 		args := p.sc.args()
@@ -591,7 +591,7 @@ func (p *parser) directive() error {
 			return err
 		}
 		if w := p.track.Wind; w != nil {
-			return p.errAt(tp, `\capo on a %s, which has no capo`, w.Name)
+			return p.errAt(tp, `\capo on %s, which has no capo`, score.An(w.Name))
 		}
 		p.capoSet = true
 		arg, err := p.oneArg(tp, name)

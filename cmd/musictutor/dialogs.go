@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/ncruces/zenity"
@@ -37,12 +38,12 @@ func pickPieceFile(startDir string) (path, errMsg string) {
 	case errors.Is(err, zenity.ErrCanceled):
 		return "", ""
 	case err != nil:
-		return "", err.Error()
+		return "", dialogProblem(err, "or drop the file anywhere on this window")
 	}
 	return p, ""
 }
 
-func pickSavePath(suggest string) string {
+func pickSavePath(suggest string) (path, errMsg string) {
 	opts := []zenity.Option{
 		zenity.Title("Save the piece"),
 		zenity.ConfirmOverwrite(),
@@ -52,10 +53,20 @@ func pickSavePath(suggest string) string {
 		opts = append(opts, zenity.Filename(suggest))
 	}
 	p, err := zenity.SelectFileSave(opts...)
-	if err != nil {
-		return ""
+	switch {
+	case errors.Is(err, zenity.ErrCanceled):
+		return "", ""
+	case err != nil:
+		return "", dialogProblem(err, "or plain ctrl+S saves into your library without a dialog")
 	}
-	return p
+	return p, ""
+}
+
+func dialogProblem(err error, instead string) string {
+	if errors.Is(err, exec.ErrNotFound) || strings.Contains(err.Error(), "executable file not found") {
+		return "file dialogs need the \"zenity\" program — install it (on Ubuntu: sudo apt install zenity), " + instead
+	}
+	return "the file dialog failed (" + err.Error() + ") — " + instead
 }
 
 func pickSoundFont() string {

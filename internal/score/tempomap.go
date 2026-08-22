@@ -112,10 +112,10 @@ func (s *Score) Validate() error {
 		if tr.Wind != nil {
 
 			if len(tr.Tuning) != 0 {
-				return fmt.Errorf("track %d (%s): a %s has no strings, but the track carries a tuning", ti, tr.Name, tr.Wind.Name)
+				return fmt.Errorf("track %d (%s): %s has no strings, but the track carries a tuning", ti, tr.Name, An(tr.Wind.Name))
 			}
 			if tr.Capo != 0 {
-				return fmt.Errorf("track %d (%s): a %s has no capo", ti, tr.Name, tr.Wind.Name)
+				return fmt.Errorf("track %d (%s): %s has no capo", ti, tr.Name, An(tr.Wind.Name))
 			}
 		}
 		wantStart := int64(0)
@@ -133,7 +133,7 @@ func (s *Score) Validate() error {
 					return fmt.Errorf("track %d bar %d: non-positive beat duration", ti, bi)
 				}
 				if tr.Wind != nil && len(beat.Notes) > 1 {
-					return fmt.Errorf("track %d bar %d: %d notes in one beat; a %s plays one note at a time", ti, bi, len(beat.Notes), tr.Wind.Name)
+					return fmt.Errorf("track %d bar %d: %d notes in one beat; %s plays one note at a time", ti, bi, len(beat.Notes), An(tr.Wind.Name))
 				}
 
 				var seen uint64
@@ -150,13 +150,13 @@ func (s *Score) Validate() error {
 				for _, n := range beat.Notes {
 					if tr.Wind != nil {
 						if n.String != 1 {
-							return fmt.Errorf("track %d bar %d: string %d on a %s, whose one lane is string 1", ti, bi, n.String, tr.Wind.Name)
+							return fmt.Errorf("track %d bar %d: string %d on %s, whose one lane is string 1", ti, bi, n.String, An(tr.Wind.Name))
 						}
 						if n.Fret < 0 {
 							return fmt.Errorf("track %d bar %d: note below the %s's lowest note", ti, bi, tr.Wind.Name)
 						}
 						if n.Tech&(TechPull|TechDead) != 0 {
-							return fmt.Errorf("track %d bar %d: pull-offs and dead notes do not exist on a %s", ti, bi, tr.Wind.Name)
+							return fmt.Errorf("track %d bar %d: pull-offs and dead notes do not exist on %s", ti, bi, An(tr.Wind.Name))
 						}
 					} else {
 						if n.String < 1 || n.String > len(tr.Tuning) {

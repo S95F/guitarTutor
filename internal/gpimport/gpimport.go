@@ -582,8 +582,8 @@ func (im *importer) buildTrack(orig int, gt *gpTrack, role score.TrackRole) *sco
 	}
 
 	if tc.chords > 0 {
-		im.warnf("%s: kept only the highest note of %d chord(s); a %s plays one note at a time",
-			trackLabel(gt, orig), tc.chords, tc.wind.Name)
+		im.warnf("%s: kept only the highest note of %d chord(s); %s plays one note at a time",
+			trackLabel(gt, orig), tc.chords, score.An(tc.wind.Name))
 	}
 	if tc.mismatched > 0 {
 		im.warnf("%s: the written pitch on %d note(s) disagrees with the %s's transposition; the concert pitch wins",
@@ -1053,8 +1053,8 @@ func (im *importer) windBeatNotes(orig, mi int, gbt *gpBeat, tc *trackConv) []sc
 			continue
 		}
 		if key > 127-w.Transpose {
-			im.warnf("track %d bar %d: dropped note (key %d): its written pitch on a %s is past MIDI 127",
-				orig+1, mi+1, key, w.Name)
+			im.warnf("track %d bar %d: dropped note (key %d): its written pitch on %s is past MIDI 127",
+				orig+1, mi+1, key, score.An(w.Name))
 			continue
 		}
 		kept++

@@ -29,6 +29,7 @@ func runShell(initialPath string) error {
 
 		fmt.Fprintln(os.Stderr, "warning: config unreadable, starting with defaults:", err)
 	}
+	seedLibrary()
 	prefs := &shellPrefs{cfg: cfg}
 	opener := &shellOpener{prefs: prefs}
 	defer opener.CloseCurrent()
@@ -112,8 +113,18 @@ func (o *shellOpener) editPiece(path string) {
 func (o *shellOpener) installEditor(ed *ui.Editor) {
 
 	ed.SetSaveDialog(func(suggest string) {
-		go func() { ed.OfferSavePath(pickSavePath(o.suggestSavePath(suggest))) }()
+		go func() {
+			p, problem := pickSavePath(o.suggestSavePath(suggest))
+			if problem != "" {
+				ed.OfferSaveProblem(problem)
+				return
+			}
+			ed.OfferSavePath(p)
+		}()
 	})
+	if dir, err := appconfig.EnsurePiecesDir(); err == nil {
+		ed.SetLibraryDir(dir)
+	}
 
 	ed.SetOnSaved(func(p string) {
 		o.prefs.AddCreated(p)
@@ -123,6 +134,7 @@ func (o *shellOpener) installEditor(ed *ui.Editor) {
 	})
 
 	ed.SetPractice(func(p string) { o.practiseFromEditor(ed, p) })
+	ed.SetAudition(o.audition)
 	o.shell.Show(ed)
 }
 
@@ -379,9 +391,16 @@ func (a *shellAudio) Devices() (capture, playback []ui.DeviceOption, err error) 
 func toOptions(devs []audio.DeviceInfo) []ui.DeviceOption {
 	out := make([]ui.DeviceOption, len(devs))
 	for i, d := range devs {
-		out[i] = ui.DeviceOption{ID: d.ID, Name: d.Name, Default: d.Default}
+		out[i] = ui.DeviceOption{ID: d.ID, Name: deviceDisplayName(d.Name), Default: d.Default}
 	}
 	return out
+}
+
+func deviceDisplayName(name string) string {
+	if strings.Contains(name, "Discard all samples") {
+		return "no real audio device (silent)"
+	}
+	return name
 }
 
 func (a *shellAudio) CalibratedOffset(captureID, playbackID string) (int, bool) {

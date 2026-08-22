@@ -51,7 +51,10 @@ type Config struct {
 
 const MaxSyncTrimMS = 250
 
-const MaxCountInBeats = 8
+const (
+	MaxCountInBeats     = 8
+	DefaultCountInBeats = 2
+)
 
 func Path() (string, error) {
 	if dir := os.Getenv(EnvConfigDir); dir != "" {
@@ -84,7 +87,7 @@ func Load() (Config, error) {
 	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return Config{}, nil
+		return Config{CountInBeats: DefaultCountInBeats}, nil
 	}
 	if err != nil {
 		return Config{}, fmt.Errorf("appconfig: reading %s: %w", path, err)

@@ -37,7 +37,7 @@ func (b *Browser) stepList() []onboardStep {
 			detail: "no audio capture backend, so the app cannot score your playing",
 		})
 	} else {
-		detail := "the interface your guitar or mic plugs into"
+		detail := "where your guitar or mic plugs in — click here or press S"
 		if capID != "" {
 			detail = "chosen; change it in settings whenever you move interfaces"
 		}
@@ -53,15 +53,15 @@ func (b *Browser) stepList() []onboardStep {
 			_, calibrated = svc.Audio.CalibratedOffset(capID, playID)
 		}
 		steps = append(steps, onboardStep{
-			title:  "Measure the round trip",
-			detail: "one pass, so scoring knows when you actually played",
+			title:  "Calibrate the timing",
+			detail: "one pass of clicks that measures your setup's delay",
 			done:   calibrated,
 			act:    b.settings,
 		})
 	}
 	steps = append(steps, onboardStep{
 		title:  "Open a piece, or write one",
-		detail: "import a file, or start from a blank staff",
+		detail: "import a file (O), or start from a blank staff (N)",
 		done:   b.hasAnyPiece(),
 		act:    func() { b.launchOpenDialog("") },
 	})

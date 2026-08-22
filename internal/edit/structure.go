@@ -154,7 +154,7 @@ func (d *Doc) SetTrackName(name string) error {
 func (d *Doc) SetCapo(fret int) error {
 	if w := d.Track().Wind; w != nil {
 
-		return fmt.Errorf("a %s has no capo", w.Name)
+		return fmt.Errorf("%s has no capo", score.An(w.Name))
 	}
 	if fret < 0 || fret > textfmt.MaxFret {
 		return fmt.Errorf("a capo has to be at fret 0-%d, not %d", textfmt.MaxFret, fret)
@@ -187,7 +187,7 @@ func (d *Doc) SetRole(role score.TrackRole) error {
 func (d *Doc) SetTuning(tuning score.Tuning) error {
 	if w := d.Track().Wind; w != nil {
 
-		return fmt.Errorf("a %s has no strings to tune", w.Name)
+		return fmt.Errorf("%s has no strings to tune", score.An(w.Name))
 	}
 	if len(tuning) == 0 {
 		return fmt.Errorf("a track needs at least one string")
@@ -306,7 +306,7 @@ func checkPitches(tr *score.Track) error {
 			for _, n := range bt.Notes {
 				if tr.Wind != nil {
 					if n.String != 1 {
-						return fmt.Errorf("bar %d has a note on string %d, and a %s has one lane, string 1", bi+1, n.String, tr.Wind.Name)
+						return fmt.Errorf("bar %d has a note on string %d, and %s has one lane, string 1", bi+1, n.String, score.An(tr.Wind.Name))
 					}
 					if n.Fret < 0 {
 						return fmt.Errorf("bar %d has a note below the %s's lowest note", bi+1, tr.Wind.Name)

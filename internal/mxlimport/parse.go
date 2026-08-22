@@ -474,7 +474,7 @@ func (im *importer) parsePart(pi int, decl *xmlScorePart, xp *xmlPart, order []i
 	}
 
 	if pd.wind != nil && authoredFing > 0 {
-		im.warnf("%s: ignored authored <technical> string/fret on %d note(s); a %s has no strings to check them against", label, authoredFing, pd.wind.Name)
+		im.warnf("%s: ignored authored <technical> string/fret on %d note(s); %s has no strings to check them against", label, authoredFing, score.An(pd.wind.Name))
 	}
 	if pd.wind == nil && badFing > 0 {
 		im.warnf("%s: %d note(s) with out-of-range <technical> string/fret; fingering inferred instead", label, badFing)
@@ -581,7 +581,7 @@ func (im *importer) finishWind(pd *partData, label string) {
 			continue
 		}
 		if n.key > 127-w.Transpose {
-			im.warnf("%s: dropped note (key %d) at tick %d: its written pitch on a %s is past MIDI 127", label, n.key, n.start, w.Name)
+			im.warnf("%s: dropped note (key %d) at tick %d: its written pitch on %s is past MIDI 127", label, n.key, n.start, score.An(w.Name))
 			continue
 		}
 		kept = append(kept, n)
@@ -603,7 +603,7 @@ func (im *importer) finishWind(pd *partData, label string) {
 	}
 	pd.notes = kept
 	if chords > 0 {
-		im.warnf("%s: kept only the highest note of %d chord(s); a %s plays one note at a time", label, chords, w.Name)
+		im.warnf("%s: kept only the highest note of %d chord(s); %s plays one note at a time", label, chords, score.An(w.Name))
 	}
 	for _, n := range pd.notes {
 		p := w.NoteFor(n.key)

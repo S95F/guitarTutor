@@ -58,3 +58,10 @@ func WindNames() []string {
 	}
 	return names
 }
+
+func An(noun string) string {
+	if noun != "" && strings.ContainsRune("aeiouAEIOU", rune(noun[0])) {
+		return "an " + noun
+	}
+	return "a " + noun
+}

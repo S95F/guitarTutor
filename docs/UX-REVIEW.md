@@ -118,6 +118,36 @@ wall-like. The `?` overlay already holds the full list; the footer could
 show the six most-used keys per view and end with "? more". Low priority:
 the current line is honest, just dense.
 
+## Follow-up: what was fixed (same day)
+
+Re-verified end to end in the same rig — fresh HOME, no audio, no zenity:
+
+- **P0-1 fixed.** Plain save no longer touches an OS dialog: ctrl+S (and the
+  quit prompt's Save, and shift+P on an unsaved piece) opens an in-window
+  "name the piece" prompt that writes into the library, refuses collisions
+  by name, and carries the pending leave/practice through. ctrl+shift+S
+  keeps the OS dialog for save-elsewhere, and its failures now land on the
+  status line instead of vanishing.
+- **P0-2 fixed.** A piece "playing" while the audio clock is frozen for
+  ~2.5 s raises a dismissable banner naming the remedy; it clears itself
+  the moment audio moves, restoring whatever warning it covered.
+- **P0-3 fixed.** Dialog failures say what to install and what works
+  instead; the ALSA null device is labelled "no real audio device
+  (silent)" in both device rows.
+- **P1 all fixed.** `score.An` ends the "a alto sax" class everywhere
+  (including "a eighth"); the getting-started cards say "Calibrate the
+  timing", carry their key hints, and fit; unnamed tracks are chipped by
+  their instrument; the settings row reads "instrument sounds — built-in
+  voices (pluck for strings, reed for winds)"; a fresh config defaults to
+  a 2-beat count-in (existing configs untouched).
+- **P2-9 fixed.** First run seeds the library with two demo pieces (one
+  guitar, one soprano sax with a slur), only when the pieces folder does
+  not exist yet, so a curated library is never re-seeded.
+- **P2-10 fixed.** The editor auditions each note as it is placed or
+  nudged — the track's own voice (pluck or reed), a short tone, skipped
+  for dead notes and silently absent when audio is.
+- **P2-11 left as is.** The dense footer stays; `?` remains the full list.
+
 ## Verified fine under adversity
 
 The instrument picker, first-steps guidance, and wind editor all behaved

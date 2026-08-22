@@ -1114,7 +1114,7 @@ func TestSettingsSoundFontWithoutPicker(t *testing.T) {
 		t.Fatalf("first row = %v, want the soundfont row", r)
 	}
 	s.activate()
-	if p.soundFont != "" || s.soundFontText() != "built-in pluck" {
+	if p.soundFont != "" || s.soundFontText() != "built-in voices (pluck for strings, reed for winds)" {
 		t.Errorf("after clear: prefs %q, text %q", p.soundFont, s.soundFontText())
 	}
 	if p.saves != 1 {
